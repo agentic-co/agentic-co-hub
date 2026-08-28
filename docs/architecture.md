@@ -98,6 +98,39 @@ A queue with a **fenced lease protocol**: compare-and-swap claim plus a fencing 
 a worker whose lease expired cannot report results over the work that replaced it. One
 uniqueness rule on the ingest path, so no source can invent its own idempotency mechanism.
 
+### `SOP` — a procedure with a version history
+
+A standard operating procedure is an object, not a block of text pasted into
+every item that follows it. Work items **pin** the `(sop_id, version)` they were
+created under, and the pin is immutable for the life of the item.
+
+**A template is not an instance.** An SOP never enters the queue — if it did it
+would be claimable, and a template that can be completed is a bug. `instantiate()`
+creates work items from it.
+
+Pinning is what makes the procedure evaluable at all: an instance that referenced
+"the SOP" rather than "v3" would attribute its outcome to text that has since
+changed. `outcomes_by_version()` groups finished instances by the version they
+ran under, reporting **counts** rather than a bare success rate — a rate is
+gameable in both directions, since a procedure applied to progressively harder
+cases looks like it is degrading, and failures re-filed as new items look like
+improvement. In-flight work counts as neither outcome, and a version with nothing
+finished reports `None`, never `0`.
+
+That pin is the same relationship a snapshot has to a document, so the same
+question applies: `drifted()` reports in-flight items whose procedure has moved.
+It reports and never migrates — re-pointing running work at a newer procedure
+changes the job under whoever is doing it.
+
+Drafting a revision does not promote it. The version in use stays in use until
+it is explicitly activated, so writing an improvement is a safe act rather than
+one that quietly takes the live procedure out of service.
+
+**The improvement loop is deliberately absent.** Nothing proposes a better
+version from observed failures. That machinery is worthless without instances to
+learn from, and building it first would mean tuning against imagination — the
+measurement ships now so the loop is possible later.
+
 ### Review routing *(planned)*
 
 A decision reaches a **named** human, with an acknowledgement, a claim deadline, an
