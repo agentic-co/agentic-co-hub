@@ -330,11 +330,6 @@ def test_the_reaper_does_not_revoke_a_lease_that_went_live_mid_sweep(queue, monk
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="nothing anywhere transitions BLOCKED -> PENDING; create() is the only "
-    "writer of WorkStatus.BLOCKED and there is no reader that clears it",
-)
 def test_a_blocked_item_becomes_claimable_once_its_blocker_is_done(queue):
     """An item with `blocked_by` is filed and can never run.
 

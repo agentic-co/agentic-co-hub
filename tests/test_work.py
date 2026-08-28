@@ -348,11 +348,13 @@ def test_a_blocked_item_becomes_ready_when_its_blocker_is_done(queue):
     claimed = queue.claim(blocker.id, "worker-a", now=NOW)
     queue.report_result(blocker.id, claimed.lease_attempt, WorkStatus.DONE)
 
-    # It was parked in BLOCKED at creation; readiness is about dependencies.
-    stored = queue.get(blocked.id)
-    stored.status = WorkStatus.PENDING
-    queue._mutate(blocked.id, lambda i: {"status": WorkStatus.PENDING})
+    # No hand-written transition. This test used to synthesize the state change
+    # the library never performed — `queue._mutate(..., PENDING)` with a comment
+    # excusing it — which is how a test can describe a working system that does
+    # not exist. Blockedness is derived from the dependency list now, so nothing
+    # has to move for this to become true.
     assert blocked.id in {i.id for i in queue.ready(now=NOW)}
+    assert queue.claim(blocked.id, "worker-b", now=NOW) is not None
 
 
 def test_ready_and_claim_agree_about_an_expired_lease(queue):

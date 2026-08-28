@@ -75,6 +75,22 @@ class LeaseError(WorkError):
     """
 
 
+class BlockedError(WorkError):
+    """The item's dependencies are not done — a caller error, not contention.
+
+    Raised rather than returning `None`, because `None` means "someone else got
+    there first, try again in a moment" and retrying a blocked item cannot help
+    until something unrelated finishes. A poller should never see this: `ready()`
+    filters blocked items out, so reaching here means the id came from somewhere
+    that does not know about dependencies, and that is worth telling the caller
+    loudly rather than absorbing into a quiet miss.
+
+    Distinct from `CapabilityError` because the two have different answers:
+    a capability mismatch means "not on this worker, ever"; this means "not yet,
+    on any worker".
+    """
+
+
 class CapabilityError(WorkError):
     """This worker can never run this item — a misroute, not contention.
 
@@ -98,6 +114,11 @@ class DuplicateSuppressed(Exception):
 class WorkStatus(str, Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
+    # DERIVED, never stored. See `WorkItem.unmet_blockers`: an item's
+    # dependency list is the fact, and a status field copying it is a cache
+    # that nothing invalidates. Storing it stranded every dependent item ever
+    # filed — `create()` wrote BLOCKED and no code anywhere wrote it back.
+    # Reported by `blocked_items()`; never written to disk.
     BLOCKED = "blocked"
     DONE = "done"
     FAILED = "failed"
@@ -166,6 +187,16 @@ class WorkItem:
             return False
         expires = _parse(self.lease_expires_at)
         return expires is not None and expires > now
+
+    def unmet_blockers(self, done_ids: set[str]) -> list[str]:
+        """Dependencies not yet done. Empty means nothing is holding this back.
+
+        This is the single source of truth for blockedness. `WorkStatus.BLOCKED`
+        exists for REPORTING and is computed from this — it is never written to
+        disk, because a stored copy of a derived fact is a cache, and this one
+        had no invalidation path at all.
+        """
+        return [dep for dep in self.blocked_by if dep not in done_ids]
 
     def to_json(self) -> str:
         payload = asdict(self)
@@ -372,8 +403,6 @@ class Queue:
             natural_key=key,
             metadata=dict(metadata or {}),
         )
-        if item.blocked_by:
-            item.status = WorkStatus.BLOCKED
 
         with self._locked():
             raw_rows, quarantined = self._read_raw()
@@ -431,7 +460,7 @@ class Queue:
                 continue
             if item.status == WorkStatus.IN_PROGRESS and item.lease_active_at(at):
                 continue
-            if any(dep not in done for dep in item.blocked_by):
+            if item.unmet_blockers(done):
                 continue
             if item.lease_active_at(at):
                 continue
@@ -491,6 +520,7 @@ class Queue:
         """
         at = now or _now()
         held = frozenset(capabilities or ())
+        done_ids = {i.id for i in self._read_all() if i.status == WorkStatus.DONE}
 
         def cas(item: WorkItem) -> dict:
             # Capability BEFORE the CAS checks, on purpose: given a permanent
@@ -506,6 +536,18 @@ class Queue:
                     f"{', '.join(missing)}. Run it on a worker that declares "
                     f"those capabilities, or fix the item's requires. "
                     f"Retrying here cannot help."
+                )
+            unmet = item.unmet_blockers(done_ids)
+            if unmet:
+                # `ready()` filtered these out and `claim()` did not look at all,
+                # so a caller holding an id from anywhere else could start work
+                # whose prerequisites had not happened. The two must agree, or
+                # "ready" is advice rather than a contract.
+                raise BlockedError(
+                    f"cannot claim {item_id} for {agent!r}: it is blocked by "
+                    f"{', '.join(unmet)}, which {'is' if len(unmet) == 1 else 'are'} "
+                    f"not done. Finish those first — this is not contention and "
+                    f"retrying now cannot help."
                 )
             if item.lease_active_at(at):
                 raise LeaseError(
@@ -537,6 +579,9 @@ class Queue:
 
         try:
             return self._mutate(item_id, cas)
+        except BlockedError as exc:
+            print(f"[work] claim REFUSED (blocked): {exc}", file=sys.stderr)
+            raise
         except CapabilityError as exc:
             # Louder than a lost race, and it propagates. The check raised
             # before anything was written, so the store is byte-identical.
