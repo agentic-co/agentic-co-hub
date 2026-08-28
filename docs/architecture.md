@@ -61,8 +61,13 @@ floor, the granularity rule is wrong and the fix is `k`, not more claims.
 ### `Snapshot` — a pointer, never a copy
 
 *"I am working from this version of that."* One call records a URI plus a cheap version
-token — a git SHA, a content hash, a document eTag. **The body is never fetched or
-stored.**
+token — a git SHA, a content hash, a document eTag. **The body is never stored**, which is
+asserted against the database file's raw bytes rather than through the API.
+
+*Never fetched* is the intent and is not currently true in one case: `resolve_https` sends
+a HEAD request, but urllib re-issues a redirect as GET, so a redirected pointer transfers
+the body it then discards. Open defect, failing test against it. Nothing is written either
+way — the storage claim holds unconditionally.
 
 This is the invariant most worth defending, because violating it is how a coordination
 layer quietly becomes the document store it promised not to be.
@@ -144,13 +149,24 @@ A cross-boundary handoff into the void is the failure this exists to close.
 ## Integration surface
 
 Two encodings over **one semantic core**: plain HTTP, and MCP for harnesses that speak it.
-Conformance is tested against the core and HTTP; a third encoding is added when it ships,
-not before.
+A third encoding is added when it ships, not before.
+
+A conformance suite testing both encodings against the core is *planned and does not exist*
+— see the roadmap. Until it does, the two surfaces are kept honest by construction rather
+than by test: every MCP tool is a thin wrapper calling the same function the HTTP handler
+calls.
 
 Authentication is per-actor HMAC to start — one line of config, no identity-provider
 consent required — with OIDC as the path for organisations that want it. **The actor is
-always taken from the token, never from the payload**, so no client can file a claim in
-another person's name.
+always taken from the token, never from the payload.**
+
+That is narrower than it sounds and the difference matters. The *actor* — who made the
+call — cannot be forged. The `holder` field of a scope claim is a separate, payload-supplied
+value, so a caller can file a lease naming a colleague. The lease records that as
+`holderAttested`, but **the conflict record other people actually read does not currently
+carry that flag**, so a conflict raised by an unverified claim is presently
+indistinguishable from a real one. That is a known open defect with a failing test against
+it, not a property of the design.
 
 ## Connectors
 

@@ -17,7 +17,7 @@ in exactly the place it should have, the connectors.
 |---|:--:|:--:|---|
 | `leakguard` — the guard that keeps this repo publishable | ✅ | ✅ | Runs in CI and pre-commit |
 | Scope claims + conflict detection | ✅ | ✅ | Prefix model, precision self-audit |
-| Snapshots + divergence digest | ✅ | ✅ | Pointer-only, cadence-boundary delivery, pluggable resolvers |
+| Snapshots + divergence digest | ✅ | ✅ | No body ever stored; cadence-boundary delivery; pluggable resolvers |
 | Change feed (opaque resumable cursor) | ✅ | ✅ | |
 | HMAC authentication | ✅ | ✅ | Actor from token, never payload |
 | Adoption metrics | ✅ | ✅ | Weekly publishers, time-to-first-event, per-verb latency |
@@ -29,7 +29,7 @@ in exactly the place it should have, the connectors.
 | Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
 | MCP surface | ✅ | ✅ | 9 tools, stdio, thin wrappers over the same core |
 | Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
-| Session-hook injection (tier 3) | ✅ | ⏳ | Formatter done; the hook itself is not extracted |
+| Session-hook injection (tier 3) | ✅ | ✅ | Fail-open per dependency; byte-identical uninstall |
 
 ### How AgentCo reaches a harness at all
 
@@ -79,6 +79,7 @@ changes:
       "env": {
         "AGENTCO_ACTOR": "your-name",
         "AGENTCO_WORK_STORE": "/path/to/work.jsonl",
+        "AGENTCO_SOP_STORE": "/path/to/sops.jsonl",
         "AGENTCO_REGISTRY_DB": "/path/to/registry.sqlite3"
       }
     }
@@ -149,14 +150,31 @@ A distinction worth keeping, because they are not the same evidence.
 - **`leakguard` catches real leakage** — it found thirteen genuine leaks in this
   repository's own authoring before the first commit.
 
-**Tested but not proven:** everything else. The suite is hermetic and
-single-process, written by the same author as the code. That is weaker evidence
-than it looks: in the private implementation this was extracted from, a fully
-green suite missed a defect that rewrote every line ending in a target file,
-because every fixture was authored with `write_text()`, which never produces the
-input the bug needed. The tests were evidence about the fixtures.
+**Reviewed adversarially.** That review has happened. A second party, instructed
+to refute rather than confirm and to read the code without reading the tests,
+produced twenty-four findings across six load-bearing claims — five of the six
+did not survive. Seventeen are fixed; the rest carry failing tests naming the
+property that should hold. `tests/test_adversarial_findings.py` is written by
+that reviewer, structured as counterexamples rather than confirmations, and each
+regression test in it was verified to FAIL against the pre-fix code before its
+marker came off.
 
-An independent adversarial review is queued for exactly that reason.
+The single most transferable finding was not a defect but a pattern: six existing
+tests asserted the exact property their code lacked, by testing the half that
+held. A test that cannot fail when the mechanism it guards is removed proves
+nothing, and looks identical in the summary line to one that can.
+
+**Tested but not proven:** the rest. Most of the suite remains hermetic and
+single-process, and much of it is still written by the same author as the code.
+
+One boundary worth stating precisely, because the honest version is narrower than
+the flattering one: the lease protocol's twelve-process proof still holds — both
+mutations were re-run against current code and both still fail the right tests —
+but **the protocol has grown since and the proof has not**. Attempt-advance on
+report, attempt-advance on reap, the reaper's in-lock liveness re-check,
+`assigned_agent` enforcement and derived blockedness are single-process tested
+only. The proof covers a smaller fraction of the protocol than it did when
+written.
 
 ## The adoption gate
 

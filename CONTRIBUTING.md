@@ -37,6 +37,19 @@ slug, *your* project names, *your* ticket numbers.
 real email address, a UUID, a home-directory path, an internal hostname, a credential
 shape, or anything on the configured denylist.
 
+**It does not read every file, and you should know which.** A whole-tree scan covers
+files whose extension is in its include set, plus a list of known extensionless names.
+Binary files are skipped. So are `LICENSE` and lockfiles. Two exclusions are worth naming
+because they are exactly where a careless paste lands: `leakguard.toml.example` — the
+denylist template you are told to copy and fill in with real names — is allowlisted by
+config, and it is the single likeliest place in this repository for a real name to appear.
+Keep your filled-in copy out of the tree entirely; that is why `leakguard.toml` is
+gitignored.
+
+The guard is a backstop against mistakes, not a guarantee against them. The editorial half
+— cutting a passage that *analyses* a named person rather than merely naming them — is not
+something any scanner can do.
+
 ```bash
 python3 tools/leakguard/leakguard.py            # whole tree
 python3 tools/leakguard/leakguard.py --staged   # pre-commit mode

@@ -62,7 +62,7 @@ These are load-bearing, and each was derived from a failure mode rather than fro
 | **Advisory, never blocking.** | Making concurrency visible is most of the value and none of the political cost — but only if it never stops anyone working. |
 | **Pointers, never copies.** | Snapshots record a URI plus a cheap version token. No document body is ever stored. A second document store is how a coordination layer becomes a system of record by accident. |
 | **Fail static.** | If the plane is down, nothing is blocked; it reconciles when it returns. |
-| **Every refusal carries a remediation.** | A tool that refuses without saying what to do instead teaches people it is broken. |
+| **Every refusal carries a remediation.** | A tool that refuses without saying what to do instead teaches people it is broken. *(Four error paths still return a bare 500 instead of a refusal — known, with failing tests against them.)* |
 | **Anything naming a company is configuration, not code.** | Which is what makes this repo publishable at all — see [CONTRIBUTING](CONTRIBUTING.md). |
 
 ## Getting started
