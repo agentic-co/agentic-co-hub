@@ -176,6 +176,12 @@ report, attempt-advance on reap, the reaper's in-lock liveness re-check,
 only. The proof covers a smaller fraction of the protocol than it did when
 written.
 
+## Known issues
+
+Twenty open defects, each with a failing test naming the property that should
+hold: [`docs/known-issues.md`](known-issues.md). None of them lose work or
+report a wrong result as a right one — those were fixed.
+
 ## The adoption gate
 
 The project's own falsification criterion, written before the result is known:
