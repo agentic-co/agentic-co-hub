@@ -21,8 +21,8 @@ in exactly the place it should have, the connectors.
 | Change feed (opaque resumable cursor) | ✅ | ✅ | |
 | HMAC authentication | ✅ | ✅ | Actor from token, never payload |
 | Adoption metrics | ✅ | ✅ | Weekly publishers, time-to-first-event, per-verb latency |
-| Work queue + fenced leases | ✅ | ⏳ | CAS claim + fencing token |
-| Idempotency (one uniqueness rule on ingest) | ✅ | ⏳ | |
+| Work queue + fenced leases | ✅ | ✅ | CAS claim + fencing token, self-healing expiry |
+| Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression |
 | Scheduling with reservations + silent-schedule audit | ✅ | ⏳ | Catches "this has not run in ten days" |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
