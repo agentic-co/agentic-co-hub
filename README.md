@@ -196,6 +196,30 @@ Nine tools, and nine is a ceiling enforced by a test rather than remembered — 
 large tool surface costs every calling harness context on every tool-choice
 decision it makes.
 
+That entry points the harness at **local files**, which is right when the
+harness and the registry share a disk. When they do not — a second machine, a
+container, a colleague's laptop — the same primitives are on the HTTP surface,
+and `publish.py` speaks it:
+
+```python
+reg = Registry("macbook", SECRET, "http://registry.internal:8787")
+
+pulled = reg.work_pull()                      # fenced lease, or state="empty"
+if pulled["state"] == "leased":
+    item = pulled["item"]
+    reg.work_report(item["id"], pulled["attempt"], "done", result="…")
+
+# A lesson learned on one machine, active for every reader on the next call.
+reg.sop_revise(sop_id, common_mistakes=["Report with the attempt from work_pull"])
+reg.sop_activate(sop_id, 2)
+```
+
+The claiming identity is the **authenticated actor**, never a field in the
+body — a worker that can name itself can take another worker's lease, and the
+fence would faithfully record the theft as legitimate. Send `attempt` back with
+every report: a report that arrives after the lease moved is refused as
+*superseded* rather than overwriting whoever holds the item now.
+
 ### Reach a harness nobody configured
 
 The above is pull-only: the model asks, AgentCo answers. To reach an agent whose

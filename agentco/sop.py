@@ -69,6 +69,15 @@ class SopContractError(SopError, ValueError):
     """The SOP payload is malformed, or dishonest about what it contains."""
 
 
+SOP_STORE_ENV_VAR = "AGENTCO_SOP_STORE"
+DEFAULT_SOP_STORE = "sops.jsonl"
+
+
+def resolve_sop_store(path: Optional[str] = None) -> str:
+    """Where the library lives — see `work.resolve_work_store` for why here."""
+    return path or os.environ.get(SOP_STORE_ENV_VAR) or DEFAULT_SOP_STORE
+
+
 class SopStatus(str, Enum):
     DRAFT = "draft"
     ACTIVE = "active"

@@ -41,17 +41,21 @@ from mcp.server.fastmcp.exceptions import ToolError
 from agentco import db, events as events_module, leases, scope, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
-from agentco.sop import SopLibrary
-from agentco.work import DEFAULT_LEASE_TTL_S, CapabilityError, Queue, TERMINAL, WorkError, WorkStatus
+from agentco.sop import DEFAULT_SOP_STORE, SOP_STORE_ENV_VAR, SopLibrary, resolve_sop_store
+from agentco.work import (
+    DEFAULT_LEASE_TTL_S,
+    DEFAULT_WORK_STORE,
+    WORK_STORE_ENV_VAR,
+    CapabilityError,
+    Queue,
+    TERMINAL,
+    WorkError,
+    WorkStatus,
+    resolve_work_store,
+)
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
-
-WORK_STORE_ENV_VAR = "AGENTCO_WORK_STORE"
-DEFAULT_WORK_STORE = "work.jsonl"
-
-SOP_STORE_ENV_VAR = "AGENTCO_SOP_STORE"
-DEFAULT_SOP_STORE = "sops.jsonl"
 
 ACTOR_ENV_VAR = "AGENTCO_ACTOR"
 # A generic default, same posture as app.py's DEFAULT_OPERATOR = "operator" —
@@ -62,14 +66,6 @@ DEFAULT_ACTOR = "mcp-actor"
 
 def resolve_db_path(path: Optional[str] = None) -> str:
     return path or os.environ.get(DB_ENV_VAR) or DEFAULT_DB
-
-
-def resolve_work_store(path: Optional[str] = None) -> str:
-    return path or os.environ.get(WORK_STORE_ENV_VAR) or DEFAULT_WORK_STORE
-
-
-def resolve_sop_store(path: Optional[str] = None) -> str:
-    return path or os.environ.get(SOP_STORE_ENV_VAR) or DEFAULT_SOP_STORE
 
 
 def resolve_actor(actor: Optional[str] = None) -> str:

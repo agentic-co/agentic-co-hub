@@ -156,3 +156,94 @@ class Registry:
         """Resume the change feed. Pass the previous `nextCursor` verbatim."""
         query = f"?limit={limit}" + (f"&since={since}" if since else "")
         return self._call("GET", "/events", None, query)
+
+    # --- the work queue --------------------------------------------------
+    #
+    # A harness on another machine can now pull work and report on it. The
+    # claiming identity is the actor this client authenticates as — the server
+    # ignores any agent named in the body, so there is no field here to set it.
+
+    def work_create(self, title: str, **fields: Any) -> dict:
+        """File an item. A duplicate natural key returns the EXISTING item.
+
+        Field names are the wire's, not Python's: `blockedBy`, `assignedAgent`,
+        `naturalKey`, `sourceId`. Passing `blocked_by` would be silently
+        ignored by the server, so it is rejected here where the traceback still
+        points at the caller.
+        """
+        snake = [k for k in fields if "_" in k and k != "definition_of_done"]
+        if snake:
+            raise ValueError(
+                f"use the wire spelling for {', '.join(sorted(snake))} — "
+                "blockedBy, assignedAgent, naturalKey, sourceId. The server "
+                "ignores unknown fields, so a snake_case key would be dropped "
+                "silently and the item filed without it."
+            )
+        return self._call("POST", "/work", {"title": title, **fields})
+
+    def work_pull(self, capabilities: Optional[list[str]] = None, ttl_seconds: Optional[int] = None) -> dict:
+        """Claim the next item this actor can run.
+
+        Returns `{"state": "empty", "item": None}` when there is nothing to do,
+        which is an ordinary quiet cycle rather than an error. On success the
+        top-level `attempt` is the fence — send it back with the report.
+        """
+        body: dict[str, Any] = {}
+        if capabilities is not None:
+            body["capabilities"] = capabilities
+        if ttl_seconds:
+            body["ttlSeconds"] = ttl_seconds
+        return self._call("POST", "/work/pull", body)
+
+    def work_report(
+        self,
+        item_id: str,
+        attempt: int,
+        status: str,
+        result: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> dict:
+        """Report `done` or `failed`, fenced on the attempt the lease was issued under.
+
+        `idempotency_key` makes an honest retry safe: any transport can lose an
+        acknowledgement after the server applied the result, and the worker has
+        to be able to send the same thing again.
+        """
+        body: dict[str, Any] = {"attempt": attempt, "status": status}
+        if result is not None:
+            body["result"] = result
+        if idempotency_key is not None:
+            body["idempotencyKey"] = idempotency_key
+        return self._call("POST", f"/work/{item_id}/report", body)
+
+    def work_list(self, status: Optional[str] = None, ready: bool = False) -> dict:
+        """The queue as it stands. `ready=True` asks what is claimable right now."""
+        if ready:
+            return self._call("GET", "/work", None, "?ready=1")
+        return self._call("GET", "/work", None, f"?status={status}" if status else "")
+
+    # --- versioned SOPs --------------------------------------------------
+
+    def sop_create(self, title: str, **body: Any) -> dict:
+        """Author version 1 as a DRAFT. Activation is separate and deliberate."""
+        return self._call("POST", "/sops", {"title": title, **body})
+
+    def sop_revise(self, sop_id: str, **body: Any) -> dict:
+        """Write the next version — this is how a lesson learned becomes shared.
+
+        Unset fields carry forward, so adding one line to `common_mistakes`
+        does not blank the other four. The superseded version stays readable.
+        """
+        return self._call("POST", f"/sops/{sop_id}/revise", body)
+
+    def sop_activate(self, sop_id: str, version: int) -> dict:
+        """Make one version the one every reader gets by default."""
+        return self._call("POST", f"/sops/{sop_id}/activate", {"version": version})
+
+    def sop_get(self, sop_id: str, version: Optional[int] = None) -> dict:
+        """One version, or the active one. A miss is `sop: null`, not an error."""
+        return self._call("GET", f"/sops/{sop_id}", None, f"?version={version}" if version else "")
+
+    def sop_list(self) -> dict:
+        """Every SOP with an active version."""
+        return self._call("GET", "/sops")

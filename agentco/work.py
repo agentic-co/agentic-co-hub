@@ -55,6 +55,21 @@ from agentco.keys import derive_natural_key, natural_key_of
 
 DEFAULT_LEASE_TTL_S = 3600
 
+WORK_STORE_ENV_VAR = "AGENTCO_WORK_STORE"
+DEFAULT_WORK_STORE = "work.jsonl"
+
+
+def resolve_work_store(path: Optional[str] = None) -> str:
+    """Where the queue lives, resolved the same way by every surface.
+
+    This is here rather than in a caller because there are now three of them —
+    the MCP server, the HTTP app, and the CLI — and a queue is a file that two
+    surfaces can disagree about the location of. When they do, each is
+    internally consistent and the work simply never meets, which presents as an
+    empty queue rather than as an error.
+    """
+    return path or os.environ.get(WORK_STORE_ENV_VAR) or DEFAULT_WORK_STORE
+
 
 class WorkError(Exception):
     """Base for every refusal this module makes."""
