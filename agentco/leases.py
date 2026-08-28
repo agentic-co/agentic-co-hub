@@ -257,3 +257,44 @@ def release(
         payload={"leaseUid": lease_uid, "action": action},
     )
     return {"leaseUid": lease_uid, "state": "accepted", "releasedAt": _iso(at)}
+
+
+def conflicts_for(conn: sqlite3.Connection, actor: str, now: Optional[datetime] = None) -> list[dict]:
+    """Every conflict `actor`'s OWN live leases have with someone else's, right now.
+
+    A READ, not a claim — this exists for tier-1 context injection (agentco/inject.py),
+    which needs to tell a harness at session start "here is what is still live and
+    colliding", without re-running the claim path to find out. It deliberately does
+    NOT insert into `conflict_actions`: that table counts conflicts FIRED at the
+    moment a claim revealed them, for the scope-model decision's own precision
+    self-audit (conflicts fired ÷ acted on). Re-surfacing an already-known conflict
+    on every scheduled injection run would silently inflate that denominator and
+    make the precision metric measure how often this function runs, not how often a
+    claim actually collided with one.
+
+    Reuses the exact same query (`live_leases`) and intersection rule
+    (`scope.find_conflicts`) the claim path uses, so "conflicting" means the same
+    thing here as it does at claim time — this is a second reader, not a second
+    definition.
+    """
+    at = now or datetime.now(timezone.utc)
+    repos = [
+        row["repo"]
+        for row in conn.execute("SELECT DISTINCT repo FROM leases WHERE released_at IS NULL").fetchall()
+    ]
+    out: list[dict] = []
+    for repo in repos:
+        live = live_leases(conn, repo, at)
+        mine = [lease for lease in live if lease["holder"] == actor]
+        if not mine:
+            continue
+        others = [
+            (lease["holder"], Scope(lease["repo"], tuple(lease["prefixes"])), lease["intent"])
+            for lease in live
+            if lease["holder"] != actor
+        ]
+        for lease in mine:
+            candidate = Scope(lease["repo"], tuple(lease["prefixes"]))
+            for conflict in find_conflicts(candidate, actor, others):
+                out.append({"repo": repo, "myLeaseUid": lease["uid"], "myIntent": lease["intent"], **conflict})
+    return out

@@ -28,7 +28,42 @@ in exactly the place it should have, the connectors.
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
 | MCP surface | ✅ | ✅ | 9 tools, stdio, thin wrappers over the same core |
-| Cross-harness context + lesson sharing | ✅ | ⏳ | |
+| Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
+| Session-hook injection (tier 3) | ✅ | ⏳ | Formatter done; the hook itself is not extracted |
+
+### How AgentCo reaches a harness at all
+
+Nothing can push into a model's context — it is assembled by the harness at turn
+boundaries. So reaching one is always: write into a file it already reads, give
+the model a reason to ask, or tell the human. Four tiers, ordered by what they
+cost the harness's owner:
+
+| Tier | Mechanism | Owner effort |
+|---|---|---|
+| **1 — the repo** | A managed block spliced into `CLAUDE.md` / `AGENTS.md`, refreshed on a schedule | **zero** |
+| **2 — MCP** | `events` since a cursor, and the rest of the tool surface | one config line |
+| **3 — session hook** | Fetch-and-inject at session start | small, owner-written |
+| **4 — humans** | A digest to chat; the person forwards what matters | manual, and honest about it |
+
+Tier 1 is the only one that reaches a harness nobody configured, which is the
+premise of the whole project. It is also the one that has to be careful: it
+edits a file in somebody else's repository. So the splice reads and writes
+**bytes**, detects the file's own line-ending convention and matches it, never
+touches a byte outside its markers, never creates a file that does not exist,
+and is dry-run by default.
+
+That care is not hypothetical. In the implementation this was extracted from,
+the same module normalised every `\r\n` in the target file to `\n` and persisted
+it — one render re-encoded a whole file, far outside the managed block. It shipped
+green, because every test fixture was authored with `write_text()`, which cannot
+produce a CRLF file at all.
+
+**Tier-1 content is repo-scoped, never per-person.** Live scope claims belong in
+a shared file because they are meant to be public — that is the point of the
+registry. Divergence on your own snapshots does not: the target is a file the
+whole team reads and most repos commit, so personal state placed there is
+published to everybody, permanently, through version control. That content goes
+to the individual through tier 3 instead.
 
 ### Connecting a harness
 

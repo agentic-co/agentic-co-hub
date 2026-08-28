@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import secrets
 import sys
 from pathlib import Path
 
 from agentco import app as app_module
-from agentco import db, divergence, metrics
+from agentco import db, divergence, inject, leases, metrics
 
 
 def _conn(args):
@@ -80,6 +81,42 @@ def cmd_digest(args) -> int:
         delivery.send(text, collected, via=args.via)
         print(f"Delivered via {args.via}.", file=sys.stderr)
     return 0
+
+
+def cmd_inject(args) -> int:
+    """Tier-1 context injection — splice AgentCo status into `CLAUDE.md`/`AGENTS.md`.
+
+    Dry-run by default, same posture as `digest`: a diff is always printed,
+    and nothing on disk changes unless `--write` is passed. This is the
+    command a scheduled job runs with `--write`; a human runs it bare first
+    to see exactly what would change.
+
+    The content is deliberately repo-scoped — live scope claims, which are
+    meant to be public. Per-person state (divergence on your own snapshots)
+    belongs in a session hook, not in a shared file; see
+    `inject.render_session_block`.
+    """
+    conn = _conn(args)
+    # REPO-scoped, and `--repo` is required rather than defaulted. The target is
+    # a file the whole team reads and most repos commit, so the content must be
+    # about the repo, not about whoever happens to run the scheduled job. An
+    # actor default here would quietly publish one person's snapshots and claims
+    # to everybody, permanently, via version control.
+    live = leases.live_leases(conn, args.repo)
+    block = inject.render_repo_block(live, repo=args.repo)
+
+    results = inject.run([Path(t) for t in args.targets], block, write=args.write)
+    exit_code = 0
+    for result in results:
+        print(f"{result.path}: {result.status} — {result.reason}")
+        if result.diff:
+            print(result.diff)
+        if result.status == "error":
+            exit_code = 1
+
+    if not args.write and any(r.status == "would_write" for r in results):
+        print("\n(dry run — nothing written. Re-run with --write to apply.)", file=sys.stderr)
+    return exit_code
 
 
 def cmd_gate1(args) -> int:
@@ -181,6 +218,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_digest.add_argument("--post", action="store_true", help="also deliver the digest (needs --deliver)")
     p_digest.add_argument("--via", default="webhook", help="delivery sender to use (default: webhook)")
     p_digest.set_defaults(func=cmd_digest)
+
+    p_inject = sub.add_parser(
+        "inject", help="tier-1 context injection — splice AgentCo status into CLAUDE.md/AGENTS.md"
+    )
+    p_inject.add_argument("targets", nargs="+", help="file(s) to splice into, e.g. CLAUDE.md AGENTS.md")
+    p_inject.add_argument(
+        "--repo", required=True, help="repo whose live scope claims to render into the block"
+    )
+    p_inject.add_argument("--write", action="store_true", help="apply the splice (default: dry run)")
+    p_inject.set_defaults(func=cmd_inject)
 
     p_gate = sub.add_parser("gate1", help="is the adoption gate met?")
     p_gate.add_argument("--json", action="store_true")
