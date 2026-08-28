@@ -58,7 +58,7 @@ def load_keys(path: str | Path | None = None) -> dict[str, str]:
     "Nothing" is an empty mapping and therefore refuses every request — a
     registry that starts with no keys and accepts everything is the failure
     this ordering forecloses. Fail closed on auth; the fail-OPEN posture in
-    `stage1/hooks` is correct there and would be wrong here.
+    a session-start hook is correct there and would be wrong here.
     """
     target = path or os.environ.get(KEYS_ENV_VAR)
     if not target:
@@ -84,7 +84,7 @@ def sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> st
     """The client side, exported so tests and the example publishers share one implementation.
 
     A second hand-written copy of this in a publisher example is how a signing
-    scheme drifts; `stage1/registry/publish.py` imports this function.
+    scheme drifts; `agentco/publish.py` imports this function.
     """
     return hmac.new(
         secret.encode(),

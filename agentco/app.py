@@ -37,7 +37,7 @@ from agentco import auth, db, divergence, events, leases, metrics, snapshots
 from agentco.errors import Refusal
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
-DEFAULT_DB = "stage1/registry/registry.sqlite3"
+DEFAULT_DB = "registry.sqlite3"
 
 OPERATOR_ENV_VAR = "AGENTCO_REGISTRY_OPERATOR"
 # The identity excluded from the adoption gate's own publisher count —

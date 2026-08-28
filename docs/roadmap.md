@@ -27,8 +27,40 @@ in exactly the place it should have, the connectors.
 | Scheduling with reservations + silent-schedule audit | ✅ | ⏳ | Catches "this has not run in ten days" |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
-| MCP surface | ✅ | ⏳ | Thin wrapper over the same core |
+| MCP surface | ✅ | ✅ | 9 tools, stdio, thin wrappers over the same core |
 | Cross-harness context + lesson sharing | ✅ | ⏳ | |
+
+### Connecting a harness
+
+One entry in the harness's `.mcp.json`, and nothing about how that harness works
+changes:
+
+```json
+{
+  "mcpServers": {
+    "agentco": {
+      "command": "python3",
+      "args": ["-m", "agentco", "serve-mcp"],
+      "env": {
+        "AGENTCO_ACTOR": "your-name",
+        "AGENTCO_WORK_STORE": "/path/to/work.jsonl",
+        "AGENTCO_REGISTRY_DB": "/path/to/registry.sqlite3"
+      }
+    }
+  }
+}
+```
+
+Nine tools, and nine is a ceiling enforced by a test rather than remembered:
+`claim_scope`, `release_scope`, `snapshot`, `events`, `work_pull`,
+`work_report`, `work_create`, `sop_get`, `whoami`. A large tool surface costs
+every calling harness context on every tool-choice decision it makes — that is
+paid by every conversation, not just the one using it. A tenth tool means
+deleting one.
+
+Over stdio there is no request to sign, so the actor is whatever `AGENTCO_ACTOR`
+asserts at process start — exactly as trustworthy as the process that launched
+it. Over HTTP the actor comes from an HMAC signature instead, never the payload.
 
 ### Extension points, so connectors never need a core change
 

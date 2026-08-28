@@ -36,6 +36,27 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_serve_mcp(args) -> int:
+    """Run the MCP surface over stdio.
+
+    Separate from `serve` because the transports are not interchangeable: HTTP
+    listens on a port and several clients share it, while stdio is one process
+    per client, launched BY the harness and speaking JSON-RPC on its own
+    stdout. Anything else printed to that stdout corrupts the channel, which is
+    why this command takes no `--verbose` and prints nothing itself.
+    """
+    from agentco.mcp_server import create_server
+
+    server = create_server(
+        db_path=args.db,
+        work_store=args.work_store,
+        sop_store=args.sop_store,
+        actor=args.actor,
+    )
+    server.run()
+    return 0
+
+
 def cmd_digest(args) -> int:
     conn = _conn(args)
     collected = divergence.collect(conn)
@@ -148,6 +169,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8787)
     p_serve.set_defaults(func=cmd_serve)
+
+    p_mcp = sub.add_parser("serve-mcp", help="run the MCP surface over stdio")
+    p_mcp.add_argument("--work-store", default=None)
+    p_mcp.add_argument("--sop-store", default=None)
+    p_mcp.add_argument("--actor", default=None, help="identity this harness asserts")
+    p_mcp.set_defaults(func=cmd_serve_mcp)
 
     p_digest = sub.add_parser("digest", help="the cadence-boundary divergence digest")
     p_digest.add_argument("--deliver", action="store_true", help="emit events and mark reported")
