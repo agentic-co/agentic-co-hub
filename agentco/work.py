@@ -210,47 +210,93 @@ class Queue:
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
-    def _read_raw(self) -> list[dict]:
-        """Every parseable row as a raw dict. Unparseable lines are QUARANTINED.
+    def _read_raw(self) -> tuple[list[dict], list[bytes]]:
+        """`(parseable rows, quarantined raw lines)`. One bad line costs one row.
 
-        A single corrupt line must not take the store down, and it must not
-        vanish either — it is kept in `quarantined` so a health check can
-        report it. Silently skipping bad data is how a queue loses work and
-        nobody finds out for a fortnight.
+        **Read BYTES and decode per line.** Decoding the whole file at once puts
+        `UnicodeDecodeError` outside the per-line handler — and it is a
+        `ValueError`, not a `JSONDecodeError`, so it escapes and every single
+        read of the store fails. One stray byte from a truncated write or a
+        mis-encoded external tool then costs the entire queue, which is the
+        opposite of what quarantining is for.
+
+        The same reasoning covers the other two ways a line can be unusable: a
+        newer writer's unknown status value (`ValueError` out of the enum) and a
+        row missing a required field (`TypeError` out of the constructor). All
+        three are caught here, at the line, because the boundary has to be the
+        line or it is not a boundary.
+
+        Quarantined lines are returned as **raw bytes** rather than decoded
+        text: a line that failed to decode has no faithful string form, and
+        re-encoding a guess at it is how the original bytes get lost on the
+        next write.
         """
         if not self.path.exists():
-            return []
+            return [], []
         rows: list[dict] = []
-        self.quarantined = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
+        quarantined: list[bytes] = []
+        for raw_line in self.path.read_bytes().split(b"\n"):
+            if not raw_line.strip():
                 continue
             try:
-                parsed = json.loads(line)
-            except json.JSONDecodeError:
-                self.quarantined.append(line)
+                parsed = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                quarantined.append(raw_line)
                 continue
             if isinstance(parsed, dict) and "id" in parsed:
                 rows.append(parsed)
             else:
-                self.quarantined.append(line)
-        return rows
+                quarantined.append(raw_line)
+        self.quarantined = quarantined
+        return rows, quarantined
 
     def _read_all(self) -> list[WorkItem]:
-        return [WorkItem.from_json(json.dumps(r)) for r in self._read_raw()]
+        """Rows this version can model. A row it cannot is quarantined, not fatal.
 
-    def _write_all(self, rows: list[dict]) -> None:
-        """Atomic whole-file replace: temp file in the same dir, fsync, rename.
+        `WorkItem.from_json` raises `ValueError` on a status this version does
+        not know and `TypeError` on a row missing a required field — both of
+        which a NEWER writer can legitimately produce. Letting either escape
+        would mean a forward-compatible store bricks an older reader, so they
+        land in the same quarantine as a corrupt line.
+        """
+        rows, quarantined = self._read_raw()
+        items: list[WorkItem] = []
+        for row in rows:
+            try:
+                items.append(WorkItem.from_json(json.dumps(row)))
+            except (ValueError, TypeError):
+                quarantined.append(json.dumps(row).encode("utf-8"))
+        self.quarantined = quarantined
+        return items
+
+    def _write_all(self, rows: list[dict], quarantined: Sequence[bytes] = ()) -> None:
+        """Atomic whole-file replace, CARRYING QUARANTINED LINES THROUGH VERBATIM.
 
         Same directory so the rename stays on one filesystem and is therefore
-        atomic. fsync before the rename so a crash cannot leave a truncated file
+        atomic; fsync before the rename so a crash cannot leave a truncated file
         where a complete one used to be.
+
+        The `quarantined` argument is the half that was missing, and its absence
+        turned "quarantine" into deletion: `_read_raw` withheld the bad lines
+        from the row list, and the next ordinary write — a claim, a create,
+        anything — then persisted only the rows and erased them from disk. The
+        docstring promised a corrupt line "must not vanish either" while the
+        code removed it on the next mutation.
+
+        They are written back as the exact bytes that were read, appended after
+        the good rows. Not re-encoded, because a line that failed to decode has
+        no faithful string form; and not interleaved at their original offsets,
+        because a byte sequence that is not a line cannot be given a position
+        among lines. Preserving the bytes is the promise; preserving the order
+        was never one.
         """
         fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "wb") as handle:
                 for row in rows:
-                    handle.write(json.dumps(row, sort_keys=True) + "\n")
+                    handle.write(json.dumps(row, sort_keys=True).encode("utf-8") + b"\n")
+                for line in quarantined:
+                    handle.write(line + b"\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, self.path)
@@ -327,7 +373,7 @@ class Queue:
             item.status = WorkStatus.BLOCKED
 
         with self._locked():
-            raw_rows = self._read_raw()
+            raw_rows, quarantined = self._read_raw()
             if key:
                 for row in raw_rows:
                     if natural_key_of(row) == key:
@@ -341,7 +387,7 @@ class Queue:
                         existing.metadata["natural_key_conflict"] = True
                         return existing
             raw_rows.append(json.loads(item.to_json()))
-            self._write_all(raw_rows)
+            self._write_all(raw_rows, quarantined)
         return item
 
     # -- reading ---------------------------------------------------------
@@ -400,7 +446,7 @@ class Queue:
         the CAS and the fence safe to express as ordinary exceptions.
         """
         with self._locked():
-            raw_rows = self._read_raw()
+            raw_rows, quarantined = self._read_raw()
             target = None
             for row in raw_rows:
                 if row.get("id") == item_id:
@@ -412,7 +458,7 @@ class Queue:
             for key, value in updates.items():
                 setattr(target, key, value)
             target.updated_at = _iso(_now())
-            self._write_all(self._merge(raw_rows, target))
+            self._write_all(self._merge(raw_rows, target), quarantined)
             return target
 
     def claim(

@@ -394,7 +394,16 @@ def test_a_corrupt_line_is_quarantined_not_fatal_and_not_dropped(queue):
 
     items = queue.list()
     assert [i.id for i in items] == [good.id]
-    assert queue.quarantined == ["{not json at all"]
+    assert queue.quarantined == [b"{not json at all"]
+
+    # This assertion is the one the test's own name always claimed and never
+    # made. "Not dropped" can only be checked against DISK, because disk is the
+    # only place it could be dropped from — an in-memory list immediately after
+    # a read cannot tell you what the next write will do to the file.
+    queue.create("an unrelated later write")
+    assert b"{not json at all" in queue.path.read_bytes(), (
+        "an unrelated write erased the quarantined line; quarantine must preserve"
+    )
 
 
 def test_the_store_survives_a_write_that_raises(queue, monkeypatch):

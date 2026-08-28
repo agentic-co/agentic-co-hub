@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,7 +45,8 @@ from fastapi.testclient import TestClient
 
 from agentco import auth, db, metrics, snapshots
 from agentco.app import create_app
-from agentco.errors import Unauthenticated
+from agentco.errors import Refusal, Unauthenticated
+from agentco.scope import Scope, prefixes_overlap, scopes_intersect, validate_prefix
 from agentco.sop import SopLibrary
 from agentco.work import LeaseError, Queue, WorkStatus
 
@@ -89,11 +91,6 @@ def post(client, path, actor, body):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="read_text() sits outside the per-line quarantine; UnicodeDecodeError is a "
-    "ValueError, not a JSONDecodeError, so it escapes and every read fails",
-)
 def test_one_undecodable_byte_does_not_take_the_whole_queue_down(queue):
     """A single non-UTF-8 byte anywhere in the store makes EVERY operation raise.
 
@@ -134,11 +131,6 @@ def test_one_undecodable_byte_does_not_take_the_whole_queue_down(queue):
     assert [item.id for item in items] == [good.id]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_read_raw withholds bad lines from raw_rows and _write_all writes only "
-    "raw_rows, so the next ordinary mutation erases the quarantined line from disk",
-)
 def test_a_quarantined_line_survives_the_next_write(queue):
     """"Quarantine" is deletion. The line is reported once, then destroyed.
 
@@ -170,7 +162,11 @@ def test_a_quarantined_line_survives_the_next_write(queue):
         handle.write(corrupt + "\n")
 
     queue.list()
-    assert queue.quarantined == [corrupt], "precondition: the line is quarantined on read"
+    # `quarantined` holds raw BYTES: a line that failed to decode has no faithful
+    # string form, and re-encoding a guess at it is how the original bytes get
+    # lost on the next write. Only this precondition's type changed with the fix;
+    # the assertion that matters, below, is untouched.
+    assert queue.quarantined == [corrupt.encode()], "precondition: the line is quarantined on read"
 
     queue.create("an ordinary second item")
 
