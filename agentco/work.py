@@ -409,7 +409,25 @@ class Queue:
             if key:
                 for row in raw_rows:
                     if natural_key_of(row) == key:
-                        existing = WorkItem.from_json(json.dumps(row))
+                        try:
+                            existing = WorkItem.from_json(json.dumps(row))
+                        except (ValueError, TypeError) as exc:
+                            # The other half of the same boundary. I fixed
+                            # `_mutate` and wrote a commit message claiming both
+                            # write paths; this one was left raising a bare
+                            # enum error, so filing ANY item whose natural key
+                            # matched an unmodellable row failed with an
+                            # exception about a status value — and duplicate
+                            # suppression stopped working, which is the one
+                            # thing the key exists to do.
+                            raise WorkError(
+                                f"cannot suppress a duplicate of {key!r}: the "
+                                f"existing row is not readable by this version "
+                                f"({type(exc).__name__}: {exc}). The row is "
+                                f"preserved on disk. Creating a second item "
+                                f"under the same key would be worse than "
+                                f"refusing — upgrade, or repair the row."
+                            ) from exc
                         print(
                             f"[work] DUPLICATE-SUPPRESSED key={key!r} "
                             f"title={title!r} held-by={existing.id}",

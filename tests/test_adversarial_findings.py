@@ -61,12 +61,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agentco import auth, db, metrics, publish, snapshots
+from agentco import auth, db, hook, inject, leases, metrics, publish, snapshots
 from agentco.app import create_app, get_conn
 from agentco.errors import Refusal, Unauthenticated
 from agentco.scope import Scope, prefixes_overlap, scopes_intersect, validate_prefix
 from agentco.sop import SopError, SopLibrary
-from agentco.work import LeaseError, Queue, WorkStatus
+from agentco.work import LeaseError, Queue, WorkError, WorkStatus
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
 
@@ -2052,3 +2052,377 @@ def test_the_signature_covers_the_query_string(client):
     # and no query at all.
     bare = send_signed(client, "GET", "/events", "/events")
     assert bare.status_code == 200, "an unqueried feed poll must still authenticate"
+
+
+# --------------------------------------------------------------------------- #
+# The managed block — content that reaches other people's machines
+# --------------------------------------------------------------------------- #
+
+
+def test_caller_content_cannot_escape_the_managed_block(tmp_path):
+    """S1 — the most serious defect found in this codebase. FIXED in 8c64215; guard.
+
+    No marker: this passes. It is kept because the thing it prevents is the only
+    defect here that reached other people's machines, and because the fix is two
+    independent layers that must both stay.
+
+    THE ORIGINAL DEFECT. `inject._block_bytes` rendered its content between the
+    BEGIN and END markers with nothing checking what the content was, and
+    `render_repo_block` interpolated `lease['holder']` and `lease['prefixes']`
+    raw. Both are caller-supplied: `leases.claim` did `(holder or actor).strip()`,
+    which removes only leading and trailing whitespace, and `normalize_prefix`
+    left interior newlines intact while still yielding two segments. A holder of
+    `alice\\n<!-- agentco:context:end -->\\nANYTHING` therefore closed the block
+    early and wrote `ANYTHING` into the file BELOW it.
+
+    Why that was critical rather than a formatting bug, in three steps:
+      * the target is a repository's agent-context file, which teams commit — so
+        the content reaches every colleague and enters version control;
+      * that file is read as CONTEXT BY AGENTS, so arbitrary text in it is
+        prompt injection into every teammate's harness, delivered by a scheduled
+        job with no human in the loop;
+      * `_splice` replaces BEGIN through the FIRST end marker, so everything past
+        the injected one is PERMANENT — see
+        `test_a_render_never_touches_bytes_outside_the_managed_block`, which pins
+        exactly why the tool cannot clean up after itself.
+    It also chained with the still-open holder impersonation (6a): the injected
+    block could be attributed to a colleague who never wrote it.
+
+    BOTH LAYERS ARE ASSERTED because either alone is insufficient. The door
+    (`scope.reject_control_characters`) refuses the values that can carry an
+    escape, and refuses rather than strips — a stripped value is one the caller
+    did not send and cannot see, and stripping would make an injection attempt
+    vanish without anyone learning somebody tried. The splice
+    (`inject.BlockEscapeError`) is the layer that can actually GUARANTEE the
+    invariant instead of assuming its callers were validated, and it is the one
+    that still holds when a future connector renders a block without going
+    through `leases.claim` at all.
+
+    How this hid in plain sight: `inject.py` handles the CRLF trap correctly and
+    at the byte level, with a module docstring explaining exactly why. All of
+    that care went into line ENDINGS and none into line CONTENT. And the
+    validator already existed — `keys.normalize_component` refuses control
+    characters for natural keys, on identical reasoning — and these paths simply
+    never called it.
+    """
+    conn = db.connect(tmp_path / "registry.sqlite3")
+    escape = f"alice\n{inject.END_MARKER}\nINJECTED CONTENT"
+
+    # -- the door: every caller-supplied value rendered into the block --------
+    for field, kwargs in (
+        ("holder", {"repo": "acme/web-platform", "prefixes": ["src/billing/invoices"],
+                    "holder": escape}),
+        ("prefix", {"repo": "acme/web-platform",
+                    "prefixes": [f"src/billing\n{inject.END_MARKER}\nx/y"]}),
+        ("repo", {"repo": f"acme/web\n{inject.END_MARKER}",
+                  "prefixes": ["src/billing/invoices"]}),
+    ):
+        with pytest.raises(Refusal) as exc:
+            leases.claim(conn, actor="mallory", intent="implement", **kwargs)
+        assert exc.value.code == "control_character", f"{field} accepted an escape"
+        assert exc.value.remediation, f"{field} refused without a remediation"
+
+    # -- the splice: the door bypassed entirely, as a future connector would --
+    with pytest.raises(inject.BlockEscapeError):
+        inject._block_bytes(f"a legitimate line\n{inject.END_MARKER}\nescaped", b"\n")
+
+    # -- a refused render leaves the target BYTE-IDENTICAL --------------------
+    # A partial write here is a permanent one, so "refused" has to mean
+    # "untouched" rather than "stopped somewhere in the middle".
+    target = tmp_path / "CLAUDE.md"
+    target.write_bytes(b"# Team rules\r\nExisting content.\r\n")
+    before = target.read_bytes()
+    with pytest.raises(inject.BlockEscapeError):
+        inject.render_into(target, f"content\n{inject.END_MARKER}\nescaped", write=True)
+    assert target.read_bytes() == before, "a refused render modified the file"
+
+    # -- and ordinary rendering still works, CRLF and all ---------------------
+    result = inject.render_into(target, "Live scope claims in acme/web-platform: 0", write=True)
+    assert result.status == "written"
+    assert inject.BEGIN_MARKER in target.read_text(encoding="utf-8")
+    assert b"\r\n" in target.read_bytes(), "the file's own line ending was not preserved"
+
+    ordinary = leases.claim(
+        conn, actor="dana", repo="acme/web-platform",
+        prefixes=["src/billing/invoices"], intent="implement",
+    )
+    assert ordinary["state"] == "accepted", "the fix must not refuse ordinary claims"
+
+
+def test_a_render_never_touches_bytes_outside_the_managed_block(tmp_path):
+    """Why S1 was critical: the tool cannot remove what escaped. Guard, and a pin.
+
+    This is NOT a regression test for the S1 fix — it passed before it and after
+    it, because it pins a DIFFERENT and deliberate property: `_splice` copies
+    everything before BEGIN and after END verbatim, so a render never eats
+    content it does not own.
+
+    It is here because that property is exactly what made S1 permanent. Content
+    that escapes the block lands in the region `_splice` promises never to
+    touch, so no later render — however clean its state — can remove it. The
+    tool could not undo what it wrote. That is the difference between "the
+    generated block looks wrong until the next run" and "this repository's
+    committed context file now contains attacker-chosen text forever".
+
+    It is also a pin against the plausible WRONG fix. Making the renderer scrub
+    unmanaged content around the block would clean up an injection — and would
+    also delete whatever the team had legitimately written there, silently, on a
+    schedule. Prevention at the door and at the splice is the only remedy that
+    does not trade one destructive behaviour for another. If someone ever
+    "improves" `_splice` into a cleaner, this test goes red, and it should.
+    """
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# Team rules\n\nHand-written guidance above the block.\n", encoding="utf-8")
+    inject.render_into(target, "Live scope claims in acme/web-platform: 1", write=True)
+
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write("\nHand-written guidance BELOW the block.\n")
+
+    inject.render_into(target, "Live scope claims in acme/web-platform: 0", write=True)
+
+    final = target.read_text(encoding="utf-8")
+    assert "Hand-written guidance above the block." in final
+    assert "Hand-written guidance BELOW the block." in final, (
+        "a render removed content outside the managed block — which would also "
+        "delete anything a colleague wrote there"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Rows a newer writer can produce
+# --------------------------------------------------------------------------- #
+
+
+def unmodellable_row_in(queue: Queue, item_id: str = "w-newer") -> dict:
+    """Append a row that is valid JSON and a valid record, but not modellable here.
+
+    A status a NEWER writer knows and this reader does not. Forward
+    compatibility is the stated goal of `WorkItem.from_json` dropping unknown
+    columns, so this is the shape that goal implies will exist.
+    """
+    row = {"id": item_id, "title": "filed by a newer writer", "status": "cancelled"}
+    with queue.path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+    return row
+
+
+def test_a_row_this_version_cannot_model_never_escapes_as_a_raw_exception(queue):
+    """The A1 quarantine boundary does not hold on the paths that WRITE.
+
+    `_read_raw`'s docstring: "All three are caught here, at the line, because
+    the boundary has to be the line or it is not a boundary." But `_read_raw`
+    RETURNS rows it cannot model — it only guarantees they are valid JSON with
+    an `id` — and both write paths then construct from them:
+      * `_mutate` (claim, report, reap) at the target-row lookup;
+      * `create`, in the natural-key duplicate scan.
+    `_read_all` catches `ValueError`/`TypeError`; neither of those two did.
+
+    Half of this is already fixed: `_mutate` now raises a `WorkError` naming the
+    row and saying it is preserved on disk, which is the right shape. `create`
+    still raises a bare `ValueError: 'cancelled' is not a valid WorkStatus` —
+    so filing ANY item whose natural key matches an unmodellable row fails with
+    an exception about an enum, and the duplicate-suppression rule the whole
+    `keys` module exists to enforce stops working.
+
+    The asymmetry is the point. One call site was fixed and the other was not,
+    which is what "the boundary has to be the line" is supposed to prevent:
+    if the guarantee lives at the read, every reader inherits it, and no caller
+    has to remember.
+
+    Why the existing tests miss it: every store in the suite is written by
+    `_write_all`, which cannot emit a row this reader rejects. The rows that
+    trigger this can only come from a newer writer — the exact scenario the
+    forward-compatibility design anticipates and no fixture creates.
+    """
+    queue.create("an ordinary item", natural_key="nk-shared")
+    rows = [json.loads(line) for line in queue.path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["status"] = "cancelled"
+    queue.path.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(WorkError):
+        queue.create("filed later under the same key", natural_key="nk-shared")
+
+    # The already-fixed half must stay fixed.
+    fresh = Queue(queue.path.parent / "other.jsonl")
+    fresh.create("an ordinary item")
+    unmodellable_row_in(fresh)
+    with pytest.raises(WorkError):
+        fresh.claim("w-newer", "worker-a")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="done_ids comes from _read_all(), which drops unmodellable rows, so a "
+    "finished blocker this reader cannot model never counts as done",
+)
+def test_a_finished_blocker_releases_its_dependents_whatever_else_its_row_contains(queue):
+    """Two of today's fixes compose into a defect neither has alone.
+
+    A1 made an unmodellable row quarantine instead of killing the store. A3 made
+    blockedness derived rather than stored, with `claim` computing
+    `done_ids = {i.id for i in self._read_all() if i.status is DONE}`. Both are
+    right. Together they mean a blocker that IS done, whose row a newer writer
+    has made unmodellable, is absent from `_read_all()` — so it never appears in
+    `done_ids`, and every item depending on it becomes permanently unclaimable:
+
+        BlockedError: it is blocked by w-45888c3e, which is not done. Finish
+        those first — this is not contention and retrying now cannot help.
+
+    The work is finished. The instruction is impossible to follow, and the claim
+    that retrying cannot help is true for a reason the message gets wrong. A
+    queue that strands work with a confidently incorrect explanation is worse
+    than one that errors, because nobody goes looking.
+
+    Asserted as a PROPERTY — a finished blocker releases its dependents,
+    whatever else its row happens to contain — rather than against any
+    particular remedy. Reading `status` as a plain string off the raw dict would
+    fix it; so would quarantining per-FIELD instead of per-row, or keeping
+    unmodellable rows in a form `done_ids` can still see. This test does not
+    care which.
+
+    Why the existing tests miss it: `test_a_blocked_item_becomes_claimable_once_its_blocker_is_done`
+    covers the dependency rule and passes. It uses a store where every row round
+    trips, so the two mechanisms never meet. Neither fix's own tests could have
+    caught this, because the defect exists only in their composition.
+    """
+    blocker = queue.create("the blocker")
+    dependent = queue.create("the dependent item", blocked_by=[blocker.id])
+    claimed = queue.claim(blocker.id, "worker-a")
+    queue.report_result(blocker.id, claimed.lease_attempt, WorkStatus.DONE, result="finished")
+
+    rows = [json.loads(line) for line in queue.path.read_text(encoding="utf-8").splitlines()]
+    for row in rows:
+        if row["id"] == blocker.id:
+            # Still recorded as done; a field this reader cannot model was added.
+            row["lifecycle_state"] = "archived-by-a-newer-writer"
+            row["status"] = "archived"
+    queue.path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    taken = queue.claim(dependent.id, "worker-b")
+    assert taken is not None, "a dependent was stranded by a blocker that is finished"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="warnings are appended last and _truncate cuts from the tail, so the named "
+    "degradation is the first content to be dropped",
+)
+def test_the_named_unavailability_warning_survives_truncation(monkeypatch):
+    """The session hook drops the one thing it argues must never be silent.
+
+    `build_additional_context` appends "Unavailable this session: …" AFTER the
+    content sections, and `_truncate` cuts from the tail. So when the content is
+    large the warning is the first thing to go — and what a colleague then sees
+    is a context block with no SOP count and no explanation, which reads as
+    "there are no SOPs" rather than "the SOP library could not be read".
+
+    That is precisely the failure the module is written against. Its own
+    reasoning: "Named, not summarised into 'some things failed' — a colleague
+    debugging why their SOP count never showed up needs the dependency name."
+    And `_truncate` demonstrates it knew the shape of the problem: it RESERVES
+    budget for its own truncation notice, "rather than risking it being the
+    thing that gets cut". The warnings got no such reservation.
+
+    Any ordering or reservation that keeps the warnings satisfies this — put
+    them directly after the pull instruction, or reserve their bytes the way the
+    notice's are. The test asserts only that they survive, and that the pull
+    instruction (which the module says must never be lost either) survives too.
+
+    Why nothing catches it: the warning path and the truncation path are both
+    exercised, never together. Producing content over the budget requires a
+    populated registry AND a failing dependency in the same run.
+    """
+    monkeypatch.setattr(
+        hook, "_registry_section",
+        lambda actor: ("\n".join(f"live registry row {i}" for i in range(300)), None),
+    )
+    monkeypatch.setattr(
+        hook, "_work_section",
+        lambda actor: (None, "work queue unavailable (OSError: disk I/O error)"),
+    )
+    monkeypatch.setattr(
+        hook, "_sop_section",
+        lambda: (None, "SOP library unavailable (OSError: disk I/O error)"),
+    )
+
+    context = hook.build_additional_context("dana", max_bytes=4000)
+
+    assert hook.PULL_INSTRUCTION[:40] in context, "the pull instruction was lost"
+    assert "Unavailable this session" in context, (
+        "the named degradation was truncated away, so a failed dependency is "
+        "indistinguishable from an empty one"
+    )
+    assert "SOP library unavailable" in context
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="when max_bytes is smaller than the truncation notice, the notice alone is "
+    "returned and it is longer than the budget",
+)
+def test_truncate_never_returns_more_than_the_budget_it_was_given():
+    """The byte cap is exceeded exactly when the budget is tightest.
+
+    `_truncate` computes `budget = max(0, max_bytes - len(notice))` and returns
+    `truncated + notice`. When `max_bytes` is below the notice's own length
+    (~64 bytes) the budget floors at zero and the return is the notice alone —
+    longer than the cap it was asked for. At `max_bytes=10` it returns 64 bytes.
+
+    Low severity: the only caller passes 4000. It is here because the module
+    describes the limit as "hard-capped in bytes, not capped at whatever the
+    harness happens to allow", and a cap that silently does not hold at small
+    values is the kind of thing a future caller inherits without checking.
+
+    Either behaviour is a fine fix — truncate the notice too, or refuse a budget
+    smaller than the notice — so this asserts only that the contract holds.
+    """
+    for budget in (10, 40, 64, 200, 4000):
+        out = hook._truncate("x" * 500, budget)
+        assert len(out.encode("utf-8")) <= budget, (
+            f"_truncate({budget}) returned {len(out.encode('utf-8'))} bytes"
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="_read_all re-serialises an unmodellable row with json.dumps instead of "
+    "keeping the bytes that were read",
+)
+def test_a_quarantined_row_is_preserved_as_the_bytes_that_were_read(queue):
+    """Two docstrings promise verbatim bytes; one code path re-encodes them.
+
+    `_read_raw` explains that quarantined lines are raw bytes because "a line
+    that failed to decode has no faithful string form, and re-encoding a guess
+    at it is how the original bytes get lost on the next write". `_write_all`
+    says they are written back as "the exact bytes that were read… Not
+    re-encoded". `_read_all` then does exactly that re-encoding:
+    `quarantined.append(json.dumps(row).encode("utf-8"))`.
+
+    It is observable without any decoding trickery, because `json.dumps`
+    defaults to `ensure_ascii=True`: a row containing `café ☕` comes back with
+    those characters replaced by `\\u00e9` and `\\u2615` escapes. Same JSON
+    value, different bytes — and "the same JSON value" is not the promise.
+
+    Latent today: no path passes the list built by `_read_all` to `_write_all`,
+    so nothing is currently written in the re-encoded form. Two things make it
+    worth pinning anyway. It is a comment claiming a property the code does not
+    have, in the module where that class of defect has been most expensive. And
+    if any future caller does pass it — the shape is natural, `self.quarantined`
+    is a public attribute — an unmodellable row is written TWICE, once as a row
+    from `raw_rows` and once as a quarantined line, because unlike a corrupt
+    line it is still a member of the row list.
+    """
+    queue.create("an ordinary item")
+    raw_line = json.dumps(
+        {"id": "w-newer", "title": "café ☕", "status": "cancelled"}, ensure_ascii=False
+    ).encode("utf-8")
+    with queue.path.open("ab") as handle:
+        handle.write(raw_line + b"\n")
+
+    queue._read_all()
+
+    assert queue.quarantined == [raw_line], (
+        "the quarantined row was re-encoded rather than preserved verbatim"
+    )
