@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# leakguard pre-commit hook. Install:
+#   ln -s ../../tools/leakguard/pre-commit .git/hooks/pre-commit
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+python3 "$ROOT/tools/leakguard/leakguard.py" --root "$ROOT" --staged

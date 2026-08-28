@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  leakguard:
+    # Runs FIRST and independently of the tests. A commit that carries identity
+    # into a public repo is a different class of failure from a failing test,
+    # and it must not be reported as one line in a test summary.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for identity leakage
+        # No leakguard.toml in the tree on purpose — a denylist of real names is
+        # itself a list of real names. CI runs base rules; a fork or a private
+        # mirror can supply its own via --config.
+        run: python3 tools/leakguard/leakguard.py --root .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv run --extra dev --python ${{ matrix.python-version }} pytest -q

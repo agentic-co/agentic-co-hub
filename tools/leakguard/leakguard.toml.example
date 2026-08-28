@@ -1,0 +1,44 @@
+# leakguard configuration — everything company- or person-specific lives HERE,
+# never in leakguard.py. That is the same rule the public repo is extracted
+# under: anything that names a company or a person is configuration, not code.
+#
+# Copy to `leakguard.toml` and fill in. Whether the real file is committed is a
+# judgement call:
+#   - In a PRIVATE deployment repo: commit it. The list is the point.
+#   - In the PUBLIC repo: do NOT commit it — a denylist of your colleagues'
+#     names is itself a list of your colleagues' names. Keep it local, or in
+#     the private repo, and have CI supply it.
+
+[deny]
+# People. First names are enough; matching is case-insensitive and word-bounded.
+# NOTE: this catches a NAME. It cannot catch a passage that analyses a person
+# without naming them, and renaming does not rescue such a passage — cut it.
+names = [
+  # "Firstname",
+  # "Firstname Lastname",
+]
+
+# Company and product domains.
+domains = [
+  # "acmecorp.com",
+  # "dev.azure.com/acmecorp",
+]
+
+# Internal product names, project codenames, team names, system names.
+# The ones nobody outside the company would recognise — and the ones they would.
+terms = [
+  # "ProjectCodename",
+  # "InternalToolName",
+]
+
+[allow]
+# Paths that are expected to contain matches and are reviewed by hand.
+# Keep this list short; a long allowlist means the rules are miscalibrated.
+paths = [
+  # "docs/adopting-in-your-company.md",
+  "tools/leakguard/leakguard.toml.example",
+]
+
+[scan]
+# Override the default file-extension set if the project needs it.
+# include_suffixes = [".py", ".md", ".toml"]

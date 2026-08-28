@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
+
+# The denylist is configuration and is never committed here — a list of real
+# names is itself a list of real names. See CONTRIBUTING.md.
+leakguard.toml
+
+# Local registry data
+*.sqlite3
+*.sqlite3-*
