@@ -190,7 +190,10 @@ class Queue:
     def __init__(self, path: Path | str = "work.jsonl"):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.quarantined: list[str] = []
+        # Raw BYTES, not str — a line that failed to decode has no faithful
+        # string form. Read by a health check, and carried through every
+        # write so a quarantined line is preserved rather than deleted.
+        self.quarantined: list[bytes] = []
 
     # -- storage ---------------------------------------------------------
 

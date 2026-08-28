@@ -217,25 +217,44 @@ class SopLibrary:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _read_all(self) -> list[SOP]:
+        """Every readable version. An unreadable line is quarantined, not fatal.
+
+        Reads BYTES and decodes per line for the same reason the work queue
+        does: decoding the whole file puts `UnicodeDecodeError` — a `ValueError`,
+        not a `JSONDecodeError` — outside the per-line handler, and one stray
+        byte then makes the entire SOP library unreadable.
+        """
         if not self.path.exists():
             return []
         out: list[SOP] = []
-        self.quarantined = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
+        quarantined: list[bytes] = []
+        for raw_line in self.path.read_bytes().split(b"\n"):
+            if not raw_line.strip():
                 continue
             try:
-                out.append(SOP.from_json(line))
-            except (json.JSONDecodeError, ValueError, TypeError):
-                self.quarantined.append(line)
+                out.append(SOP.from_json(raw_line.decode("utf-8")))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+                quarantined.append(raw_line)
+        self.quarantined = quarantined
         return out
 
-    def _write_all(self, sops: list[SOP]) -> None:
+    def _write_all(self, sops: list[SOP], quarantined: Sequence[bytes] = ()) -> None:
+        """Atomic replace, carrying quarantined lines through verbatim.
+
+        **Losing this here is worse than losing it in the work queue.** A
+        deleted SOP row frees its version number, and `revise()` computes the
+        next version as `max(...) + 1` over the SURVIVORS — so it reissues the
+        destroyed number to different text. An instance pinned to v2 then
+        resolves to a procedure it never ran. The pin is unchanged; what it
+        resolves to is not, which is the one thing versioning exists to prevent.
+        """
         fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "wb") as handle:
                 for sop in sops:
-                    handle.write(sop.to_json() + "\n")
+                    handle.write(sop.to_json().encode("utf-8") + b"\n")
+                for line in quarantined:
+                    handle.write(line + b"\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, self.path)
@@ -263,7 +282,7 @@ class SopLibrary:
         with self._locked():
             existing = self._read_all()
             existing.append(sop)
-            self._write_all(existing)
+            self._write_all(existing, self.quarantined)
         return sop
 
     def revise(self, sop_id: str, title: Optional[str] = None, **body) -> SOP:
@@ -287,6 +306,24 @@ class SopLibrary:
                     f"they were editing a procedure people already follow."
                 )
             latest = max(versions, key=lambda s: s.version)
+
+            # REFUSE rather than guess when part of the history is unreadable.
+            # The next version is `max(...) + 1` over what can be PARSED, so a
+            # quarantined row silently frees its number and `revise` reissues it
+            # to different text. An instance pinned to that version then resolves
+            # to a procedure it never ran — the pin is unchanged, what it points
+            # at is not, and that is the one thing versioning exists to prevent.
+            # Preserving the bytes (see `_write_all`) stops the data being lost;
+            # only refusing here stops the NUMBER being reused.
+            if self.quarantined:
+                raise SopError(
+                    f"cannot revise {sop_id!r}: {len(self.quarantined)} line(s) in "
+                    f"the SOP store could not be parsed, so the full version "
+                    f"history is not visible and the next version number cannot "
+                    f"be chosen safely. Repair or remove those lines first — they "
+                    f"are preserved verbatim in the file. Reissuing a version "
+                    f"number would silently re-point every instance pinned to it."
+                )
 
             carried = {
                 key: getattr(latest, key)
@@ -315,7 +352,7 @@ class SopLibrary:
                     # nothing having been deliberately changed.
                     sop.superseded_by = new.version
             all_sops.append(new)
-            self._write_all(all_sops)
+            self._write_all(all_sops, self.quarantined)
         return new
 
     def activate(self, sop_id: str, version: int) -> SOP:
@@ -333,7 +370,7 @@ class SopLibrary:
                     sop.status = SopStatus.SUPERSEDED
             target.status = SopStatus.ACTIVE
             target.superseded_by = None
-            self._write_all(all_sops)
+            self._write_all(all_sops, self.quarantined)
         return target
 
     # -- reading ---------------------------------------------------------
