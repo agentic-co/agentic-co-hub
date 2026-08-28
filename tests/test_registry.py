@@ -267,25 +267,66 @@ def test_a_resolver_that_cannot_read_its_target_degrades_rather_than_crashes(con
         snapshots.RESOLVERS.pop("widgetstore", None)
 
 
-def test_an_https_pointer_is_resolved_by_HEAD_so_no_body_is_fetched(monkeypatch, conn):
-    """HEAD rather than GET is the whole point — the version token arrives
-    without transferring the document."""
-    seen = {}
+def test_an_https_pointer_is_resolved_by_HEAD_so_no_body_is_fetched(conn):
+    """HEAD rather than GET is the point — the version token arrives without
+    transferring the document.
 
-    class FakeResponse:
-        headers = {"ETag": '"abc123"'}
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
+    This test used to monkeypatch `urllib.request.urlopen` with a fake and
+    assert the first request's method was HEAD. That was structurally incapable
+    of catching the real defect: the fake REPLACED the opener chain, which is
+    exactly where redirect handling lives, and urllib silently downgraded a
+    redirected HEAD to GET. The test asserted client intent; the bug was in what
+    went on the wire.
 
-    def fake_urlopen(request, timeout=None):
-        seen["method"] = request.get_method()
-        return FakeResponse()
+    Now it runs a real local HTTP server and asserts the METHODS THE SERVER
+    RECEIVED, through a redirect. Protocol evidence rather than intent.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    kind, value, unresolved = snapshots.resolve("https://example.com/spec.pdf")
-    assert seen["method"] == "HEAD"
+    received: list[tuple[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # keep the test output quiet
+            pass
+
+        def _record(self):
+            received.append((self.command, self.path))
+
+        def do_HEAD(self):
+            self._record()
+            if self.path == "/moved":
+                self.send_response(302)
+                self.send_header("Location", "/final")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("ETag", '"abc123"')
+            self.end_headers()
+
+        def do_GET(self):
+            self._record()
+            body = b"x" * 4096
+            self.send_response(200)
+            self.send_header("ETag", '"abc123"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        kind, value, unresolved = snapshots.resolve(f"http://127.0.0.1:{port}/moved")
+    finally:
+        server.shutdown()
+
     assert (kind, value, unresolved) == ("etag", '"abc123"', None)
+    methods = [m for m, _ in received]
+    assert methods == ["HEAD", "HEAD"], (
+        f"the redirect was followed as {methods} — a GET transfers the body this "
+        f"resolver exists to avoid"
+    )
 
 
 def test_a_snapshot_without_a_purpose_is_refused(conn):

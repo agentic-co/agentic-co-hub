@@ -122,8 +122,31 @@ def resolve_https(uri: str) -> tuple[str, str]:
     """
     import urllib.request
 
+    class _KeepMethodOnRedirect(urllib.request.HTTPRedirectHandler):
+        """Preserve HEAD across a 3xx. urllib does not, before Python 3.13.
+
+        `HTTPRedirectHandler.redirect_request` rebuilds the request WITHOUT
+        passing `method=`, so a redirected HEAD silently becomes a GET and the
+        body transfers — defeating the entire reason this resolver uses HEAD.
+        Redirects are the norm for the document stores this points at, so it was
+        the common path rather than an edge case.
+
+        CPython fixed this in 3.13, which is how it was found: the failing test
+        XPASSed on one row of the version matrix and not the others. A defect
+        that exists on two of three supported interpreters is still a defect, and
+        pinning the behaviour here means the resolver does not depend on which
+        interpreter it happens to run under.
+        """
+
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            new = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if new is not None and req.get_method() == "HEAD":
+                new.get_method = lambda: "HEAD"  # noqa: E731
+            return new
+
+    opener = urllib.request.build_opener(_KeepMethodOnRedirect)
     request = urllib.request.Request(uri, method="HEAD")
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with opener.open(request, timeout=15) as response:
         etag = response.headers.get("ETag")
         if etag:
             return "etag", etag.strip()
@@ -143,6 +166,11 @@ RESOLVERS: dict[str, Callable[[str], tuple[str, str]]] = {
     "git": resolve_git,
     "file": resolve_file,
     "https": resolve_https,
+    # Plain http too. An internal wiki or artifact server on a private network
+    # frequently is not TLS-terminated, and having no resolver for it means
+    # those pointers are silently recorded as unresolvable — which looks like a
+    # missing connector rather than a scheme nobody registered.
+    "http": resolve_https,
 }
 
 

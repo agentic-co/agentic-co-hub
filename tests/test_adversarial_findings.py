@@ -564,11 +564,6 @@ def test_instantiate_never_silently_returns_an_item_pinned_to_another_version(li
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="urllib's HTTPRedirectHandler rebuilds the request with no method=, so "
-    "get_method() returns GET and a redirected HEAD transfers the body",
-)
 def test_an_https_pointer_is_never_resolved_by_a_body_transferring_get():
     """A single redirect downgrades the HEAD to a GET and pulls the whole body.
 
