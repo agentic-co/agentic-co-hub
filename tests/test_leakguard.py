@@ -155,9 +155,25 @@ def test_a_clean_tree_exits_zero(tmp_path, capsys):
     assert "clean" in capsys.readouterr().out
 
 
-def test_binary_and_unreadable_files_are_skipped_not_fatal(tmp_path):
-    (tmp_path / "blob.py").write_bytes(b"\xff\xfe\x00binary")
-    assert leakguard.scan_paths([tmp_path / "blob.py"], tmp_path, leakguard.Config()) == []
+def test_an_undecodable_file_is_reported_rather_than_silently_skipped(tmp_path):
+    """This test used to assert the opposite, and asserting it is what made the
+    hole permanent rather than merely present.
+
+    It read `scan_paths(...) == []` and called that "skipped, not fatal" — so a
+    UTF-16 source with a credential in it produced no finding, the run printed
+    `clean`, and the file count included a file nobody had looked at. The
+    module's own docstring says a suppression nobody can see is how a scanner
+    quietly stops scanning; an unreadable file is a suppression nobody chose,
+    and the test encoded it as correct behaviour.
+
+    Not fatal is still right — one bad file must not stop the scan. Silent is
+    what was wrong."""
+    (tmp_path / "blob.py").write_bytes(
+        ("TOKEN = 'ghp_" + "A" * 30 + "'").encode("utf-16")  # leakguard: allow
+    )
+    findings = leakguard.scan_paths([tmp_path / "blob.py"], tmp_path, leakguard.Config())
+    assert [f.rule for f in findings] == ["unreadable"]
+    assert "NOT checked" in findings[0].remediation
 
 
 def test_findings_report_file_line_rule_and_remediation():

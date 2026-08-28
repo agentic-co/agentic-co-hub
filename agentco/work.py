@@ -38,7 +38,6 @@ and be certain whose answer you are looking at.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import sys
@@ -51,6 +50,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
+from agentco.filelock import lock_exclusive, unlock
 from agentco.keys import derive_natural_key, natural_key_of
 
 DEFAULT_LEASE_TTL_S = 3600
@@ -238,11 +238,11 @@ class Queue:
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(lock_path, "a+") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            lock_exclusive(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+                unlock(handle)
 
     def _read_raw(self) -> tuple[list[dict], list[bytes]]:
         """`(parseable rows, quarantined raw lines)`. One bad line costs one row.

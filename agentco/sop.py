@@ -40,7 +40,6 @@ resulting numbers being read as more than they are.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import tempfile
@@ -52,6 +51,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
+from agentco.filelock import lock_exclusive, unlock
 from agentco.work import Queue, WorkItem, WorkStatus
 
 # The cap IS the discipline. An unbounded list of known failure modes is a wiki
@@ -212,11 +212,11 @@ class SopLibrary:
     def _locked(self) -> Iterator[None]:
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         with open(lock_path, "a+") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            lock_exclusive(handle)
             try:
                 yield
             finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+                unlock(handle)
 
     def _read_all(self) -> list[SOP]:
         """Every readable version. An unreadable line is quarantined, not fatal.

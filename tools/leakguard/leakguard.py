@@ -337,8 +337,45 @@ def scan_paths(paths: Iterable[Path], root: Path, config: Config) -> list[Findin
             continue
         try:
             text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue  # binary or unreadable: not this tool's job
+        except UnicodeDecodeError:
+            # REPORTED, not skipped. A file this tool selected for scanning and
+            # then could not decode is a file it has no opinion about — and
+            # saying nothing turns that into an opinion, because the summary
+            # counts it among the files scanned. A UTF-16 source with a
+            # credential in it was invisible and the run still printed "clean".
+            #
+            # This is the module's own stated failure mode: "a suppression
+            # nobody can see is how a scanner quietly stops scanning". An
+            # unreadable file is a suppression nobody chose.
+            findings.append(
+                Finding(
+                    path=rel,
+                    line_no=0,
+                    rule="unreadable",
+                    match="(not valid UTF-8)",
+                    remediation=(
+                        "This file was selected for scanning and could not be decoded, "
+                        "so it was NOT checked. Confirm by hand that it carries no "
+                        "credential or identity, then allow the path in leakguard.toml. "
+                        "An unscanned file must never be counted as a clean one."
+                    ),
+                )
+            )
+            continue
+        except OSError:
+            findings.append(
+                Finding(
+                    path=rel,
+                    line_no=0,
+                    rule="unreadable",
+                    match="(could not be opened)",
+                    remediation=(
+                        "This file could not be read, so it was NOT checked. Fix the "
+                        "permissions or allow the path deliberately."
+                    ),
+                )
+            )
+            continue
         findings.extend(scan_text(text, rel, rules))
     return findings
 
