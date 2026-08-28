@@ -1873,3 +1873,178 @@ def test_the_signing_scheme_has_a_single_implementation():
         f"({', '.join(implementations)}) with no declared vendoring — two copies that agree "
         f"today, which is what both docstrings claim is impossible"
     )
+
+
+# --------------------------------------------------------------------------- #
+# What the signature actually covers
+# --------------------------------------------------------------------------- #
+
+
+def send_signed(client, method: str, send_path: str, signed_path: str, body: dict | None = None,
+                query: str = ""):
+    """Sign one path and send to another, so the two can be varied independently."""
+    raw = json.dumps(body).encode() if body is not None else b""
+    timestamp = str(int(time.time()))
+    headers = {
+        "X-AgentCo-Actor": "dana",
+        "X-AgentCo-Timestamp": timestamp,
+        "X-AgentCo-Signature": auth.sign(KEYS["dana"], method, signed_path, timestamp, raw),
+        "Content-Type": "application/json",
+    }
+    if method == "GET":
+        return client.get(send_path + query, headers=headers)
+    return client.post(send_path + query, content=raw, headers=headers)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the ASGI server percent-decodes into scope['path'] and app.py signs "
+    "request.url.path, while the client can only sign the path it put on the wire",
+)
+def test_a_path_needing_percent_encoding_still_authenticates(client):
+    """A correctly-encoded request gets a 401, and nothing in the error mentions paths.
+
+    `app.py:94` signs `request.url.path`. That reads `scope["path"]`, which the
+    ASGI server has already percent-DECODED. The client signs the path it wrote
+    on the wire, which is the encoded form. Measured directly:
+
+        wire path sent          /scope-claims/lease%20abc/release
+        scope['raw_path']       b'/scope-claims/lease%20abc/release'
+        scope['path']           '/scope-claims/lease abc/release'   <- signed by the server
+        request.url.path        '/scope-claims/lease abc/release'
+
+    So the two sides sign different strings for the same request and the
+    signature cannot match. Confirmed end to end: that path returns 401
+    `unauthenticated`, while `/scope-claims/lease_plain/release` reaches the
+    handler and returns 404 `no_such_lease`.
+
+    The failure mode is the reason this is worth a test rather than a note. It
+    surfaces as an authentication error — "actor or signature rejected", with a
+    remediation about checking the shared secret — on a request whose actor and
+    secret are both perfectly correct. The one thing it never mentions is the
+    path. A colleague hitting this checks their key, re-copies it, checks it
+    again, and concludes the registry is broken; `errors.py` exists to prevent
+    exactly that experience, and here the remediation actively misdirects.
+
+    ON WHICH SIDE IS AUTHORITATIVE — this pins the WIRE form, and the codebase
+    already picked it. `auth.py:189`, in the remediation returned on a bad
+    signature, tells the caller the signed string uses "the path exactly as
+    sent, query string excluded". The server instructs clients to sign the wire
+    form and then verifies against the decoded one. That is not a preference to
+    be argued; it is the module contradicting itself in the same file, and the
+    error message a confused caller reads is the half that is right.
+
+    Two further reasons a disjunction is not available here. "Server signs the
+    decoded path" is already true today, so an assertion accepting it would pass
+    against the current broken code. And the asymmetry is real: a client can
+    only know what it sent, whereas the server can always recover it —
+    `scope['raw_path']` preserves the wire bytes and is right there, so the fix
+    needs no client change at all.
+
+    If the project chooses the decoded form anyway, then `auth.py:189` and
+    `publish.py` both have to change too, and this test changes with them — it
+    encodes "client and server agree", and the client is the shipped one.
+
+    A related shape not asserted here: `/scope-claims/lease%2Fabc/release`
+    returns a bare 404 with no `code` and no `remediation`, because `%2F`
+    decodes to `/`, the route no longer matches, and FastAPI's own 404 answers
+    instead of a `Refusal`. That is a router-level gap rather than a signing
+    one.
+
+    Why the existing tests miss it: `test_the_three_endpoints_work_end_to_end`
+    and every other HTTP test use paths that are byte-identical encoded and
+    decoded — `/scope-claims`, `/events`, `/snapshots` and a `lease_<hex>` uid.
+    Encoded and decoded forms only diverge for a path containing a character
+    that needs escaping, and no fixture in the suite has one.
+    """
+    encoded_path = "/scope-claims/lease%20abc/release"
+
+    response = send_signed(
+        client, "POST", encoded_path, encoded_path, {"action": "released"}
+    )
+
+    assert response.status_code != 401, (
+        "a client that correctly percent-encodes its path cannot authenticate: "
+        f"{response.json()}"
+    )
+
+    # Paths needing no encoding must keep working, and a genuinely tampered path
+    # must keep being rejected — the fix is not "stop signing the path".
+    plain = send_signed(
+        client,
+        "POST",
+        "/scope-claims/lease_plain/release",
+        "/scope-claims/lease_plain/release",
+        {"action": "released"},
+    )
+    assert plain.json()["code"] == "no_such_lease", "auth must still pass for a plain path"
+
+    tampered = send_signed(
+        client,
+        "POST",
+        "/scope-claims/lease_bbb/release",
+        "/scope-claims/lease_aaa/release",
+        {"action": "released"},
+    )
+    assert tampered.status_code == 401, "a signature must still be bound to its path"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the signing string covers method, path, timestamp and a body digest, but "
+    "not the query string, so one signed GET is valid for every query",
+)
+def test_the_signature_covers_the_query_string(client):
+    """One captured `GET /events` replays as any feed query for the full window.
+
+    `auth.signing_string` is `METHOD\\npath\\ntimestamp\\nsha256(body)`. On a GET
+    the body is empty, so for a given actor and second, the signature depends on
+    nothing but the method and the path — and every `/events` request shares
+    both. The query string carries the entire meaning of the request:
+    `since`, `limit` and `kind` are what decide which events come back.
+
+    Measured with ONE signature over `GET /events`:
+        /events                                 -> 200
+        /events?limit=1                         -> 200
+        /events?limit=500&kind=ScopeConflict    -> 200
+        /events?since=&limit=500                -> 200
+
+    So anyone who observes a single signed feed poll can, for the remaining
+    `MAX_SKEW_S` (300 s), read the feed from the beginning at maximum page size
+    — `?since=` resets to seq 0 — rather than only the page that was captured.
+    `auth.py` frames the timestamp as what stops replay "once the window
+    closes"; inside the window there is no nonce and no seen-set, so the window
+    is not a small residual risk but the whole exposure, and it is far larger
+    than one captured page.
+
+    `publish.py:74-76` states the reason for the omission — "a proxy that
+    reorders or re-encodes query parameters must not invalidate the signature" —
+    which is a real concern and not a careless one. It argues for signing a
+    CANONICAL form of the query (sorted, re-encoded consistently) rather than
+    for signing none of it. Any of those satisfies this test; it asserts only
+    that changing the query invalidates the signature.
+
+    Worth noting for whoever takes it: this is the one fix in the list that
+    cannot be made on the server alone. Both ends must change together, and
+    there are currently two hand-written signing implementations — see
+    `test_the_signing_scheme_has_a_single_implementation`. Fixing A7 first makes
+    this a one-place change instead of a two-place one that can half-land.
+
+    Why the existing tests miss it: `test_a_tampered_body_invalidates_the_signature`
+    covers the body and `test_a_replayed_request_outside_the_window_is_refused`
+    covers the timestamp — the two components that ARE signed. No test varies
+    the query between signing and sending, so the component that is not covered
+    is the one never varied.
+    """
+    replayed = send_signed(
+        client, "GET", "/events", "/events", None, "?since=&limit=500&kind=ScopeConflict"
+    )
+    assert replayed.status_code == 401, (
+        "a signature issued for one feed query authenticated a different one: "
+        f"{replayed.status_code}"
+    )
+
+    # The ordinary cases must keep working — a query matching what was signed,
+    # and no query at all.
+    bare = send_signed(client, "GET", "/events", "/events")
+    assert bare.status_code == 200, "an unqueried feed poll must still authenticate"
