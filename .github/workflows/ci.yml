@@ -35,4 +35,9 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install ${{ matrix.python-version }}
-      - run: uv run --extra dev --python ${{ matrix.python-version }} pytest -q
+      # ALL the extras the suite imports, not just `dev`. This ran `--extra dev`
+      # alone until the first push to a real runner, because every local run
+      # used all three and the gap was invisible on the developer's machine —
+      # the same shape as a test that only passes in one environment, which
+      # this project has already been bitten by once.
+      - run: uv run --extra dev --extra server --extra mcp --python ${{ matrix.python-version }} pytest -q
