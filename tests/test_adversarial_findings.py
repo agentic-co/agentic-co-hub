@@ -14,10 +14,10 @@ The names state the property that should hold, never the bug. If you are
 reading one of these because it started failing as an XPASS: that is the
 system working. Remove the marker.
 
-**Some now pass.** A test WITHOUT a marker is a defect that has been fixed,
-kept as a regression test. Those are the valuable ones — they are the only
-tests in the suite known to have caught a real bug in this code. Two rules for
-them, learned from doing it wrong here:
+**Some now pass.** A test WITHOUT a marker is almost always a defect that has
+been fixed, kept as a regression test. Those are the valuable ones — they are
+the only tests in the suite known to have caught a real bug in this code. Two
+rules for them, learned from doing it wrong here:
 
   * Assert the PROPERTY, not the route the original defect took. A repro that
     calls the API the fix now refuses will raise during setup and go on
@@ -25,6 +25,12 @@ them, learned from doing it wrong here:
   * A newly-passing test must be shown to FAIL against the pre-fix code before
     the marker comes off, or it may be passing vacuously. Checking out the
     previous revision of the one module and re-running is enough.
+
+The one exception is a GUARD: a test that never failed, kept because it catches
+a defect the moment it is introduced rather than one already present. There is
+currently one — `test_both_signing_implementations_agree_on_every_edge`, which
+says so in its own docstring. A guard has to be shown non-vacuous too, by
+perturbing the thing it watches and confirming it goes red.
 
 **Why a separate file.** These are not confirmations of the design; they are
 counterexamples to it. Several of them sit directly beside an existing test
@@ -55,7 +61,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agentco import auth, db, metrics, snapshots
+from agentco import auth, db, metrics, publish, snapshots
 from agentco.app import create_app, get_conn
 from agentco.errors import Refusal, Unauthenticated
 from agentco.scope import Scope, prefixes_overlap, scopes_intersect, validate_prefix
@@ -806,11 +812,6 @@ git_available = shutil.which("git") is not None
 
 
 @pytest.mark.skipif(not git_available, reason="git is required to stage anything")
-@pytest.mark.xfail(
-    strict=True,
-    reason="staged_files() lists names from the index but scan_paths() reads each "
-    "path from the working tree, so the bytes being committed are never examined",
-)
 def test_staged_mode_scans_the_content_that_is_about_to_be_committed(tmp_path):
     """`--staged` checks the working tree, so a scrubbed worktree hides a staged secret.
 
@@ -858,13 +859,8 @@ def test_staged_mode_scans_the_content_that_is_about_to_be_committed(tmp_path):
     assert exit_code == 1, "the hook approved a commit that records a live credential"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the (?<!0\\.0\\.0\\.0) lookbehind sits after \\b and matches any address "
-    "whose last seven characters are 0.0.0.0, so the whole N0.0.0.0 family escapes",
-)
 def test_a_private_network_address_is_flagged_even_when_it_ends_in_zeros():
-    """`10.0.0.0/8` — the most common private range there is — is invisible to the guard.
+    """`10.0.0.0/8` — the most common private range there is — is invisible to the guard.  # leakguard: allow
 
     The rule is
     `\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b(?<!0\\.0\\.0\\.0)(?<!127\\.0\\.0\\.1)`.
@@ -874,8 +870,8 @@ def test_a_private_network_address_is_flagged_even_when_it_ends_in_zeros():
     address. Any address whose final seven characters are `0.0.0.0` therefore
     satisfies the negative lookbehind and is dropped.
 
-    That is the entire `N0.0.0.0` family: `10.0.0.0`, `20.0.0.0` … `90.0.0.0`,
-    `100.0.0.0`, `250.0.0.0`. It is not a broad rule failure — host addresses
+    That is the entire `N0.0.0.0` family: `10.0.0.0`, `20.0.0.0` … `90.0.0.0`,  # leakguard: allow
+    `100.0.0.0`, `250.0.0.0`. It is not a broad rule failure — host addresses  # leakguard: allow
     and non-zero networks are still caught, as the second block below pins.
     What escapes is precisely the NETWORK addresses, which are the ones most
     likely to appear in a committed config, a firewall rule or a subnet
@@ -894,7 +890,7 @@ def test_a_private_network_address_is_flagged_even_when_it_ends_in_zeros():
     a hostname, not an address. No test asserts that a non-exempt address IS
     caught, so the over-broad exemption has nothing to fail against.
     """
-    for address in ("10.0.0.0", "100.0.0.0", "20.0.0.0", "250.0.0.0"):
+    for address in ("10.0.0.0", "100.0.0.0", "20.0.0.0", "250.0.0.0"):  # leakguard: allow
         assert "private-host" in leakguard_rules_hit(f"upstream {address}"), (
             f"{address} is a private network address and was not flagged"
         )
@@ -913,11 +909,6 @@ def test_a_private_network_address_is_flagged_even_when_it_ends_in_zeros():
     assert "private-host" not in leakguard_rules_hit("bind 0.0.0.0:8787")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='Path(".env.example").suffix is ".example", so the ".env.example" entry in '
-    "DEFAULT_INCLUDE_SUFFIXES can never match and the file is never opened",
-)
 def test_an_env_example_file_is_scanned_for_leaks(tmp_path):
     """The one filename most likely to hold a credential is excluded by a typo in the include set.
 
@@ -1712,3 +1703,173 @@ def test_a_refusal_over_mcp_carries_its_code_as_a_field(tmp_path):
     # The human half must survive any fix — the message and remediation are why
     # a first-time caller does not conclude the tool is broken.
     assert "Re-claim naming at least" in str(error)
+
+
+# --------------------------------------------------------------------------- #
+# The signing scheme — one implementation, or two that agree until they don't
+# --------------------------------------------------------------------------- #
+#
+# Two files each assert that the other is the safeguard:
+#
+#   auth.py:86-87    "A second hand-written copy of this in a publisher example
+#                     is how a signing scheme drifts; `agentco/publish.py`
+#                     imports this function."
+#   publish.py:11-13 "It imports `auth.sign` when AgentCo is importable and
+#                     inlines the same three lines when it is not — the signing
+#                     scheme must never exist in two implementations that can
+#                     drift."
+#
+# Neither is true. `grep -n auth agentco/publish.py` returns only the docstring
+# line; there is no import, and `publish._sign` is an independent hand-written
+# copy. The stated drift-prevention mechanism does not exist, and each file
+# cites the other as the reason it is safe.
+#
+# The two tests below are deliberately different claims. The first is necessary
+# and not sufficient; the second is the property both docstrings assert.
+
+AGENTCO_PACKAGE = Path(__import__("agentco").__file__).parent
+
+# A vendored copy is an acceptable answer — but only a DECLARED one, pinned to
+# the bytes it was copied from, so the copy cannot drift silently. This is the
+# marker `test_the_signing_scheme_has_a_single_implementation` will accept.
+VENDOR_MARKER = "# vendored-from: agentco/auth.py sha256="
+
+
+def modules_constructing_the_hmac() -> list[str]:
+    """Every shipped module that builds the signature itself, by source inspection."""
+    return sorted(
+        path.name
+        for path in AGENTCO_PACKAGE.glob("*.py")
+        if "hmac.new(" in path.read_text(encoding="utf-8")
+    )
+
+
+def canonical_signing_source() -> bytes:
+    import inspect
+
+    return (inspect.getsource(auth.signing_string) + inspect.getsource(auth.sign)).encode("utf-8")
+
+
+def vendoring_is_declared_and_current() -> bool:
+    """True only if a copy declares its source AND pins the exact bytes it copied."""
+    import hashlib
+
+    for path in AGENTCO_PACKAGE.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "hmac.new(" not in text or path.name == "auth.py":
+            continue
+        declared = next(
+            (
+                line.split("sha256=", 1)[1].strip()
+                for line in text.splitlines()
+                if VENDOR_MARKER in line
+            ),
+            None,
+        )
+        if declared != hashlib.sha256(canonical_signing_source()).hexdigest():
+            return False
+    return True
+
+
+SIGNING_EDGE_CASES = (
+    ("an empty body", "POST", "/scope-claims", "", b""),
+    ("an ordinary body", "POST", "/scope-claims", "1700000000", b'{"repo":"acme/web-platform"}'),
+    ("a non-ASCII body", "POST", "/snapshots", "1700000000", '{"purpose":"café ☕"}'.encode("utf-8")),
+    ("a percent-encoded path", "POST", "/scope-claims/lease%2Fabc/release", "1700000000", b"{}"),
+    ("a path containing a space", "GET", "/a b/c", "1700000000", b""),
+    ("a lowercase method", "post", "/scope-claims", "1700000000", b"{}"),
+    ("a newline in the path", "POST", "/a\nb", "1700000000", b""),
+)
+
+
+def test_both_signing_implementations_agree_on_every_edge():
+    """The necessary half of A7 — and NOT a fixed defect, unlike the other unmarked tests.
+
+    This one never failed. It is a drift detector, kept because two copies
+    agreeing today is precisely the state that precedes them not agreeing, and
+    the day one is edited is the day this needs to already exist. It carries no
+    xfail marker because there is nothing here to fix.
+
+    The edges are where two hand-written copies diverge first, so they are
+    enumerated rather than left to a single happy-path comparison: an empty body
+    (`sha256(b"")` is a real digest, not a skipped field), a non-ASCII body
+    (both `.encode()` with no explicit encoding), a percent-encoded path, a path
+    with a space, a lowercase method (both `.upper()`), and a newline in the
+    path (the signing string is newline-delimited, so an embedded newline is the
+    one input that could make two components ambiguous).
+
+    RELATED, and deliberately not asserted here: A15. The server signs
+    `request.url.path`, which Starlette percent-DECODES, while the client signs
+    the path as written. Both implementations agree with each other on the
+    percent-encoded case below — they are the same three lines — so this test
+    cannot see that problem. It is a client/server disagreement, not a
+    copy/copy one, and it needs its own test rather than being smuggled in here.
+
+    Why the existing tests miss it: `test_the_three_endpoints_work_end_to_end`
+    and every other HTTP test call `auth.sign` to build their headers. Nothing
+    in the suite calls `publish._sign` at all, so the second implementation is
+    entirely unexercised — it could return a constant and the suite would stay
+    green.
+    """
+    for label, method, path, timestamp, body in SIGNING_EDGE_CASES:
+        secret = "shared-secret"
+        assert auth.sign(secret, method, path, timestamp, body) == publish._sign(
+            secret, method, path, timestamp, body
+        ), f"the two signing implementations disagree on {label}"
+
+    # A non-ASCII secret, which is the other side of the same `.encode()`.
+    assert auth.sign("s3cr€t", "POST", "/scope-claims", "1700000000", b"{}") == publish._sign(
+        "s3cr€t", "POST", "/scope-claims", "1700000000", b"{}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="publish._sign is an independent hand-written copy; there is no import of "
+    "auth.sign and no declared vendoring, so the two can drift silently",
+)
+def test_the_signing_scheme_has_a_single_implementation():
+    """Two copies that agree are not the same thing as one implementation.
+
+    `test_both_signing_implementations_agree_on_every_edge` above passes today,
+    and will keep passing right up until someone opens one of the two files and
+    fixes a bug in the copy they happened to find. That test compares OUTPUTS,
+    and outputs cannot distinguish "one function" from "two identical
+    functions" — which is exactly the distinction both docstrings claim to have
+    made, and the only one that means anything six months from now.
+
+    So this asserts the structural property instead: the HMAC is constructed in
+    exactly ONE module of the shipped package. Measured by source inspection
+    rather than behaviour, because behaviour is what cannot see the difference.
+    Today `hmac.new(` appears in both `auth.py` and `publish.py`.
+
+    The risk is concrete rather than theoretical. `publish.py` is described as
+    "the adoption instrument" and is explicitly meant to be COPY-PASTED by
+    colleagues who never install the package — so a drifted copy does not fail
+    loudly at import, it produces valid-looking signatures the server rejects,
+    and the colleague's first experience of the registry is a 401 they cannot
+    debug. `errors.py` is written around not doing that to people.
+
+    Three fixes satisfy this and the assertion accepts all three:
+      * import `auth.sign` in `publish.py`, which is what both docstrings
+        already claim happens;
+      * move the three lines to a module both import;
+      * keep the copy, but DECLARE it — a `# vendored-from: agentco/auth.py
+        sha256=<hex>` marker pinning the exact bytes copied, so the next edit to
+        `auth.sign` fails this test instead of silently desynchronising.
+    The third is the interesting one, because `publish.py` has a real reason to
+    be standalone. Vendoring is a legitimate answer; UNDECLARED vendoring that
+    two docstrings describe as an import is not.
+
+    Why the existing tests miss it: no test imports `agentco.publish`. The
+    module that exists to be the adoption instrument, and that carries the
+    second copy of the security-critical code, has no test coverage at all —
+    so neither the copy nor the claim about it has ever been checked.
+    """
+    implementations = modules_constructing_the_hmac()
+
+    assert implementations == ["auth.py"] or vendoring_is_declared_and_current(), (
+        f"the signing scheme is implemented independently in {len(implementations)} modules "
+        f"({', '.join(implementations)}) with no declared vendoring — two copies that agree "
+        f"today, which is what both docstrings claim is impossible"
+    )

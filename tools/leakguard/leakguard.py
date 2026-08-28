@@ -138,8 +138,15 @@ BASE_RULES: tuple[Rule, ...] = (
     ),
     Rule(
         name="private-host",
+        # The exemptions are ANCHORED to the whole match, not trailing-matched.
+        # The previous form put the lookbehinds after `\b`, so `(?<!0\.0\.0\.0)`
+        # excluded any address whose last seven characters were "0.0.0.0" —
+        # taking 10.0.0.0/8, the most common private range there is, along with  # leakguard: allow
+        # 20.0.0.0 through 250.0.0.0. An exemption for one literal must not  # leakguard: allow
+        # become a suffix rule.
         pattern=re.compile(
-            r"\b(?:\d{1,3}\.){3}\d{1,3}\b(?<!0\.0\.0\.0)(?<!127\.0\.0\.1)"
+            r"(?<![\w.])(?!(?:0\.0\.0\.0|127\.0\.0\.1)(?![\d.]))"
+            r"(?:\d{1,3}\.){3}\d{1,3}(?![\w.])"
             r"|\b[a-z0-9-]+\.(?:local|internal|corp|lan)\b"
         ),
         remediation=(
@@ -247,13 +254,44 @@ class Config:
         return tuple(rules)
 
 
+# Files worth scanning that carry no suffix, or whose suffix lies about them.
+# `Path(".env.example").suffix` is ".example", so a suffix list containing
+# ".env.example" could never match it — and every extensionless file was
+# skipped outright, including `tools/leakguard/pre-commit`, the hook this repo
+# ships. A filter that silently declines to look is the same failure as a
+# scanner that looks and says nothing.
+SCAN_BY_NAME = {
+    "dockerfile", "makefile", "procfile", "jenkinsfile", "vagrantfile",
+    "pre-commit", "pre-push", "commit-msg", ".env.example", ".env.sample",
+    ".env.template", ".envrc", ".gitconfig", ".netrc",
+}
+
+
+def _is_scannable(path: Path, config: Config) -> bool:
+    name = path.name.lower()
+    if name in SCAN_BY_NAME:
+        return True
+    if name.startswith(".env"):
+        return True
+    if path.suffix:
+        return path.suffix.lower() in config.include_suffixes
+    # No suffix and not a known name: scan it if it looks like text. Guessing
+    # from content rather than skipping is the right default for a guard —
+    # a false positive costs one suppression, a false negative costs a leak.
+    try:
+        chunk = path.read_bytes()[:2048]
+    except OSError:
+        return False
+    return b"\x00" not in chunk
+
+
 def iter_files(root: Path, config: Config) -> Iterator[Path]:
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
         if any(part in DEFAULT_SKIP_DIRS for part in path.parts):
             continue
-        if path.suffix.lower() not in config.include_suffixes:
+        if not _is_scannable(path, config):
             continue
         yield path
 
@@ -305,20 +343,62 @@ def scan_paths(paths: Iterable[Path], root: Path, config: Config) -> list[Findin
     return findings
 
 
-def staged_files(root: Path) -> list[Path]:
-    """Files staged for commit — the pre-commit mode.
+class GitUnavailable(RuntimeError):
+    """git could not be consulted, so what is staged is unknown.
 
-    Only ADDED/COPIED/MODIFIED/RENAMED are considered; a deletion cannot
-    introduce anything.
+    Raised rather than returning an empty list. An empty list is
+    indistinguishable from "nothing is staged", so a git failure used to make
+    the hook print `clean` and exit 0 — a guard whose whole purpose is to fail
+    loudly, failing open on its own inability to look.
     """
-    result = subprocess.run(
-        ["git", "-C", str(root), "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+
+
+def staged_blobs(root: Path) -> list[tuple[str, bytes]]:
+    """`(path, content)` for everything staged — read from the INDEX, not disk.
+
+    This is the fix for the defect that mattered most in this file. The old
+    version listed names from the index and then read them from the WORKING
+    TREE, so the two could differ — and the case where they differ is exactly
+    the dangerous one:
+
+        staged:   TOKEN = "ghp_..."
+        worktree: TOKEN = os.environ["TOKEN"]
+
+    The scanner read the clean worktree, reported `clean`, exited 0, and the
+    commit recorded the credential. A guard that approves precisely the content
+    it did not look at is worse than no guard, because it converts an absent
+    check into a false assurance.
+
+    `git cat-file` against the staged blob hash reads what is actually about to
+    be committed. A staged-then-deleted file still has its blob, so it is
+    scanned too — which the old path skipped silently through its OSError catch.
+    """
+    listing = subprocess.run(
+        ["git", "-C", str(root), "diff", "--cached", "--name-only", "-z",
+         "--diff-filter=ACMR"],
         capture_output=True,
-        text=True,
     )
-    if result.returncode != 0:
-        return []
-    return [root / line for line in result.stdout.splitlines() if line.strip()]
+    if listing.returncode != 0:
+        raise GitUnavailable(
+            f"git could not list staged files "
+            f"({listing.stderr.decode(errors='replace').strip() or 'no error text'})"
+        )
+
+    names = [n for n in listing.stdout.split(b"\x00") if n]
+    out: list[tuple[str, bytes]] = []
+    for raw_name in names:
+        name = raw_name.decode("utf-8", errors="replace")
+        blob = subprocess.run(
+            ["git", "-C", str(root), "show", f":{name}"],
+            capture_output=True,
+        )
+        if blob.returncode != 0:
+            # Cannot read the staged content, so cannot vouch for it. Surfaced
+            # as an unreadable finding rather than skipped — see main().
+            out.append((name, b""))
+            continue
+        out.append((name, blob.stdout))
+    return out
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -347,16 +427,44 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
         )
 
-    if args.paths:
-        targets = [Path(p).resolve() for p in args.paths]
-    elif args.staged:
-        targets = staged_files(root)
+    rules = BASE_RULES + config.configured_rules()
+    if args.staged:
+        # Scan the staged CONTENT, never the file on disk beside it.
+        try:
+            blobs = staged_blobs(root)
+        except GitUnavailable as exc:
+            print(f"leakguard: {exc} — refusing rather than reporting clean.", file=sys.stderr)
+            return 1
+        findings = []
+        scanned = len(blobs)
+        for name, content in blobs:
+            if _path_allowed(name, config):
+                continue
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                findings.append(
+                    Finding(
+                        path=name,
+                        line_no=0,
+                        rule="unreadable",
+                        match="(staged content is not valid UTF-8)",
+                        remediation=(
+                            "This file could not be decoded, so it was NOT scanned. "
+                            "Confirm by hand that it carries no credential or identity, "
+                            "then allow the path in leakguard.toml. An unscanned file "
+                            "must never be reported as a clean one."
+                        ),
+                    )
+                )
+                continue
+            findings.extend(scan_text(text, name, rules))
     else:
-        targets = list(iter_files(root, config))
-
-    findings = scan_paths(targets, root, config)
+        targets = [Path(p).resolve() for p in args.paths] if args.paths else list(iter_files(root, config))
+        scanned = len(targets)
+        findings = scan_paths(targets, root, config)
     if not findings:
-        print(f"leakguard: clean ({len(list(targets))} file(s) scanned)")
+        print(f"leakguard: clean ({scanned} file(s) scanned)")
         return 0
 
     by_rule: dict[str, int] = {}
