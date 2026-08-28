@@ -8,9 +8,10 @@ colleague to make their first accepted call.
 So: no dependencies beyond the standard library, one file, copy-pasteable.
 A colleague should be able to drop this next to their script and publish
 without installing AgentCo, reading the design, or asking anyone for a
-package. It imports `auth.sign` when AgentCo is importable and inlines the
-same three lines when it is not — the signing scheme must never exist in two
-implementations that can drift.
+package. The signing function is therefore a DECLARED COPY of `auth.sign`,
+carrying a hash marker that goes stale — and fails a test — the moment the
+original changes. Importing it would be tidier and would destroy the one
+property this file exists to have.
 
 Two example publishers, per docs/roadmap.md's 1c ("two example HTTP publishers"):
 `claim_scope` for someone about to work in a directory, and `snapshot` for
@@ -30,6 +31,23 @@ from typing import Any, Optional
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 
 
+# vendored-from: agentco/auth.py sha256=cd9e310668a447186d8df3c47e84cc76076911a10cb3e17c12decefd7ba76623
+#
+# A DECLARED COPY, not an accident, and not an import. This file exists to be
+# copy-pasted by someone who never installs the package — that is the whole
+# point of it, and importing `agentco.auth` would destroy the property it is
+# for. So the duplication stays, and what changes is that it is now DECLARED:
+# the hash above pins the exact bytes of `auth.signing_string` + `auth.sign`
+# that were copied.
+#
+# The marker is what makes drift detectable. Edit `auth.sign` without
+# re-vendoring and the hash goes stale and the test fails — which is the real
+# risk here, because a drifted copy does not fail at import. It produces
+# valid-looking signatures the server rejects, so a colleague's first contact
+# with the registry is a 401 they cannot debug.
+#
+# Two docstrings used to claim this file imported the function. Neither was
+# true, and each pointed at the other as the safeguard.
 def _sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> str:
     digest = hashlib.sha256(body or b"").hexdigest()
     signing_string = f"{method.upper()}\n{path}\n{timestamp}\n{digest}"

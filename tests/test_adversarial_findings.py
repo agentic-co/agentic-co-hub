@@ -860,7 +860,7 @@ def test_staged_mode_scans_the_content_that_is_about_to_be_committed(tmp_path):
 
 
 def test_a_private_network_address_is_flagged_even_when_it_ends_in_zeros():
-    """`10.0.0.0/8` — the most common private range there is — is invisible to the guard.  # leakguard: allow
+    """The 10/8 range — the most common private network there is — is invisible to the guard.
 
     The rule is
     `\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b(?<!0\\.0\\.0\\.0)(?<!127\\.0\\.0\\.1)`.
@@ -870,12 +870,21 @@ def test_a_private_network_address_is_flagged_even_when_it_ends_in_zeros():
     address. Any address whose final seven characters are `0.0.0.0` therefore
     satisfies the negative lookbehind and is dropped.
 
-    That is the entire `N0.0.0.0` family: `10.0.0.0`, `20.0.0.0` … `90.0.0.0`,  # leakguard: allow
-    `100.0.0.0`, `250.0.0.0`. It is not a broad rule failure — host addresses  # leakguard: allow
-    and non-zero networks are still caught, as the second block below pins.
-    What escapes is precisely the NETWORK addresses, which are the ones most
-    likely to appear in a committed config, a firewall rule or a subnet
-    comment.
+    That is the whole family whose first octet ends in a zero and whose
+    remaining octets are zero — the 10/8, 20/8 … 90/8, 100/8 and 250/8 network
+    addresses, enumerated concretely in the first assertion block below. It is
+    not a broad rule failure: host addresses and non-zero networks are still
+    caught, as the second block pins. What escapes is precisely the NETWORK
+    addresses, which are the ones most likely to appear in a committed config,
+    a firewall rule or a subnet comment.
+
+    (The literals live in the assertions rather than in this prose on purpose.
+    An inline suppression sitting on a docstring line is not a comment — it is
+    text that happens to contain the marker string — and it survives only until
+    someone rewraps the paragraph, at which point the scan fails on a line with
+    no marker and the docstring starts accumulating them. Worse, such a line
+    silently stops being scanned for everything else too. Markers belong on code
+    lines, where they do not drift and where what they cover is obvious.)
 
     The loopback assertions are kept in the same test on purpose. They are what
     stops the fix being "drop the lookbehinds and flag everything", which would
@@ -1823,11 +1832,6 @@ def test_both_signing_implementations_agree_on_every_edge():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="publish._sign is an independent hand-written copy; there is no import of "
-    "auth.sign and no declared vendoring, so the two can drift silently",
-)
 def test_the_signing_scheme_has_a_single_implementation():
     """Two copies that agree are not the same thing as one implementation.
 

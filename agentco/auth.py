@@ -116,7 +116,10 @@ def sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> st
     """The client side, exported so tests and the example publishers share one implementation.
 
     A second hand-written copy of this in a publisher example is how a signing
-    scheme drifts; `agentco/publish.py` imports this function.
+    scheme drifts. `agentco/publish.py` does NOT import it — it cannot, it is
+    meant to be copy-pasted standalone — so it carries a declared copy with a
+    hash marker pinning these exact bytes. Change this function and that marker
+    goes stale and a test fails, which is the substitute for an import.
     """
     return hmac.new(
         secret.encode(),
