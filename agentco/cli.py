@@ -18,8 +18,10 @@ import secrets
 import sys
 from pathlib import Path
 
-from agentco import app as app_module
+from agentco import ado, app as app_module
 from agentco import db, divergence, hook, inject, leases, metrics
+from agentco.publish import Registry
+from agentco.work import Queue, resolve_work_store
 
 
 def _conn(args):
@@ -191,6 +193,79 @@ def cmd_metrics(args) -> int:
     return 0
 
 
+def cmd_ado_pull(args) -> int:
+    """Read work items from Azure DevOps and file them onto the queue.
+
+    Dry-run by default, the same posture as `digest` and `inject`: this writes
+    into a queue that other people's agents poll, so running it by mistake
+    should cost nothing but a printed list.
+
+    Nothing here writes to Azure DevOps. The adapter issues reads only, and a
+    repeat run is a no-op because every item is keyed on its ADO id.
+    """
+    fetch = ado.make_fetcher(ado.resolve_pat(args.pat_env))
+    ids = [int(i) for i in args.ids.split(",")] if args.ids else None
+    payloads = ado.pull(
+        fetch,
+        args.org_url,
+        args.project,
+        wiql=args.wiql,
+        ids=ids,
+        contains=args.contains,
+        item_type=args.item_type,
+        assign=args.assign,
+        limit=args.limit,
+    )
+
+    for payload in payloads:
+        meta = payload["metadata"]
+        print(f"  {meta['adoState']:<12} {payload['title']}")
+        print(f"               {meta['url']}")
+    if not payloads:
+        print("  (nothing matched)")
+
+    if not args.write:
+        print(f"\n{len(payloads)} item(s) would be filed"
+              f"{f' and assigned to {args.assign}' if args.assign else ''}. "
+              "Re-run with --write.")
+        return 0
+
+    if args.registry_url:
+        secret = os.environ.get(args.secret_env)
+        if not args.actor or not secret:
+            print(
+                f"--registry-url needs --actor and {args.secret_env} in the environment.",
+                file=sys.stderr,
+            )
+            return 2
+        registry = Registry(args.actor, secret, args.registry_url)
+
+        def file_one(p: dict) -> tuple[str, str]:
+            item = registry.work_create(
+                p["title"],
+                source=p["source"], sourceId=p["sourceId"],
+                metadata=p["metadata"],
+                **({"assignedAgent": p["assignedAgent"]} if p["assignedAgent"] else {}),
+            )["item"]
+            return item["id"], item.get("assigned_agent") or "-"
+    else:
+        queue = Queue(resolve_work_store(args.work_store))
+
+        def file_one(p: dict) -> tuple[str, str]:
+            item = queue.create(
+                p["title"],
+                source=p["source"], source_id=p["sourceId"],
+                assigned_agent=p["assignedAgent"], metadata=p["metadata"],
+            )
+            return item.id, item.assigned_agent or "-"
+
+    filed = [file_one(p) for p in payloads]
+    print(f"\nfiled {len(filed)} item(s):")
+    for item_id, assignee in filed:
+        print(f"  {item_id}  assigned={assignee}")
+    return 0
+
+
 def cmd_keygen(args) -> int:
     """Mint a shared secret for one actor and print the key-file line.
 
@@ -274,6 +349,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_metrics = sub.add_parser("metrics", help="stage-1d report")
     p_metrics.add_argument("--json", action="store_true")
     p_metrics.set_defaults(func=cmd_metrics)
+
+    p_ado = sub.add_parser(
+        "ado-pull",
+        help="file open Azure DevOps work items onto the queue (dry-run by default)",
+    )
+    p_ado.add_argument("--org-url", required=True, help="https://dev.azure.com/<org>")
+    p_ado.add_argument("--project", required=True)
+    p_ado.add_argument("--contains", help="filter on words in the title")
+    p_ado.add_argument("--type", dest="item_type", help="e.g. Task, User Story, Bug")
+    p_ado.add_argument("--ids", help="comma-separated work item ids, instead of a query")
+    p_ado.add_argument("--wiql", help="a raw WIQL query, instead of the built one")
+    p_ado.add_argument("--assign", help="the agent to assign every filed item to")
+    p_ado.add_argument("--limit", type=int, default=20)
+    p_ado.add_argument("--pat-env", default=ado.DEFAULT_PAT_ENV_VAR)
+    # Where the work is filed. Absent, the local store; present, the shared
+    # registry over HTTP — the same switch the MCP server takes.
+    p_ado.add_argument("--registry-url", help="file into a remote registry instead of local files")
+    p_ado.add_argument("--actor", help="the identity filing the work (remote only)")
+    p_ado.add_argument("--secret-env", default="AGENTCO_SECRET")
+    p_ado.add_argument("--work-store", help="path to the local queue (local only)")
+    p_ado.add_argument(
+        "--write",
+        action="store_true",
+        help="actually file the items; without this, print what would be filed",
+    )
+    p_ado.set_defaults(func=cmd_ado_pull)
 
     p_key = sub.add_parser("keygen", help="mint a shared secret for one actor")
     p_key.add_argument("actor")

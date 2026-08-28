@@ -18,9 +18,10 @@ leakguard.toml
 *.sqlite3
 *.sqlite3-*
 
-# Per-developer harness config. `.claude/settings.local.json` is where a
+# Per-developer harness config. `.claude/settings.local.json` is where a  # leakguard: allow
 # contributor's own MCP entry and tier-3 session hook land — machine-specific
 # absolute paths, and nobody else's business.
+# (The allow above is a filename the host rule reads as a hostname, not a host.)
 .claude/
 
 # The registry key table: actor -> shared secret, written by `keygen` and

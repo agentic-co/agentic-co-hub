@@ -202,7 +202,7 @@ container, a colleague's laptop — the same primitives are on the HTTP surface,
 and `publish.py` speaks it:
 
 ```python
-reg = Registry("macbook", SECRET, "http://registry.internal:8787")
+reg = Registry("macbook", SECRET, "http://registry.example.com:8787")
 
 pulled = reg.work_pull()                      # fenced lease, or state="empty"
 if pulled["state"] == "leased":
