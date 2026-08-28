@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from agentco import app as app_module
-from agentco import db, divergence, inject, leases, metrics
+from agentco import db, divergence, hook, inject, leases, metrics
 
 
 def _conn(args):
@@ -117,6 +117,26 @@ def cmd_inject(args) -> int:
     if not args.write and any(r.status == "would_write" for r in results):
         print("\n(dry run — nothing written. Re-run with --write to apply.)", file=sys.stderr)
     return exit_code
+
+
+def cmd_hook_install(args) -> int:
+    result = hook.install(args.settings, command=args.command, write=args.write)
+    print(f"{result.path}: {result.status} — {result.reason}")
+    if result.diff:
+        print(result.diff)
+    if not args.write and result.status == "would_install":
+        print("\n(dry run — nothing written. Re-run with --write to apply.)", file=sys.stderr)
+    return 1 if result.status == "error" else 0
+
+
+def cmd_hook_uninstall(args) -> int:
+    result = hook.uninstall(args.settings, write=args.write)
+    print(f"{result.path}: {result.status} — {result.reason}")
+    if result.diff:
+        print(result.diff)
+    if not args.write and result.status == "would_uninstall":
+        print("\n(dry run — nothing written. Re-run with --write to apply.)", file=sys.stderr)
+    return 1 if result.status == "error" else 0
 
 
 def cmd_gate1(args) -> int:
@@ -228,6 +248,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_inject.add_argument("--write", action="store_true", help="apply the splice (default: dry run)")
     p_inject.set_defaults(func=cmd_inject)
+
+    p_hook = sub.add_parser(
+        "hook", help="tier-3 SessionStart hook — install/uninstall in a harness's settings file"
+    )
+    hook_sub = p_hook.add_subparsers(dest="hook_command", required=True)
+
+    p_hook_install = hook_sub.add_parser("install", help="register the hook")
+    p_hook_install.add_argument("settings", help="path to the harness's settings.json")
+    p_hook_install.add_argument(
+        "--command", default=None, help="override the hook command (default: this interpreter -m agentco.hook)"
+    )
+    p_hook_install.add_argument("--write", action="store_true", help="apply the change (default: dry run)")
+    p_hook_install.set_defaults(func=cmd_hook_install)
+
+    p_hook_uninstall = hook_sub.add_parser("uninstall", help="restore settings.json byte-identically")
+    p_hook_uninstall.add_argument("settings", help="path to the harness's settings.json")
+    p_hook_uninstall.add_argument("--write", action="store_true", help="apply the change (default: dry run)")
+    p_hook_uninstall.set_defaults(func=cmd_hook_uninstall)
 
     p_gate = sub.add_parser("gate1", help="is the adoption gate met?")
     p_gate.add_argument("--json", action="store_true")
