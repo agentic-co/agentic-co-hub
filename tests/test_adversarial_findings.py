@@ -1,7 +1,7 @@
 """Defects found by adversarial review, each as a test of the property that SHOULD hold.
 
-Every test in this file **fails against the current code**. Each is marked
-`xfail(strict=True)`, which means two things and both are deliberate:
+Every test here began life FAILING against the code, each marked
+`xfail(strict=True)`. That marker does two things and both are deliberate:
 
   * the suite stays green while the defect stands, so this file can be merged
     without blocking anything;
@@ -13,6 +13,18 @@ Every test in this file **fails against the current code**. Each is marked
 The names state the property that should hold, never the bug. If you are
 reading one of these because it started failing as an XPASS: that is the
 system working. Remove the marker.
+
+**Some now pass.** A test WITHOUT a marker is a defect that has been fixed,
+kept as a regression test. Those are the valuable ones — they are the only
+tests in the suite known to have caught a real bug in this code. Two rules for
+them, learned from doing it wrong here:
+
+  * Assert the PROPERTY, not the route the original defect took. A repro that
+    calls the API the fix now refuses will raise during setup and go on
+    xfailing for a reason that has nothing to do with the property.
+  * A newly-passing test must be shown to FAIL against the pre-fix code before
+    the marker comes off, or it may be passing vacuously. Checking out the
+    previous revision of the one module and re-running is enough.
 
 **Why a separate file.** These are not confirmations of the design; they are
 counterexamples to it. Several of them sit directly beside an existing test
@@ -47,7 +59,7 @@ from agentco import auth, db, metrics, snapshots
 from agentco.app import create_app
 from agentco.errors import Refusal, Unauthenticated
 from agentco.scope import Scope, prefixes_overlap, scopes_intersect, validate_prefix
-from agentco.sop import SopLibrary
+from agentco.sop import SopError, SopLibrary
 from agentco.work import LeaseError, Queue, WorkStatus
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
@@ -63,6 +75,11 @@ def queue(tmp_path):
 @pytest.fixture()
 def library(tmp_path):
     return SopLibrary(tmp_path / "sops.jsonl")
+
+
+@pytest.fixture()
+def conn_tmp(tmp_path):
+    return db.connect(tmp_path / "registry.sqlite3")
 
 
 @pytest.fixture()
@@ -413,53 +430,60 @@ def test_gate1_does_not_count_one_identity_twice_for_a_change_of_case(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a quarantined SOP row is deleted by the next write, and revise() then "
-    "reissues the freed version number to different text",
-)
 def test_a_pinned_sop_version_never_resolves_to_different_text(library, tmp_path):
-    """A pin keeps its number while the text underneath it is replaced.
+    """A pin must never point at text the instance did not run against. FIXED in a71650a.
 
-    Two mechanisms compose. `SopLibrary._read_all` quarantines any row it cannot
-    parse; `_write_all` then rewrites the file from the survivors only, so the
-    quarantined version is destroyed by the next mutation. `revise()` computes
-    the next version as `max(surviving versions) + 1`, which REISSUES the number
-    that was just destroyed — to completely different text.
+    Marker removed because the property now holds. Kept as a regression test,
+    and rewritten so it asserts the PROPERTY rather than the route the original
+    defect took — the previous version called `revise()` and read the result,
+    which now raises during setup and would have left this xfailing for the
+    wrong reason.
 
-    The instance's `sop_ref` is untouched throughout. It still says version 2.
-    Version 2 now says something else. `outcomes_by_version` will attribute the
-    instance's outcome to text it never ran against, which `sop.py:22-25` says
-    is the exact failure versioning exists to prevent: "every number computed
-    from it would be fiction".
+    THE ORIGINAL DEFECT. Two mechanisms composed. `_read_all` quarantined any
+    row it could not parse, and `_write_all` rewrote the file from the survivors
+    only — so the quarantined version was destroyed by the next mutation.
+    `revise()` computes the next version as `max(surviving versions) + 1`, which
+    REISSUED the number that had just been destroyed, to completely different
+    text. The instance's `sop_ref` never changed. Version 2 simply began saying
+    something else, and `outcomes_by_version` would attribute the instance's
+    outcome to a procedure it never ran — "every number computed from it would
+    be fiction" (`sop.py:22-25`).
 
-    Between the corruption and the next `revise()` the pin is simply
-    unresolvable — `get(sop_id, 2)` returns `None` — which contradicts
-    `sop.py:107-109` ("instances pinned to this version must stay resolvable
-    forever") and `:277-278` ("Deleting it would orphan every instance pinned to
-    it"). The code performs that deletion.
+    WHY THIS ASSERTS A DISJUNCTION. Preserving the quarantined bytes was
+    necessary but NOT sufficient: with the row kept-but-unparseable, `revise()`
+    still could not see it and still reissued the number. The remedy shipped was
+    to refuse `revise()` while any line is quarantined — a caller who cannot see
+    the whole history cannot safely choose the next number. So there are two
+    acceptable end states and this accepts either:
+      * the pin still resolves to its original text, or
+      * the pin does not resolve at all, AND the attempt to reissue its number
+        was refused.
+    What is NOT acceptable, and what the original code did, is the third: the
+    pin resolves, silently, to something else.
 
-    The trigger used here is a status value a newer writer might store, which is
-    the forward-compatibility case `WorkItem.from_json` is explicitly designed
-    for elsewhere. Any unparseable row does the same thing.
+    The final assertion is the one that makes "unresolvable" tolerable rather
+    than a second bug. An unreadable row whose bytes are gone is data loss; an
+    unreadable row preserved verbatim is a repair job. Without this check the
+    disjunction above could be satisfied by deleting the row outright.
 
-    Why the existing tests miss it: `test_a_superseded_version_stays_resolvable_forever`
+    Why the existing tests missed it: `test_a_superseded_version_stays_resolvable_forever`
     and `test_a_revision_does_not_reach_back_into_a_running_instance` both
     operate on a store where every row round-trips cleanly. No test in
-    `test_sop.py` writes a row this version cannot parse, so the quarantine
-    branch is never entered and the version-number reissue it enables is never
-    reachable.
+    `test_sop.py` writes a row the reader cannot parse, so the quarantine branch
+    was never entered and the version-number reissue it enabled was unreachable.
     """
+    original_v2 = "the v2 procedure: run the smoke tests first"
     sop = library.create("Deploy the service", purpose="the original v1 procedure")
-    library.revise(sop.sop_id, purpose="the v2 procedure: run the smoke tests first")
+    library.revise(sop.sop_id, purpose=original_v2)
     library.activate(sop.sop_id, 2)
 
     queue = Queue(tmp_path / "work.jsonl")
     item = library.instantiate(sop.sop_id, queue, title="deploy run")
     pinned = item.metadata["sop_ref"]["version"]
-    assert library.get(sop.sop_id, pinned).purpose == "the v2 procedure: run the smoke tests first"
+    assert library.get(sop.sop_id, pinned).purpose == original_v2
 
-    # A newer writer stores a status this version does not know about.
+    # A newer writer stores a status this version does not know about, so the
+    # pinned row can no longer be parsed by this reader.
     rewritten = []
     for line in library.path.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
@@ -468,13 +492,24 @@ def test_a_pinned_sop_version_never_resolves_to_different_text(library, tmp_path
         rewritten.append(json.dumps(row, sort_keys=True))
     library.path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
 
-    # Any ordinary mutation now erases the quarantined row and frees its number.
-    library.revise(sop.sop_id, purpose="a third, entirely different procedure")
+    # Attempt the re-point. Refusing is one of the two honest outcomes.
+    try:
+        library.revise(sop.sop_id, purpose="a third, entirely different procedure")
+    except SopError:
+        pass
+
+    # Ordinary unrelated activity must not open a second route to the same
+    # re-point: both of these also rewrite the whole file.
+    library.create("An unrelated procedure", purpose="nothing to do with the above")
+    library.activate(sop.sop_id, 1)
 
     resolved = library.get(sop.sop_id, pinned)
-    assert resolved is not None, "the pinned version became unresolvable"
-    assert resolved.purpose == "the v2 procedure: run the smoke tests first", (
-        "the pinned version now resolves to text the instance never ran against"
+    assert resolved is None or resolved.purpose == original_v2, (
+        f"the pin resolves to text the instance never ran against: {resolved.purpose!r}"
+    )
+    assert original_v2.encode("utf-8") in library.path.read_bytes(), (
+        "the pinned version's text was destroyed; unresolvable is only acceptable "
+        "while the bytes are preserved and the row can be repaired"
     )
 
 
@@ -1285,3 +1320,90 @@ def test_a_string_of_prefixes_is_refused_without_inventing_a_prefix():
     with pytest.raises(Refusal) as shallow:
         Scope.parse("acme/web-platform", ["src"])
     assert shallow.value.code == "scope_too_broad"
+
+
+# --------------------------------------------------------------------------- #
+# Resolution must never block the write
+# --------------------------------------------------------------------------- #
+
+
+def test_a_pointer_whose_target_has_moved_is_recorded_rather_than_refused(conn_tmp):
+    """The two shipped resolvers block the write that the module says is never blocked.
+
+    `snapshots.py:15-21` is unambiguous: "**Resolution never blocks the write.**
+    A scheme with no registered resolver is still recorded, because the
+    alternative — refusing the write — makes the most valuable endpoint
+    unreachable until whatever the resolver needs is in place." And `:23-28`:
+    "an unresolvable snapshot is recorded **loudly**, never silently."
+
+    `resolve_git` (a rev that will not parse) and `resolve_file` (a path that
+    does not exist) both raise `Refusal`. `resolve()` catches only
+    `ResolverError`, so the `Refusal` travels straight out through `take()` and
+    the snapshot is never written. Over HTTP that is a 422 and no row.
+
+    The asymmetry is the tell, and it is backwards. Measured:
+      * `widgetstore:` — a third-party resolver raising `ResolverError`
+        → RECORDED, `externalResolution: unresolvable`, reason carried;
+      * `unknownscheme:` — no resolver at all
+        → RECORDED, `externalResolution: unresolvable`;
+      * `git:` / `file:` — the two resolvers that ship in the box
+        → REFUSED, `unresolvable_uri`, nothing written.
+    A connector written by someone else gets the documented degradation. The
+    built-ins do not.
+
+    It also fails on exactly the artifacts most worth tracking. "The thing I
+    baselined has moved or been deleted" is the single strongest reason to
+    record a pointer — `ResolverError`'s own docstring calls it "a real signal
+    about the artifact" — and it is the one case where recording is impossible.
+    Worse, it is silent in the wrong direction: the caller is told their URI is
+    bad, so they fix the URI rather than learning the artifact moved.
+
+    Either fix works and this accepts both: raise `ResolverError` from the
+    shipped resolvers for an unreadable target, or have `resolve()` convert a
+    resolver's `Refusal` into an unresolved reason. Either way the receipt must
+    carry the reason, because the whole argument for recording an unresolvable
+    pointer is that it says so loudly.
+
+    The pins below matter: a fix must not turn `take()` into a function that
+    accepts anything. A URI with no scheme and a blank purpose are CALLER
+    errors, not unreadable artifacts, and both must still be refused — that
+    distinction is the entire point of `ResolverError` existing separately from
+    `Refusal`.
+
+    Why the existing test misses it: `test_a_resolver_that_cannot_read_its_target_degrades_rather_than_crashes`
+    registers a fake `widgetstore` resolver that raises `ResolverError` and
+    asserts it degrades. It does — that path is correct. The test proves the
+    contract for a resolver that follows it, using a resolver written by the
+    test itself, and never points a SHIPPED resolver at a missing target. The
+    two implementations in the module that break the contract are the two the
+    suite never exercises this way.
+    """
+    missing_file = snapshots.take(
+        conn_tmp,
+        actor="dana",
+        artifact_uri="file:/no/such/file/anywhere",
+        purpose="baseline for the redesign",
+    )
+    assert missing_file["state"] == "accepted"
+    assert missing_file["freshness"]["externalResolution"] == "unresolvable"
+    assert missing_file["freshness"]["reason"], "recorded, but not loudly — no reason given"
+
+    unreadable_rev = snapshots.take(
+        conn_tmp,
+        actor="dana",
+        artifact_uri="git:/no/such/repo#main",
+        purpose="baseline for the redesign",
+    )
+    assert unreadable_rev["state"] == "accepted"
+    assert unreadable_rev["freshness"]["externalResolution"] == "unresolvable"
+
+    # Caller errors are NOT unreadable artifacts and must still be refused.
+    with pytest.raises(Refusal) as no_scheme:
+        snapshots.take(
+            conn_tmp, actor="dana", artifact_uri="/absolute/path/no/scheme", purpose="x"
+        )
+    assert no_scheme.value.code == "bad_uri"
+
+    with pytest.raises(Refusal) as no_purpose:
+        snapshots.take(conn_tmp, actor="dana", artifact_uri="file:/tmp", purpose="  ")
+    assert no_purpose.value.code == "purpose_required"

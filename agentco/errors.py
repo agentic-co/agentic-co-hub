@@ -21,7 +21,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+# NOT frozen, and that is deliberate rather than an oversight. A frozen
+# dataclass subclassing Exception cannot have `__traceback__` assigned —
+# `FrozenInstanceError` — which breaks any library that rewrites tracebacks,
+# and pytest and multiprocessing both do. Immutability is not worth that: an
+# exception is thrown and read, and nothing here mutates one.
+@dataclass
 class Refusal(Exception):
     """A request the registry declines, with the reason machine- and human-readable.
 
@@ -35,6 +40,23 @@ class Refusal(Exception):
     message: str
     remediation: str
     http_status: int = 422
+
+    def __post_init__(self) -> None:
+        """Populate `args`, which is what makes this exception survive a pickle.
+
+        `Exception.__reduce__` reconstructs from `(cls, self.args)`, and a
+        dataclass exception never populates `args` on its own — so a Refusal
+        crossing a process boundary came back as
+        `TypeError: __init__() missing 3 required positional arguments`, having
+        lost its code, message and remediation on the way.
+
+        Nothing in this package crosses a process boundary with a Refusal today,
+        so this was latent. It would have surfaced inside a worker pool or under
+        pytest-xdist, as an argument-count TypeError with no trace of the actual
+        refusal — an error about an error, which is the worst place to be
+        debugging from.
+        """
+        super().__init__(self.code, self.message, self.remediation)
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return f"{self.code}: {self.message} — {self.remediation}"

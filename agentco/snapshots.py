@@ -76,13 +76,15 @@ def resolve_git(uri: str) -> tuple[str, str]:
         timeout=15,
     )
     if result.returncode != 0:
-        raise Refusal(
-            code="unresolvable_uri",
-            message=f"git could not resolve {rev!r} in {target!r}",
-            remediation=(
-                "Check the repo path and revision. Format is "
-                "'git:/abs/path/to/repo#branch-or-sha'."
-            ),
+        # ResolverError, not Refusal. A pointer whose target has MOVED is
+        # exactly the case this module exists to record — refusing it means the
+        # endpoint fails on the artifacts most worth tracking. Refusal is for a
+        # request that was never well-formed; this request was fine and the
+        # world changed.
+        raise ResolverError(
+            f"git could not resolve {rev!r} in {target!r} — the branch or "
+            f"revision may have moved or the repo may not be there. Format is "
+            f"'git:/abs/path/to/repo#branch-or-sha'."
         )
     return "git-sha", result.stdout.strip()
 
@@ -95,12 +97,12 @@ def resolve_file(uri: str) -> tuple[str, str]:
     """
     path = Path(urlparse(uri).path)
     if not path.exists():
-        raise Refusal(
-            code="unresolvable_uri",
-            message=f"no file at {path}",
-            remediation="Check the path. A file that exists only on one machine has "
-            "no stable pointer for anyone else, which is a documented limit rather than "
-            "a bug — snapshot the committed or published artifact instead.",
+        # ResolverError for the same reason as git above: an absent file is a
+        # fact about the world, not a malformed request.
+        raise ResolverError(
+            f"no file at {path}. A file that exists only on one machine has no "
+            f"stable pointer for anyone else, which is a documented limit rather "
+            f"than a bug — snapshot the committed or published artifact instead."
         )
     digest = hashlib.sha256()
     with path.open("rb") as fh:

@@ -204,7 +204,9 @@ class SopLibrary:
     def __init__(self, path: Path | str = "sops.jsonl"):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.quarantined: list[str] = []
+        # Raw BYTES — a line that failed to decode has no faithful string
+        # form, and is carried through every write rather than dropped.
+        self.quarantined: list[bytes] = []
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
