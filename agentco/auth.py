@@ -31,6 +31,14 @@ from typing import Mapping, Optional
 
 from agentco.errors import Unauthenticated
 
+class AmbiguousIdentityError(RuntimeError):
+    """The key file defines two identities distinguishable only by case.
+
+    A configuration error, raised at load rather than absorbed, because every
+    downstream choice about it is wrong while it exists — see `load_keys`.
+    """
+
+
 ACTOR_HEADER = "x-agentco-actor"
 TIMESTAMP_HEADER = "x-agentco-timestamp"
 SIGNATURE_HEADER = "x-agentco-signature"
@@ -72,7 +80,31 @@ def load_keys(path: str | Path | None = None) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
+    keys = {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
+
+    # REFUSE two identities that differ only by case, rather than silently
+    # serving both. Downstream, anything that counts distinct people has to pick
+    # a comparison: fold case and two real identities merge, or do not and one
+    # person with two spellings counts twice. The adoption gate had the second
+    # bug — one human publishing as `Alice` and `alice` cleared a bar meant for
+    # two people.
+    #
+    # Neither downstream choice is right while the ambiguity exists here, so it
+    # is settled here: a key file is a deliberate act by an operator, and two
+    # entries a reader cannot tell apart are a mistake worth naming at load
+    # rather than a distinction worth preserving.
+    seen: dict[str, str] = {}
+    for name in keys:
+        canonical = name.strip().lower()
+        if canonical in seen:
+            raise AmbiguousIdentityError(
+                f"the key file defines both {seen[canonical]!r} and {name!r}, "
+                f"which differ only by case. Anything counting distinct "
+                f"identities cannot tell whether that is one person or two. "
+                f"Pick one spelling and remove the other."
+            )
+        seen[canonical] = name
+    return keys
 
 
 def signing_string(method: str, path: str, timestamp: str, body: bytes) -> str:

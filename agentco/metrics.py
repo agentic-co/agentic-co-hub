@@ -118,11 +118,24 @@ def weekly_active_publishers(
         PUBLISHING_VERBS,
     ).fetchall()
 
+    # ONE comparison for both halves. The exclusion folded case and the bucket
+    # did not, so the gate — the single instrument that decides whether any of
+    # this gets built — was satisfied by ONE person publishing as `Alice` and
+    # `alice`: two rows, two "publishers", streak met. Reading the report, a
+    # human sees two names that are obviously the same person and a verdict that
+    # says the bar was cleared.
+    #
+    # Folding here is only safe because `auth.load_keys` now REFUSES a key file
+    # containing two identities that differ solely by case. Without that, this
+    # would merge two genuinely distinct authenticated actors, which is the
+    # opposite error and just as wrong. The ambiguity is settled where identity
+    # is configured, not where it is counted.
     buckets: dict[str, set[str]] = {}
     for row in rows:
-        if row["actor"].strip().lower() in excluded:
+        canonical = row["actor"].strip().lower()
+        if canonical in excluded:
             continue
-        buckets.setdefault(_iso_week(row["at"]), set()).add(row["actor"])
+        buckets.setdefault(_iso_week(row["at"]), set()).add(canonical)
 
     # Materialise the trailing window, empty weeks included.
     out: dict[str, list[str]] = {}

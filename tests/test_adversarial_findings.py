@@ -56,7 +56,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agentco import auth, db, metrics, snapshots
-from agentco.app import create_app
+from agentco.app import create_app, get_conn
 from agentco.errors import Refusal, Unauthenticated
 from agentco.scope import Scope, prefixes_overlap, scopes_intersect, validate_prefix
 from agentco.sop import SopError, SopLibrary
@@ -367,11 +367,6 @@ def test_a_blocked_item_becomes_claimable_once_its_blocker_is_done(queue):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="weekly_active_publishers excludes the operator case-insensitively but "
-    "buckets publishers by the raw actor string, so two casings count as two people",
-)
 def test_gate1_does_not_count_one_identity_twice_for_a_change_of_case(tmp_path):
     """One person publishing under two capitalisations satisfies "two identities".
 
@@ -1402,3 +1397,318 @@ def test_a_pointer_whose_target_has_moved_is_recorded_rather_than_refused(conn_t
     with pytest.raises(Refusal) as no_purpose:
         snapshots.take(conn_tmp, actor="dana", artifact_uri="file:/tmp", purpose="  ")
     assert no_purpose.value.code == "purpose_required"
+
+
+# --------------------------------------------------------------------------- #
+# Every refusal carries a machine code AND a remediation
+# --------------------------------------------------------------------------- #
+#
+# The README lists "Every refusal carries a remediation" as a load-bearing
+# design principle, and `errors.py` argues why: "A refusal that says only
+# `scope_too_broad` teaches them to stop calling." The five below are the paths
+# where that principle does not hold — three where ordinary caller input
+# becomes a 500 saying "This is a registry bug", one where the 500 forwards
+# server internals to whoever asked, and one where the code survives only as a
+# prefix inside a prose string.
+
+
+def mcp_server_for(tmp_path):
+    from agentco.mcp_server import create_server
+
+    return create_server(
+        db_path=str(tmp_path / "registry.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        actor="dana",
+    )
+
+
+def assert_is_a_refusal_not_a_server_error(response, what: str) -> None:
+    """A caller error must come back as a refusal with a code and a remediation.
+
+    Deliberately does NOT pin a specific status or code — any 4xx with a
+    non-generic code satisfies the principle, and choosing between 400 and 422
+    is the author's call, not this test's.
+    """
+    body = response.json()
+    assert response.status_code != 500, f"{what} produced a server error: {body}"
+    assert body.get("code") not in (None, "internal_error"), (
+        f"{what} produced no specific refusal code: {body}"
+    )
+    assert body.get("remediation"), f"{what} refused without telling the caller what to do"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="app.py calls bare int() on ttlSeconds, so a non-numeric value raises "
+    "ValueError into the generic handler and returns 500 internal_error",
+)
+def test_a_non_numeric_ttl_is_refused_not_reported_as_a_registry_bug(client):
+    """A string where a number was wanted is told the registry is broken.
+
+    `app.py` does `int(payload.get("ttlSeconds") or leases.DEFAULT_TTL_S)` in the
+    handler body. `int("abc")` raises `ValueError`, which nothing catches until
+    the generic `except Exception`, so the caller gets HTTP 500 with
+    `code: internal_error` and the remediation "This is a registry bug — the
+    message above is the whole of it."
+
+    It is not a registry bug. It is a typo in the caller's payload, and the one
+    thing the response must do — tell them what to change — is the one thing it
+    does not do. `leases.claim` already has a `bad_ttl` refusal with a
+    remediation for a ttl that is out of range; a ttl that is not a number never
+    reaches it.
+
+    `errors.py:7-11` is explicit that this is the failure mode that matters:
+    the remediation is "the thing that stops a colleague concluding the tool is
+    broken when their first POST is refused". Here the response literally tells
+    them the tool is broken.
+
+    Why the existing tests miss it: `test_a_refusal_over_http_carries_a_remediation`
+    sends a prefix that is too shallow — a value of the right TYPE that fails a
+    documented check, so it reaches `Refusal` cleanly. Every HTTP fixture in the
+    suite sends well-typed JSON. The coercions in the handler body run before
+    any validation and are never given anything to fail on.
+    """
+    response = post(
+        client,
+        "/scope-claims",
+        "dana",
+        {"repo": "acme/web-platform", "prefixes": ["src/budget/grid"],
+         "intent": "implement", "ttlSeconds": "abc"},
+    )
+    assert_is_a_refusal_not_a_server_error(response, "a non-numeric ttlSeconds")
+
+    # A well-formed request must still succeed, and a documented refusal must
+    # still refuse — the fix cannot be "coerce anything" or "refuse everything".
+    ok = post(
+        client,
+        "/scope-claims",
+        "dana",
+        {"repo": "acme/web-platform", "prefixes": ["src/budget/grid"],
+         "intent": "implement", "ttlSeconds": 3600},
+    )
+    assert ok.status_code == 200
+    too_broad = post(
+        client,
+        "/scope-claims",
+        "dana",
+        {"repo": "acme/web-platform", "prefixes": ["src"], "intent": "implement"},
+    )
+    assert too_broad.json()["code"] == "scope_too_broad"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="app.py calls bare int() on the limit query parameter, so a non-numeric "
+    "value raises ValueError into the generic handler and returns 500",
+)
+def test_a_non_numeric_limit_is_refused_not_reported_as_a_registry_bug(client):
+    """The same bare `int()` on the read path, where it is even likelier to be hit.
+
+    `GET /events?limit=abc` raises `ValueError` out of
+    `int(params.get("limit") or events.DEFAULT_LIMIT)` and returns 500. The feed
+    is the verb a harness polls on a loop, and a query string is assembled by
+    whatever client code the caller wrote — an empty template variable, a
+    stringified `None`, a spreadsheet cell — so a malformed `limit` is a
+    routine event, not an exotic one.
+
+    `events.read` already bounds the value with
+    `max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))`, so the intent to be
+    forgiving about RANGE is clear and implemented. Type is the gap.
+
+    Note the asymmetry with the cursor on the same endpoint: a malformed
+    `since` gets `bad_cursor` with a remediation explaining that cursors are
+    opaque and must be passed back verbatim. A malformed `limit` on the very
+    same request gets "This is a registry bug". Two parameters, one endpoint,
+    two entirely different levels of care.
+
+    Why the existing test misses it: `test_a_malformed_cursor_is_refused_not_silently_reset`
+    covers the parameter that IS validated. No test passes a non-numeric limit.
+    """
+    response = client.get("/events?limit=abc", headers=signed("GET", "/events", "dana", None))
+    assert_is_a_refusal_not_a_server_error(response, "a non-numeric limit")
+
+    # The parameters that already work must keep working.
+    ok = client.get("/events?limit=5", headers=signed("GET", "/events", "dana", None))
+    assert ok.status_code == 200
+    bad_cursor = client.get(
+        "/events?since=not-a-cursor", headers=signed("GET", "/events", "dana", None)
+    )
+    assert bad_cursor.json()["code"] == "bad_cursor"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="resolve() catches only ResolverError, so URLError from an unreachable "
+    "host escapes take() and becomes a 500",
+)
+def test_an_unreachable_snapshot_uri_does_not_become_a_server_error(client):
+    """A2's sibling: the transport failures `resolve()` still does not catch.
+
+    `2fcbc1b` fixed the shipped resolvers to raise `ResolverError` for an
+    unreadable target, so `file:` and `git:` now record rather than refuse.
+    `resolve()` still catches only `ResolverError`, and `resolve_https` reaches
+    the network — where the realistic failures are not `ResolverError` at all:
+    `URLError` (host down, DNS failure), `socket.timeout`, `ssl.SSLError`,
+    `http.client.HTTPException`. Every one escapes `take()` and becomes a 500.
+
+    Verified after the fix: `file:/no/such/file` and `git:/no/such/repo#main`
+    both RECORD as unresolvable; `https://<unreachable>` still raises
+    `URLError`. Same defect class as A1 — a handler naming a class too narrow
+    for what the layer beneath it actually raises.
+
+    It matters more than a bad URI, because a host being briefly unreachable is
+    a TRANSIENT condition. The pointer is perfectly good and will resolve on the
+    next cadence run, so refusing the write throws away a valid snapshot over a
+    momentary network blip. The same escape kills `check_all` mid-batch, which
+    is tracked separately.
+
+    Any non-500 outcome satisfies this: recording it as unresolvable (consistent
+    with what `file:` and `git:` now do, and with "resolution never blocks the
+    write") or refusing it with a code and a remediation. What must not happen
+    is an unhandled exception.
+
+    Why the existing test misses it: `test_an_https_pointer_is_resolved_by_HEAD_so_no_body_is_fetched`
+    monkeypatches `urlopen` to return a canned response, so no HTTPS test in the
+    suite ever touches a socket. The failure modes of the one resolver that does
+    I/O are entirely unexercised.
+    """
+    response = post(
+        client,
+        "/snapshots",
+        "dana",
+        {"artifactUri": "https://127.0.0.1:1/unreachable", "purpose": "baseline for the redesign"},
+    )
+    body = response.json()
+    assert response.status_code != 500, f"an unreachable host produced a server error: {body}"
+    assert body.get("code") != "internal_error"
+
+    # A resolvable pointer must still resolve to a real token.
+    good = post(
+        client,
+        "/snapshots",
+        "dana",
+        {"artifactUri": "git:.#HEAD", "purpose": "baseline"},
+    )
+    assert good.status_code in (200, 422)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the generic handler interpolates the raw exception into the response, so "
+    "server-side detail reaches the caller verbatim",
+)
+def test_an_unexpected_error_is_identifiable_without_leaking_internals(client, monkeypatch):
+    """The 500 handler forwards raw exception text — paths and all — to the caller.
+
+    `app.py` builds the body as `f"{type(exc).__name__}: {exc}"`. Whatever the
+    exception says goes to whoever made the request: a `sqlite3.OperationalError`
+    naming the database path, a connection error naming an internal host, a
+    stack-adjacent detail from any dependency. The comment above it argues "A
+    500 that says nothing teaches the caller the tool lies" — which is right,
+    and the fix for saying nothing was to say everything.
+
+    The exception is injected rather than provoked, deliberately: the property
+    under test belongs to the HANDLER, not to any particular failure. The
+    handler must be safe for exceptions nobody predicted, which is the only kind
+    that reaches it.
+
+    ON A CORRELATION ID — asked, and my answer is that it is not needed here, so
+    this pins the narrower property. `metrics.record_call` ALREADY writes a row
+    for every request including this one, carrying verb, actor, status, the
+    exception type and a timestamp; an operator can already correlate a report
+    of "I got a 500 at 14:03" with that row. Adding an id would be a genuine
+    improvement and it is nearly free, but the absence of one is a design choice
+    rather than the defect, and encoding my preference here would make this a
+    test of the design instead of a test of the property. So: the response must
+    stay identifiable (a stable code) and the failure must stay findable (the
+    `calls` row), while the internals stay on the server. If a correlation id is
+    added later this test keeps passing, which is the right relationship.
+
+    Why the existing tests miss it: nothing in the suite asserts on the CONTENT
+    of a 500. `test_telemetry_failure_never_fails_the_call_it_measures` checks a
+    500 does not happen; no test makes one happen and then reads what it says.
+    """
+    internal_detail = "/var/private/agentco-internal/registry.sqlite3"
+
+    def unexpected_failure(*args, **kwargs):
+        raise RuntimeError(f"unable to open database file {internal_detail}")
+
+    monkeypatch.setattr("agentco.leases.claim", unexpected_failure)
+
+    response = post(
+        client,
+        "/scope-claims",
+        "dana",
+        {"repo": "acme/web-platform", "prefixes": ["src/budget/grid"], "intent": "implement"},
+    )
+
+    assert internal_detail not in response.text, (
+        f"the response forwards server-side detail to the caller: {response.text}"
+    )
+
+    # Identifiable and findable — the fix must not be an empty opaque 500.
+    body = response.json()
+    assert body.get("code"), "an unexpected error must still carry a stable machine code"
+    assert body.get("remediation"), "an unexpected error must still tell the caller what to do"
+    recorded = get_conn(client.app).execute(
+        "SELECT verb, actor, status FROM calls WHERE status = 'error'"
+    ).fetchall()
+    assert [tuple(row) for row in recorded] == [("claim_scope", "dana", "error")], (
+        "the failure must stay findable in `calls` for an operator to correlate"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="_refuse() stringifies the Refusal into ToolError, so the code survives only "
+    "as a prefix inside prose and a client must parse it back out",
+)
+def test_a_refusal_over_mcp_carries_its_code_as_a_field(tmp_path):
+    """The MCP encoding drops the machine half of every refusal.
+
+    `mcp_server._refuse` is `return ToolError(str(exc))`. `Refusal.__str__`
+    renders `"{code}: {message} — {remediation}"`, so the information is not
+    lost — but it stops being a FIELD. Over HTTP, `Refusal.to_dict()` gives the
+    client `{"state", "code", "message", "remediation"}` and branching on
+    `code` is a dict lookup. Over MCP the same client must split on `": "` and
+    hope no message ever contains that sequence.
+
+    `errors.py:26-32` says the code is "stable and greppable (clients branch on
+    it)", and `mcp_server.py:6-9` says the two encodings exist over "one
+    semantic core" with no behaviour the other lacks. Both are true of the
+    HTTP door and neither is true of this one — the same refusal is structured
+    on one and prose on the other.
+
+    Any retrievable form satisfies this: an attribute on the raised error, or a
+    structured data payload carrying the code. The assertion looks for either
+    and does not care which.
+
+    Why the existing test misses it: `test_scope_too_broad_is_a_tool_error_carrying_code_and_remediation`
+    asserts `"scope_too_broad" in message` and `"Re-claim naming at least" in
+    message` — both substring checks against the rendered string. That is
+    exactly the half that works, and it passes whether the code is a field or
+    merely embedded in prose, so it cannot distinguish the two.
+    """
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    mcp = mcp_server_for(tmp_path)
+    claim_scope = mcp._tool_manager.get_tool("claim_scope").fn
+
+    with pytest.raises(ToolError) as excinfo:
+        claim_scope(repo="acme/web-platform", prefixes=["src"], intent="implement")
+
+    error = excinfo.value
+    code = getattr(error, "code", None)
+    if code is None:
+        payload = getattr(error, "data", None) or getattr(error, "payload", None)
+        code = payload.get("code") if isinstance(payload, dict) else None
+
+    assert code == "scope_too_broad", (
+        "the refusal's code is only recoverable by parsing prose: "
+        f"{str(error)!r}"
+    )
+
+    # The human half must survive any fix — the message and remediation are why
+    # a first-time caller does not conclude the tool is broken.
+    assert "Re-claim naming at least" in str(error)
