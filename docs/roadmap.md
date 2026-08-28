@@ -21,7 +21,7 @@ in exactly the place it should have, the connectors.
 | Change feed (opaque resumable cursor) | ✅ | ✅ | |
 | HMAC authentication | ✅ | ✅ | Actor from token, never payload |
 | Adoption metrics | ✅ | ✅ | Weekly publishers, time-to-first-event, per-verb latency |
-| Work queue + fenced leases | ✅ | ✅ | CAS claim + fencing token, self-healing expiry |
+| Work queue + fenced leases | ✅ | ✅ | CAS + fencing token, **proven across 12 real processes** |
 | Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression |
 | SOPs as versioned templates | 🆕 | ✅ | Pinned per instance; outcomes grouped by version |
 | Scheduling with reservations + silent-schedule audit | ✅ | ⏳ | Catches "this has not run in ten days" |
@@ -95,6 +95,33 @@ gated, narrow, and off by default. The whole value proposition is that adopting 
 cannot damage the system you already trust.
 
 ---
+
+## What has been proven, and what has only been tested
+
+A distinction worth keeping, because they are not the same evidence.
+
+**Proven under adversarial conditions:**
+
+- **The lease protocol holds across real OS processes.** Twelve spawn-mode
+  processes, barrier-synced onto one item: exactly one wins, the store stays
+  intact, a stale holder is fenced out, and concurrent creates with one natural
+  key converge on a single row. Verified by mutation — removing the advisory
+  lock fails the storm and dedup tests, disabling the fence fails the stale-holder
+  test. A test that cannot fail when the mechanism is removed proves nothing, so
+  that check is the actual evidence.
+- **Snapshots never store a document body**, asserted by scanning the database
+  file's raw bytes rather than the API.
+- **`leakguard` catches real leakage** — it found thirteen genuine leaks in this
+  repository's own authoring before the first commit.
+
+**Tested but not proven:** everything else. The suite is hermetic and
+single-process, written by the same author as the code. That is weaker evidence
+than it looks: in the private implementation this was extracted from, a fully
+green suite missed a defect that rewrote every line ending in a target file,
+because every fixture was authored with `write_text()`, which never produces the
+input the bug needed. The tests were evidence about the fixtures.
+
+An independent adversarial review is queued for exactly that reason.
 
 ## The adoption gate
 
