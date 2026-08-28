@@ -482,7 +482,22 @@ class Queue:
             target = None
             for row in raw_rows:
                 if row.get("id") == item_id:
-                    target = WorkItem.from_json(json.dumps(row))
+                    try:
+                        target = WorkItem.from_json(json.dumps(row))
+                    except (ValueError, TypeError) as exc:
+                        # `_read_all` tolerates this row; the write paths did
+                        # not, so the quarantine boundary held on read and
+                        # leaked on write. A row this version cannot model is
+                        # not a row it may act on — refuse, naming the row, so
+                        # the caller learns the store is ahead of them rather
+                        # than getting a bare type error from inside a lock.
+                        raise WorkError(
+                            f"cannot act on {item_id}: its stored row is not "
+                            f"readable by this version ({type(exc).__name__}: "
+                            f"{exc}). The row is preserved on disk. Upgrade, or "
+                            f"repair the row — this version must not overwrite "
+                            f"a record it cannot understand."
+                        ) from exc
                     break
             if target is None:
                 return None
@@ -520,7 +535,25 @@ class Queue:
         """
         at = now or _now()
         held = frozenset(capabilities or ())
-        done_ids = {i.id for i in self._read_all() if i.status == WorkStatus.DONE}
+        # From the RAW rows, not from `_read_all()`. `_read_all` drops any row
+        # this version cannot model — a newer writer's unknown status value, a
+        # missing field — and a dropped row is invisible to `done_ids`. So a
+        # blocker that IS finished, whose row happens to carry something
+        # unmodellable, never counted as done and its dependents became
+        # permanently unclaimable, told to "finish those first" about work
+        # already complete.
+        #
+        # Neither of the two fixes that produced this was wrong on its own:
+        # tolerating unknown rows keeps an older reader working against a newer
+        # store, and deriving blockedness removed a cache that never
+        # invalidated. They compose into a defect neither has alone, which is
+        # the kind only a fresh pass over changed code finds.
+        #
+        # `status` is a plain string on the raw dict and stays legible even when
+        # a different field in the same row does not, so this needs no
+        # modelling at all.
+        raw_rows, _ = self._read_raw()
+        done_ids = {r["id"] for r in raw_rows if r.get("status") == WorkStatus.DONE.value}
 
         def cas(item: WorkItem) -> dict:
             # Capability BEFORE the CAS checks, on purpose: given a permanent
@@ -641,6 +674,18 @@ class Queue:
 
         current = self.get(item_id)
         if current is None:
+            # `get()` reads through `_read_all()`, which DROPS rows this version
+            # cannot model — so "not found" and "found but unreadable" arrived
+            # here identically, and callers reported the first. `mcp_server`
+            # said "no work item X on this queue" about an item that is on the
+            # queue, which is a false statement rather than an unhelpful one.
+            raw_rows, _ = self._read_raw()
+            if any(r.get("id") == item_id for r in raw_rows):
+                raise WorkError(
+                    f"work item {item_id} exists but its stored row is not "
+                    f"readable by this version, so its lease cannot be fenced. "
+                    f"The row is preserved on disk. Upgrade, or repair the row."
+                )
             return None
         if idempotency_key:
             prior = (current.metadata or {}).get("lease_report") or {}
