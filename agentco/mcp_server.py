@@ -84,6 +84,8 @@ DEFAULT_ACTOR = "mcp-actor"
 REGISTRY_URL_ENV_VAR = "AGENTCO_REGISTRY_URL"
 SECRET_ENV_VAR = "AGENTCO_SECRET"
 
+CAPABILITIES_ENV_VAR = "AGENTCO_CAPABILITIES"
+
 
 def resolve_db_path(path: Optional[str] = None) -> str:
     return path or os.environ.get(DB_ENV_VAR) or DEFAULT_DB
@@ -100,6 +102,22 @@ def resolve_registry_url(base_url: Optional[str] = None) -> Optional[str]:
 
 def resolve_secret(secret: Optional[str] = None) -> Optional[str]:
     return secret or os.environ.get(SECRET_ENV_VAR) or None
+
+
+def resolve_capabilities(capabilities: Optional[list[str]] = None) -> list[str]:
+    """What this worker can run, declared once in config rather than per call.
+
+    A capability the model has to remember to pass is one it will eventually
+    forget, and the failure is silent in the wrong direction: `claim()` fails
+    CLOSED, so a forgotten declaration means the machine that is the only one
+    able to do a job quietly stops being offered it. Declaring the lane in
+    `.mcp.json` — beside the actor, which is the same kind of assertion — makes
+    it a property of the deployment instead of of the conversation.
+    """
+    if capabilities is not None:
+        return list(capabilities)
+    raw = os.environ.get(CAPABILITIES_ENV_VAR) or ""
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 def _refuse(exc: Exception) -> ToolError:
@@ -390,7 +408,9 @@ def create_server(
         the way this loop does, rather than stopping on the first miss.
         """
         try:
-            return backend.work_pull(agent or backend.actor, capabilities, ttl_seconds)
+            return backend.work_pull(
+                agent or backend.actor, resolve_capabilities(capabilities), ttl_seconds
+            )
         except (Refusal, WorkError, RegistryError) as exc:
             raise _refuse(exc) from exc
 
@@ -503,6 +523,10 @@ def create_server(
         return {
             "actor": backend.actor,
             "enforcement": "advisory",
+            # Advisory applies to SCOPE claims. The capability gate is the one
+            # thing here that does refuse, and it fails closed — so a harness
+            # must be able to see what it has declared without pulling anything.
+            "capabilities": resolve_capabilities(),
             **backend.describe(),
             "scope": {"minSegments": scope.MIN_SEGMENTS, "intents": list(scope.INTENTS)},
             "eventKinds": list(events_module.KINDS),

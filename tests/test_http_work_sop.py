@@ -329,3 +329,66 @@ def test_activate_without_a_version_is_refused_rather_than_guessing(client):
     response = post(client, f"/sops/{sop['sop_id']}/activate", "dana", {})
     assert response.status_code == 400
     assert response.json()["code"] == "version_required"
+
+
+# --------------------------------------------------------------------------- #
+# Machine-exclusive work — enforced, not merely routed
+# --------------------------------------------------------------------------- #
+
+
+def test_work_requiring_a_capability_is_invisible_to_a_worker_without_it(client):
+    """`assignedAgent` is routing. `requires` is the gate, and it fails closed.
+
+    Assignment alone would be visibility: an item assigned to one worker is
+    simply not offered to another. That is enough until something claims by a
+    route that does not consult the assignment, at which point the only thing
+    standing between a machine and work it physically cannot run is a filter.
+    The capability check lives inside `claim()`, under the same lock as the CAS.
+    """
+    post(client, "/work", "dana", {
+        "title": "build the MCP tool",
+        "assignedAgent": "kofi",
+        "requires": ["frontsteps"],
+    })
+
+    # The wrong machine, even declaring the capability, is not offered work
+    # assigned to someone else.
+    assert post(client, "/work/pull", "dana", {"capabilities": ["frontsteps"]}).json()["state"] == "empty"
+
+    # The right machine, declaring nothing, is refused by the gate — closed.
+    assert post(client, "/work/pull", "kofi", {}).json()["state"] == "empty"
+
+    # The right machine declaring the capability gets it.
+    pulled = post(client, "/work/pull", "kofi", {"capabilities": ["frontsteps"]}).json()
+    assert pulled["state"] == "leased"
+    assert pulled["item"]["requires"] == ["frontsteps"]
+
+
+def test_an_sop_instance_carries_the_pin_and_the_capability(client):
+    sop = create_sop(client)
+    post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 1})
+
+    filed = post(client, f"/sops/{sop['sop_id']}/instantiate", "dana", {
+        "title": "[User Story 91166] Expose Client COA",
+        "assignedAgent": "kofi",
+        "requires": ["frontsteps"],
+        "source": "ado",
+        "sourceId": "example-org/91166",
+    }).json()["item"]
+    assert filed["metadata"]["sop_ref"] == {"sop_id": sop["sop_id"], "version": 1}
+    assert filed["requires"] == ["frontsteps"]
+
+    # And the worker that pulls it can read the procedure it is pinned to.
+    pulled = post(client, "/work/pull", "kofi", {"capabilities": ["frontsteps"]}).json()["item"]
+    ref = pulled["metadata"]["sop_ref"]
+    procedure = get(client, f"/sops/{ref['sop_id']}", "kofi", f"?version={ref['version']}").json()["sop"]
+    assert procedure["definition_of_done"]
+
+
+def test_instantiating_a_draft_is_refused_across_http(client):
+    """The check that makes instantiate worth having as an endpoint."""
+    sop = create_sop(client)
+    response = post(client, f"/sops/{sop['sop_id']}/instantiate", "dana", {"title": "too early"})
+    assert response.status_code == 422
+    assert "draft" in response.json()["message"].lower()
+    assert response.json()["remediation"].strip()
