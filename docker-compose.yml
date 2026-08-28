@@ -1,0 +1,68 @@
+# The registry, its state volume, and the cadence job that reads it.
+#
+# `docker compose up -d registry` is the whole of it. Two decisions in here are
+# the ones worth reading before changing:
+#
+#   * The port is published to 127.0.0.1 ONLY. The service holds a company's
+#     scope claims and authenticates with per-actor shared secrets over plain
+#     HTTP, so putting it on a routable interface means the secrets cross the
+#     network in the clear. Reaching it from another machine is a deliberate
+#     act: terminate TLS in front of it, and change this line where a reviewer
+#     can see you did.
+#
+#   * The key file is mounted READ-ONLY from the host and is never built into
+#     the image. `keygen` writes it; this only ever reads it.
+
+services:
+  registry:
+    build:
+      context: .
+    image: agentco:local
+    container_name: agentco-registry
+    restart: unless-stopped
+    # Loopback only — see the note above.
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - agentco-state:/var/lib/agentco
+      # actor → shared secret, produced by `python3 -m agentco keygen <actor>`.
+      - ./keys.json:/run/secrets/agentco-keys.json:ro
+      # The git: resolver reads repo paths on THIS filesystem. Mount whatever
+      # you snapshot, read-only — the resolver only ever runs `git rev-parse`,
+      # and a coordination layer with write access to your repos is a different
+      # threat model than the one this project argues for.
+      - ${AGENTCO_REPOS:-./repos}:/repos:ro
+    environment:
+      # The identity excluded from the adoption gate's own publisher count.
+      AGENTCO_REGISTRY_OPERATOR: ${AGENTCO_REGISTRY_OPERATOR:-operator}
+    security_opt:
+      - no-new-privileges:true
+    # Advisory service, small footprint. The cap exists so a runaway resolver
+    # cannot take the host down with it.
+    mem_limit: 512m
+
+  # The cadence boundary, as a one-shot rather than a sidecar: divergence is
+  # delivered on a schedule a team chooses, and a container that decides that
+  # schedule for them has taken the product decision away from them.
+  #
+  #   docker compose run --rm digest                 # print, deliver nothing
+  #   docker compose run --rm digest digest --deliver # at the boundary
+  #
+  # Put that second line in cron or a systemd timer on the host.
+  digest:
+    build:
+      context: .
+    image: agentco:local
+    profiles: ["ops"]
+    volumes:
+      - agentco-state:/var/lib/agentco
+      - ./keys.json:/run/secrets/agentco-keys.json:ro
+      - ${AGENTCO_REPOS:-./repos}:/repos:ro
+    environment:
+      # Set to post the digest somewhere. Absent means print-only, which is the
+      # honest default: delivery reaches other people.
+      AGENTCO_DIGEST_WEBHOOK: ${AGENTCO_DIGEST_WEBHOOK:-}
+    command: ["digest"]
+
+volumes:
+  agentco-state:

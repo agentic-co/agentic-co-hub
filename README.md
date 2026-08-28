@@ -138,6 +138,17 @@ python3 -m agentco keygen you > ~/.agentco/keys.json   # then chmod 600
 python3 -m agentco serve --port 8787                   # loopback by default
 ```
 
+Or in Docker — one container, state on a named volume, port published to
+loopback only:
+
+```bash
+python3 -m agentco keygen you > keys.json && chmod 600 keys.json
+docker compose up -d --build registry
+```
+
+See [`docs/docker.md`](docs/docker.md) for what the image mounts and why, the
+cadence job, and why the MCP surface is deliberately not containerised.
+
 ### Publish something
 
 `agentco/publish.py` is standard-library only and meant to be copied next to

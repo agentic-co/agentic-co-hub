@@ -319,7 +319,20 @@ def install(settings_path: PathLike, *, command: Optional[str] = None, write: bo
         )
 
     session_start.append({"hooks": [{"type": "command", "command": command, "timeout": DEFAULT_HOOK_TIMEOUT_S}]})
-    new_bytes = (json.dumps(config, indent=2) + "\n").encode("utf-8")
+    # `ensure_ascii=False`, and it is not cosmetic. The default escapes every
+    # non-ASCII character in the WHOLE file — an em-dash in a comment field
+    # three hundred lines away from anything AgentCo added becomes `—` —
+    # so installing a hook silently re-encoded bytes outside its own change.
+    # Found by dry-running the install against a real settings.json carrying
+    # em-dashes in its own documentation strings, which is exactly the input a
+    # fixture written by this tool could never produce.
+    #
+    # Same shape as the CRLF trap in `inject.py`: a round trip through a text
+    # layer that normalises something, rewriting a file the tool promised only
+    # to add one entry to. This module's docstring already argued that getting
+    # a parse/mutate/reserialize round trip "subtly wrong" is worse than not
+    # trying — and then did it.
+    new_bytes = (json.dumps(config, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
     diff = "\n".join(
         difflib.unified_diff(

@@ -385,3 +385,62 @@ def test_uninstall_dry_run_never_writes_anything(tmp_path):
 
     assert result.status == "would_uninstall"
     assert settings.read_bytes() == installed_bytes, "dry run must not touch the file"
+
+
+# --------------------------------------------------------------------------- #
+# The installer must not re-encode bytes outside its own change
+# --------------------------------------------------------------------------- #
+
+
+def test_install_does_not_re_encode_non_ascii_elsewhere_in_the_file(tmp_path):
+    """A non-ASCII character anywhere in the file must survive the install.
+
+    `json.dumps` defaults to `ensure_ascii=True`, which escapes every non-ASCII
+    character in the WHOLE document — so an em-dash in a comment field far from
+    anything AgentCo touched came back as `\\u2014`. The file stayed valid JSON
+    and semantically identical, which is what made it invisible: nothing fails,
+    the bytes just changed underneath somebody else's tooling.
+
+    This test could not have been written from a fixture this tool produced.
+    Every existing one is ASCII, so the bug was green until an install was
+    dry-run against a real settings file that documented itself with em-dashes.
+    """
+    settings = tmp_path / "settings.json"
+    # Real em-dash and accent BYTES in the file, not JSON escapes — that is the
+    # input the bug needs, and the reason no existing fixture caught it.
+    settings.write_text(
+        '{\n  "_docs": "STAGED — not enabled — see the note",\n  "theme": "café"\n}\n',
+        encoding="utf-8",
+    )
+
+    before = settings.read_bytes()
+    assert "—".encode("utf-8") in before
+
+    result = hook.install(settings, command="/usr/bin/python3 -m agentco.hook", write=True)
+    assert result.status == "installed"
+
+    after = settings.read_bytes()
+    assert "—".encode("utf-8") in after, "the em-dash was re-encoded as an escape"
+    assert b"\\u2014" not in after
+    assert "café".encode("utf-8") in after
+
+    # And the only semantic difference is the hook AgentCo added.
+    reloaded = json.loads(after.decode("utf-8"))
+    assert reloaded["_docs"] == "STAGED — not enabled — see the note"
+    assert reloaded["theme"] == "café"
+    assert reloaded["hooks"]["SessionStart"]
+
+
+def test_uninstall_restores_a_non_ascii_file_byte_for_byte(tmp_path):
+    """The backup is bytes, so this must hold regardless of the bug above —
+    it is the safety net that made the encoding defect recoverable rather than
+    permanent, and it is worth a test of its own."""
+    settings = tmp_path / "settings.json"
+    settings.write_text('{\n  "_docs": "an em-dash — and a café"\n}\n', encoding="utf-8")
+    original = settings.read_bytes()
+
+    hook.install(settings, command="/usr/bin/python3 -m agentco.hook", write=True)
+    assert settings.read_bytes() != original
+
+    hook.uninstall(settings, write=True)
+    assert settings.read_bytes() == original

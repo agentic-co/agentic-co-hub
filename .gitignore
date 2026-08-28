@@ -17,3 +17,13 @@ leakguard.toml
 # Local registry data
 *.sqlite3
 *.sqlite3-*
+
+# Per-developer harness config. `.claude/settings.local.json` is where a
+# contributor's own MCP entry and tier-3 session hook land — machine-specific
+# absolute paths, and nobody else's business.
+.claude/
+
+# The registry key table: actor -> shared secret, written by `keygen` and
+# mounted read-only into the container. A secret in git is a secret in every
+# clone and every fork.
+keys.json
