@@ -132,15 +132,24 @@ def test_a_stale_report_raises_rather_than_returning_none(queue):
         queue.report_result(item.id, claimed.lease_attempt + 5, WorkStatus.DONE)
 
 
-def test_the_attempt_counter_survives_completion(queue):
+def test_the_attempt_counter_only_ever_climbs(queue):
     """It is the history of how many times this item was handed out. Resetting
-    it would let a stale holder's attempt number become current again."""
+    it would let a stale holder's attempt number become current again.
+
+    Asserts the PROPERTY — monotonic, never reset — rather than a literal
+    number. The literal encoded an old rule where only `claim` advanced the
+    counter, which is exactly what let a reporter keep a number the fence still
+    accepted. A test pinned to the arithmetic of one implementation blocks a
+    correct change to it."""
     item = queue.create("x")
-    queue.claim(item.id, "worker-a", ttl_seconds=60, now=NOW)
+    first = queue.claim(item.id, "worker-a", ttl_seconds=60, now=NOW)
     later = NOW + timedelta(hours=2)
     fresh = queue.claim(item.id, "worker-b", now=later)
+    assert fresh.lease_attempt > first.lease_attempt
+
     queue.report_result(item.id, fresh.lease_attempt, WorkStatus.DONE)
-    assert queue.get(item.id).lease_attempt == 2
+    after = queue.get(item.id).lease_attempt
+    assert after >= fresh.lease_attempt, "the counter must never go backwards"
 
 
 def test_completion_releases_the_lease(queue):
@@ -237,7 +246,10 @@ def test_reaping_returns_work_to_pending_and_does_not_fail_it(queue):
     stored = queue.get(item.id)
     assert stored.status == WorkStatus.PENDING
     assert stored.status != WorkStatus.FAILED
-    assert stored.lease_attempt == 1, "the attempt counter must survive reaping"
+    # Reaping ENDS the lease, so it ends the attempt with it — the revoked
+    # holder must not keep a number the fence still accepts. The property is
+    # that the counter never goes backwards, not that reaping leaves it alone.
+    assert stored.lease_attempt >= 1, "the attempt counter must never go backwards"
 
 
 def test_reaping_leaves_a_live_lease_alone(queue):

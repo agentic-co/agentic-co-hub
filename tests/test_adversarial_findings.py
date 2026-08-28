@@ -182,11 +182,6 @@ def test_a_quarantined_line_survives_the_next_write(queue):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="report_result never bumps lease_attempt, so the same attempt number stays "
-    "valid forever and a second report overwrites the first",
-)
 def test_a_repeated_report_at_the_same_attempt_is_refused(queue):
     """A second report at an already-reported attempt silently overwrites a real result.
 
@@ -227,11 +222,6 @@ def test_a_repeated_report_at_the_same_attempt_is_refused(queue):
     assert queue.get(item.id).result == "the real result"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="reap_expired_leases does not bump lease_attempt, so the revoked holder's "
-    "attempt number is still current until somebody else claims",
-)
 def test_a_reap_alone_fences_out_the_holder_it_revoked(queue):
     """The reaper revokes a lease without invalidating the token that lease issued.
 
@@ -267,12 +257,6 @@ def test_a_reap_alone_fences_out_the_holder_it_revoked(queue):
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="reap_expired_leases reads self.list() outside the lock and its release "
-    "closure never re-checks lease_active_at, so it writes over a lease taken "
-    "after the snapshot",
-)
 def test_the_reaper_does_not_revoke_a_lease_that_went_live_mid_sweep(queue, monkeypatch):
     """The reaper acts on a stale snapshot and can revoke a healthy, live lease.
 
@@ -938,3 +922,366 @@ def test_an_env_example_file_is_scanned_for_leaks(tmp_path):
     assert leakguard.main(["--root", str(tmp_path)]) == 1, (
         "a credential in .env.example passed the scan; the include-set entry is unreachable"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The scope model — a claim that is invisible is worse than no claim
+# --------------------------------------------------------------------------- #
+#
+# `scope.py` opens by arguing that a lease registry's entire value IS
+# composition: "does my claim intersect yours?" The segment-wise intersection
+# is genuinely correct — `src/budget` and `src/budgeting` do not collide, and
+# `test_intersection_is_segmentwise_not_string_prefix` proves it.
+#
+# What follows is the other half of the property, which nothing tests: two
+# claims that DO name the same directory can be made not to intersect. Each
+# costs one keystroke or one paste, and in every case below the two spellings
+# render identically or address the same directory on a real filesystem. For a
+# tool whose one product is answering "is anyone else in here?", a
+# visually-identical non-intersecting claim is an evasion primitive — and,
+# more often, an honest accident that silently disables the feature.
+#
+# EVERY assertion below accepts either honest fix: canonicalise the two forms
+# so they intersect, OR refuse the non-canonical form with a remediation. The
+# helpers encode that, so none of these tests dictates a remedy.
+#
+# Each test also PINS the behaviour a fix must not break. Those pins are
+# verified to hold today, so a correct fix turns the whole test green rather
+# than moving the failure down a line.
+
+
+def prefixes_collide_or_are_refused(raw_a: str, raw_b: str) -> bool:
+    """Does the registry treat these two spellings as one directory, by any honest route?
+
+    Two remedies are legitimate and this accepts both:
+      * canonicalise — fold the difference away so the prefixes intersect;
+      * refuse — reject the non-canonical spelling with a remediation, so the
+        caller re-claims in the form the registry can compare.
+    What is NOT acceptable is the current third outcome: both accepted, and
+    silently disjoint.
+    """
+    try:
+        validate_prefix(raw_a)
+        validate_prefix(raw_b)
+    except Refusal:
+        return True
+    return prefixes_overlap(raw_a, raw_b)
+
+
+def scopes_collide_or_are_refused(repo_a: str, repo_b: str, prefixes: list[str]) -> bool:
+    """The same question one level up, for two spellings of one repo name."""
+    try:
+        first = Scope.parse(repo_a, prefixes)
+        second = Scope.parse(repo_b, prefixes)
+    except Refusal:
+        return True
+    return bool(scopes_intersect(first, second))
+
+
+def assert_unrelated_scopes_stay_disjoint() -> None:
+    """The pins every fix in this section must preserve.
+
+    Written as one helper because all six intersection tests must not break the
+    same three things: the segment-wise rule, genuinely different repos, and
+    the parent/child containment the whole model rests on. A fix that makes the
+    evasions collide by loosening the comparison — substring matching, dropping
+    all punctuation, ignoring the repo — would satisfy the primary assertion
+    and break these.
+    """
+    assert not prefixes_overlap("src/budget", "src/budgeting"), "segment-wise rule lost"
+    assert not prefixes_overlap("src/billing", "src/shipping"), "unrelated dirs now collide"
+    assert prefixes_overlap("src/billing", "src/billing/invoices"), "containment lost"
+    assert not scopes_intersect(
+        Scope.parse("acme/web-platform", ["src/billing/invoices"]),
+        Scope.parse("acme/mobile-app", ["src/billing/invoices"]),
+    ), "different repos now collide"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="scopes_intersect compares repo with a plain !=, so one changed letter "
+    "makes a lease invisible to every other claim in the registry",
+)
+def test_two_spellings_of_one_repo_name_do_not_hide_a_lease():
+    """One capital letter in the repo name hides a lease from the ENTIRE registry.
+
+    `scopes_intersect` short-circuits on `if a.repo != b.repo: return ()`, and
+    `validate_repo` only strips whitespace. GitHub and Azure DevOps both treat
+    repository names case-insensitively — `acme/Web-Platform` and
+    `acme/web-platform` are one repository, and a URL with either spelling
+    resolves to it.
+
+    This is the worst of the evasions in this section because it is not scoped
+    to one directory. A lease filed under the other casing intersects NOTHING:
+    it fires no conflicts, appears in no other claimant's response, and its
+    holder is told they are alone. Both parties then believe the registry
+    checked, which is worse than either of them knowing it had not.
+
+    It is also the likeliest to happen by accident. The repo string comes from
+    whatever the caller's tooling reports — a git remote URL, a CI variable, a
+    hand-typed `.mcp.json` entry — and those disagree about case constantly.
+
+    Why the existing test misses it: `test_scopes_in_different_repos_never_intersect`
+    asserts that `repo/one` and `repo/two` do not intersect. That is the
+    property holding in the direction where it works. Nothing asserts the
+    converse — that two names for the SAME repo do intersect — so a comparison
+    that is too strict has nothing to fail against.
+    """
+    assert scopes_collide_or_are_refused(
+        "acme/web-platform", "acme/Web-Platform", ["src/billing/invoices"]
+    ), "a lease under a different capitalisation of the same repo is invisible registry-wide"
+
+    assert_unrelated_scopes_stay_disjoint()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="normalize_prefix does not fold case, so two spellings of one directory "
+    "on a case-insensitive filesystem produce two non-intersecting claims",
+)
+def test_two_spellings_of_one_directory_do_not_hide_a_claim():
+    """`src/Budget` and `src/budget` are the same directory and do not intersect.
+
+    `normalize_prefix` strips slashes and resolves dot segments but never
+    touches case, so the two spellings become two distinct segment tuples.
+    macOS (APFS, case-insensitive by default) and Windows (NTFS) both resolve
+    them to one directory — and `scope.py:50-55` explicitly justifies using
+    `posixpath` over `os.path` so the module "must behave identically on the
+    Windows VM", which makes Windows a named target rather than a hypothetical.
+
+    Two developers editing the same directory therefore get no conflict, which
+    is the exact outcome the module exists to prevent.
+
+    Note this one has a genuine trade-off and the test does not pretend
+    otherwise: on a case-SENSITIVE filesystem (ext4) the two really are
+    different directories, so folding case would produce a false conflict
+    there. That is why the assertion accepts a refusal as readily as a fold —
+    "refuse the ambiguous spelling and make the caller pick" is a legitimate
+    answer, and arguably the better one.
+
+    Why the existing test misses it: `test_two_segments_is_accepted_and_canonicalised`
+    checks that `./src/budget/` and `src\\budget` canonicalise to `src/budget`.
+    Both inputs differ from the target only in punctuation, which
+    `normalize_prefix` does handle. No test varies case, so the one dimension
+    it does not normalise is the one dimension never exercised.
+    """
+    assert prefixes_collide_or_are_refused("src/Budget", "src/budget"), (
+        "two spellings of one directory produced two disjoint claims"
+    )
+
+    assert_unrelated_scopes_stay_disjoint()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="str.strip() removes NBSP but not U+200B or U+FEFF, so a zero-width "
+    "character survives normalisation and creates a visually identical disjoint claim",
+)
+def test_an_invisible_character_cannot_make_a_claim_disjoint():
+    """A zero-width space makes a claim that LOOKS identical intersect nothing.
+
+    `normalize_prefix` calls `.strip()`, which removes Unicode whitespace, and
+    that is where the inconsistency shows. A trailing NBSP (U+00A0) IS
+    whitespace, so `src/budget\\u00a0` collapses correctly to `src/budget` —
+    asserted below as evidence. A zero-width space (U+200B) and a byte-order
+    mark (U+FEFF) are NOT whitespace by Python's definition, so they survive
+    and produce a distinct segment tuple.
+
+    That NBSP is handled and U+200B is not is the evidence this is an accident
+    rather than a decision: nothing would justify normalising one invisible
+    trailing character and preserving another. There is no design note either
+    way, which is what an unconsidered case looks like.
+
+    Both spellings render identically in a terminal, a code review, a web UI
+    and the registry's own conflict output. Someone reading the lease list
+    cannot see the difference, so the disagreement is undebuggable from the
+    outside — and a BOM in particular arrives on its own, pasted in from a file
+    written by an editor that emits one.
+
+    Why the existing test misses it: no test in `test_registry.py` passes a
+    non-ASCII prefix at all. Every scope fixture is plain ASCII, so the entire
+    class — invisible characters, normalisation forms, homoglyphs — is outside
+    what the suite can observe.
+    """
+    assert prefixes_collide_or_are_refused("src/budget", "src/budget​"), (
+        "a trailing zero-width space produced a visually identical disjoint claim"
+    )
+    assert prefixes_collide_or_are_refused("src/budget", "﻿src/budget"), (
+        "a leading byte-order mark produced a visually identical disjoint claim"
+    )
+
+    # Evidence, and a pin: the whitespace case already collapses. A fix should
+    # extend that handling, not replace it.
+    assert prefixes_overlap("src/budget", "src/budget "), "NBSP handling regressed"
+    assert_unrelated_scopes_stay_disjoint()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="normalize_prefix does not apply a Unicode normalisation form, so NFC and "
+    "NFD spellings of one path are two distinct segment tuples",
+)
+def test_the_same_path_intersects_regardless_of_unicode_normalisation_form():
+    """The same directory name from two machines does not intersect itself.
+
+    `normalize_prefix` never calls `unicodedata.normalize`, so a path
+    containing any accented character has two byte-level spellings that both
+    survive: composed (NFC — one code point) and decomposed (NFD — base letter
+    plus combining accent).
+
+    This is not theoretical for this project. macOS stores filenames in a
+    decomposed form, so a path read off a mac filesystem arrives NFD, while the
+    same path typed on Linux or pasted from a browser arrives NFC. Two
+    colleagues claiming the identical directory from different machines
+    therefore never see each other — and the strings are indistinguishable in
+    every UI, so neither can tell why.
+
+    A non-ASCII directory name is unremarkable in a codebase with any
+    non-English content, which the project's own context makes likely.
+
+    Why the existing test misses it: same as the invisible-character case — no
+    scope fixture anywhere in the suite contains a non-ASCII character, so
+    there is no input from which the two forms could diverge.
+    """
+    composed = unicodedata.normalize("NFC", "src/café")
+    decomposed = unicodedata.normalize("NFD", "src/café")
+    assert composed != decomposed, "precondition: the two forms differ byte-for-byte"
+
+    assert prefixes_collide_or_are_refused(composed, decomposed), (
+        "one directory name in two Unicode forms produced two disjoint claims"
+    )
+
+    assert_unrelated_scopes_stay_disjoint()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="a trailing dot survives normalize_prefix, but Windows strips it, so the "
+    "two spellings address one directory and produce two disjoint claims",
+)
+def test_a_trailing_dot_does_not_make_a_claim_disjoint():
+    """`src/budget.` and `src/budget` are one directory on Windows and do not intersect.
+
+    `posixpath.normpath` removes `.` only as a whole segment. A dot at the END
+    of a segment name is preserved, so `src/budget.` stays a distinct tuple.
+    Windows strips trailing dots from path components — the two names cannot
+    coexist there and resolve to the same directory. `scope.py:50-55` names the
+    Windows VM as a target platform, so this is a supported-platform
+    disagreement rather than a curiosity.
+
+    Milder than the others in likelihood, but the same shape: two spellings,
+    one directory, no conflict.
+
+    The pin below is the one that matters most for this fix. Stripping dots too
+    eagerly would collapse `src/v1.2/grid` into something that matches
+    `src/v1/grid`, inventing a conflict between two genuinely different
+    directories — a false positive in a system whose stated failure mode is
+    becoming noise.
+
+    Why the existing test misses it: `test_two_segments_is_accepted_and_canonicalised`
+    covers `./` and a trailing `/`, the two punctuation forms `normpath` and
+    `strip` already handle. A trailing dot inside the final segment is handled
+    by neither, and nothing tests it.
+    """
+    assert prefixes_collide_or_are_refused("src/budget", "src/budget."), (
+        "a trailing dot produced a claim disjoint from the directory it names"
+    )
+
+    # A dot INSIDE a name is meaningful and must survive any fix.
+    assert not prefixes_overlap("src/v1.2/grid", "src/v1/grid"), (
+        "interior dots were stripped; two different directories now collide"
+    )
+    assert_unrelated_scopes_stay_disjoint()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="only Scope.parse validates; the dataclass constructor accepts anything, "
+    "and the docstring claims it is validated on construction",
+)
+def test_constructing_a_scope_directly_validates_it():
+    """`Scope`'s docstring claims validation it does not perform.
+
+    The class docstring reads: "`(repo, path-prefix set)` — the whole scope
+    model, validated on construction." Validation lives entirely in the
+    `parse()` classmethod. The generated dataclass `__init__` accepts an empty
+    repo, a one-segment prefix that `scope_too_broad` exists to refuse, an
+    empty-string prefix, and a `../../etc` escape that
+    `test_a_prefix_escaping_the_repo_is_refused_not_normalised_away` proves is
+    refused through the other door.
+
+    This is the "comment claims a property the code does not have" class, and
+    it has a live caller: `leases.live_leases` reconstructs
+    `Scope(l["repo"], tuple(l["prefixes"]))` on every read of the lease table,
+    and `leases.conflicts_for` does the same. Today those inputs are safe
+    because they were validated on the way in — so the exposure is a
+    correctness argument that depends on a claim the type does not enforce, and
+    on nobody adding a second writer to that table.
+
+    The pin is essential here rather than decorative: `live_leases` runs this
+    constructor on every already-canonical stored prefix, so validation added
+    in `__post_init__` must accept canonical input unchanged. A fix that
+    re-normalises or rejects stored values would break every conflict lookup in
+    the registry.
+
+    Why the existing test misses it: every scope test constructs through
+    `Scope.parse`, which is the documented entry point and does validate. The
+    constructor the docstring actually describes is never called directly by a
+    test, so its claim is never checked.
+    """
+    with pytest.raises(Refusal):
+        Scope(repo="", prefixes=("src", "../../etc", ""))
+
+    # `live_leases` depends on this: canonical input must construct unchanged.
+    reconstructed = Scope(repo="acme/web-platform", prefixes=("src/billing/invoices",))
+    assert reconstructed.prefixes == ("src/billing/invoices",)
+    assert reconstructed.repo == "acme/web-platform"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Scope.parse iterates a str character-by-character, so the refusal names a "
+    "single-character prefix the caller never sent",
+)
+def test_a_string_of_prefixes_is_refused_without_inventing_a_prefix():
+    """Passing a string for `prefixes` produces a refusal that quotes a prefix nobody sent.
+
+    `Scope.parse` does `for raw in prefixes`, and a `str` is iterable. A caller
+    who sends `"prefixes": "src/budget/grid"` — a JSON string where an array
+    was wanted, which is the single most common shape error against any API —
+    has their input iterated character by character. The first character fails
+    the depth check and the caller is told:
+
+        scope_too_broad: path prefix 's' names 1 segment(s) below the repo root
+
+    The refusal is well-formed, carries a code and a remediation, and is about
+    a prefix that does not exist. `errors.py` argues that the remediation is
+    what stops a colleague concluding the tool is broken on their first
+    refused POST; a remediation telling them to deepen `'s'` does the opposite,
+    because nothing they can do to their actual input will address it.
+
+    This is the silent-coercion shape: a type error normalised into a
+    content error rather than refused as what it is.
+
+    Any accurate refusal satisfies this test — a distinct code for the wrong
+    type, or a message naming the string the caller actually sent. The
+    assertion targets only the specific dishonesty of reporting a
+    single-character prefix as though it were submitted.
+
+    Why the existing test misses it: every scope fixture passes a real list.
+    Nothing in the suite sends a wrong-typed `prefixes`, so the iteration is
+    never observed doing something other than iterating prefixes.
+    """
+    with pytest.raises(Refusal) as exc:
+        Scope.parse("acme/web-platform", "src/budget/grid")
+
+    refusal = exc.value
+    invented_a_prefix = refusal.code == "scope_too_broad" and "'s'" in refusal.message
+    assert not invented_a_prefix, (
+        f"the refusal describes a prefix the caller never sent: {refusal.message!r}"
+    )
+
+    # A genuinely too-shallow prefix must still get the refusal it is for.
+    with pytest.raises(Refusal) as shallow:
+        Scope.parse("acme/web-platform", ["src"])
+    assert shallow.value.code == "scope_too_broad"

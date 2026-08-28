@@ -592,6 +592,12 @@ class Queue:
                     f"lease this result came from is no longer current — the "
                     f"work was superseded, not lost."
                 )
+            if item.status in TERMINAL:
+                raise LeaseError(
+                    f"refusing result for {item_id}: it is already "
+                    f"{item.status.value}. Reporting over a finished item would "
+                    f"replace a recorded outcome with a later opinion of it."
+                )
             metadata = dict(item.metadata or {})
             metadata["lease_report"] = {
                 "attempt": attempt,
@@ -606,6 +612,12 @@ class Queue:
                 "metadata": metadata,
                 "leased_by": None,
                 "lease_expires_at": None,
+                # THE ATTEMPT ENDS WITH THE LEASE. Without this the reporter
+                # still holds a number the fence accepts, so it can report
+                # again — and did: a second call at the same attempt overwrote
+                # a real result with a later one. Bumping here is not a reset;
+                # the counter still only ever climbs.
+                "lease_attempt": item.lease_attempt + 1,
             }
 
         return self._mutate(item_id, fence)
@@ -627,13 +639,34 @@ class Queue:
                 continue
 
             def release(target: WorkItem) -> dict:
+                # RE-CHECK INSIDE THE LOCK. The candidate list above was read
+                # outside it, so between the snapshot and this write another
+                # worker may have legitimately claimed the item. Writing
+                # unconditionally revoked a LIVE lease: that worker's completed
+                # work was discarded and the item ran twice.
+                if target.lease_active_at(at):
+                    raise LeaseError("lease went live between the scan and the write")
+                if target.status != WorkStatus.IN_PROGRESS:
+                    raise LeaseError("no longer in progress")
                 return {
                     "status": WorkStatus.PENDING,
                     "leased_by": None,
                     "lease_expires_at": None,
+                    # Same rule as a terminal report: revoking the lease must
+                    # revoke the attempt. The docstring claimed the counter
+                    # "is what makes the next report from the old holder get
+                    # fenced out" — it was not, because only a SUBSEQUENT claim
+                    # bumped it, so a reaped worker's late report was accepted
+                    # by an item nobody held.
+                    "lease_attempt": target.lease_attempt + 1,
                 }
 
-            updated = self._mutate(item.id, release)
+            try:
+                updated = self._mutate(item.id, release)
+            except LeaseError:
+                # Lost the race, which is a normal answer for a sweeper: the
+                # item is someone else's now and nothing needs doing.
+                continue
             if updated:
                 reaped.append(updated)
         return reaped
