@@ -29,22 +29,14 @@ falls back to exactly what it does today.
 in-house agent — keep all of them. Integration is one config entry, and nothing about
 how your harness works changes.
 
-## The bet
-
-Across nine company engineering blogs, Stripe's and ThoughtWorks' published practice, and
-the whole agent-operating-system literature, we could not find anything addressing
-coordination **across independently-owned agent harnesses**. Plenty on orchestrating
-agents you control. Nothing on coordinating agents you don't.
-
-That is either the thesis or the warning, and we could not tell which from the desk.
-Publishing is the experiment: if nobody else has this problem, nobody uses this, and that
-is a real answer for the cost of a repository.
-
 ## Status
 
-**Early.** The coordination primitives are implemented and tested; the surface is small
-on purpose. See [`docs/`](docs/) for the design, and
-[`docs/roadmap.md`](docs/roadmap.md) for what is built versus what is planned.
+**Early, and usable.** The coordination primitives are implemented and tested: scope
+claims with conflict detection, snapshot pointers with divergence delivered at a cadence
+boundary, a resumable change feed, a work queue with a fenced lease protocol proven across
+twelve real processes, versioned SOPs, an MCP surface, and both injection tiers. See
+[`docs/`](docs/) for the design, [`docs/roadmap.md`](docs/roadmap.md) for what is built
+versus planned, and [`docs/known-issues.md`](docs/known-issues.md) for what is broken.
 
 The project's own adoption gate is written down and deliberately hard to game: **two
 identities other than the author publishing weekly for four consecutive weeks.** Stars
@@ -67,8 +59,106 @@ These are load-bearing, and each was derived from a failure mode rather than fro
 
 ## Getting started
 
-Not yet — the extraction from the original private implementation is in progress. Watch
-[`docs/roadmap.md`](docs/roadmap.md).
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/mabidoli/agentco && cd agentco
+uv run --extra dev --extra server --extra mcp pytest -q
+```
+
+### Run it
+
+Point it at a directory for its state, mint a secret for yourself, and start the
+service:
+
+```bash
+export AGENTCO_REGISTRY_DB=~/.agentco/registry.sqlite3
+export AGENTCO_WORK_STORE=~/.agentco/work.jsonl
+export AGENTCO_REGISTRY_KEYS=~/.agentco/keys.json
+
+python3 -m agentco keygen you > ~/.agentco/keys.json   # then chmod 600
+python3 -m agentco serve --port 8787                   # loopback by default
+```
+
+### Publish something
+
+`agentco/publish.py` is standard-library only and meant to be copied next to
+whatever you already run. No install required on the calling side.
+
+```python
+from agentco.publish import Registry
+
+reg = Registry("you", SECRET, "http://127.0.0.1:8787")
+
+# "I am about to work in these directories." Advisory — it blocks nobody.
+lease = reg.claim_scope("acme/web-platform", ["src/billing/invoices"], "implement")
+for c in lease["conflicts"]:
+    print(f"{c['withHolder']} is already in there, intent={c['theirIntent']}")
+
+# "I am working from this version of that." The document is never fetched or stored.
+reg.snapshot("git:/path/to/repo#main", "baseline for the redesign")
+
+# Catch up on everything since your last cursor.
+feed = reg.events()
+```
+
+### Connect a harness
+
+One entry in your `.mcp.json`, and nothing about how your harness works changes:
+
+```json
+{
+  "mcpServers": {
+    "agentco": {
+      "command": "python3",
+      "args": ["-m", "agentco", "serve-mcp"],
+      "env": {
+        "AGENTCO_ACTOR": "you",
+        "AGENTCO_REGISTRY_DB": "/path/to/registry.sqlite3",
+        "AGENTCO_WORK_STORE": "/path/to/work.jsonl",
+        "AGENTCO_SOP_STORE": "/path/to/sops.jsonl"
+      }
+    }
+  }
+}
+```
+
+Nine tools, and nine is a ceiling enforced by a test rather than remembered — a
+large tool surface costs every calling harness context on every tool-choice
+decision it makes.
+
+### Reach a harness nobody configured
+
+The above is pull-only: the model asks, AgentCo answers. To reach an agent whose
+owner has done nothing at all, write into a file it already reads.
+
+```bash
+# Splice live scope claims into the repo's agent-context file. Dry run first.
+python3 -m agentco inject CLAUDE.md AGENTS.md --repo acme/web-platform
+python3 -m agentco inject CLAUDE.md AGENTS.md --repo acme/web-platform --write
+
+# Or, per person rather than per repo: a session-start hook.
+python3 -m agentco hook install ~/.claude/settings.json --write
+```
+
+`inject` writes a marker-delimited block and touches nothing outside it,
+preserving the file's own line endings. `hook` takes a verbatim backup so
+`uninstall` restores the original bytes exactly.
+
+### Read the honest numbers
+
+```bash
+python3 -m agentco metrics        # weekly publishers, latency, conflict precision
+python3 -m agentco gate1          # exit 0 iff the adoption gate is met
+```
+
+### Before you rely on it
+
+Read [`docs/known-issues.md`](docs/known-issues.md). Twenty defects are open and
+documented, each with a failing test naming the property that should hold. None
+of them lose work or report a wrong result as a right one — those were found and
+fixed. Being told what is broken is the point; a project this young that claims
+none would be lying.
 
 ## Licence
 
