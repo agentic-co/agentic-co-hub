@@ -16,6 +16,64 @@ about each other's work**, **the pointers you built against, so you are told whe
 move**, and **a router that puts a decision in front of a named human and records the
 acknowledgement**.
 
+## How it works
+
+```mermaid
+flowchart LR
+    h["<b>Independently-owned harnesses</b><br/>Claude Code · Cursor<br/>a bespoke agent · a human at a CLI<br/><br/><i>nobody gives theirs up</i>"]
+
+    subgraph agentco["AgentCo &nbsp;—&nbsp; advisory, never blocking"]
+        claims["<b>Scope claims</b><br/>who is working where"]
+        snaps["<b>Snapshots</b><br/>pointer + version token,<br/>never the document"]
+        queue["<b>Work queue</b><br/>fenced leases"]
+        feed[["<b>Change feed</b><br/>opaque, resumable cursor"]]
+        claims --> feed
+        snaps --> feed
+        queue --> feed
+    end
+
+    sor[("<b>System of record</b><br/>Jira · Azure DevOps · Linear")]
+
+    h == "push: claim · snapshot · report<br/><i>MCP or HTTP</i>" ==> agentco
+    feed -. "reaches back — see below" .-> h
+    h -- "files work, reads status &nbsp;<i>unchanged</i>" --> sor
+    agentco -. "bounded projection<br/>never writes" .-> sor
+```
+
+Everyone keeps their own harness. The system of record stays authoritative — AgentCo
+holds only the things nothing else does, and if it disappears every tool falls back to
+exactly what it does today.
+
+### Getting information back to a harness
+
+Nothing can *push* into a model's context; a harness assembles that itself, at turn
+boundaries. So reaching one is always one of three moves — write into a file it already
+reads, give the model a reason to ask, or tell the human.
+
+```mermaid
+flowchart TD
+    feed[["Change feed"]]
+
+    feed --> t1["<b>Tier 1 — the repo</b><br/>a managed block spliced into<br/>CLAUDE.md / AGENTS.md, on a schedule"]
+    feed --> t2["<b>Tier 2 — MCP</b><br/>nine tools; the model calls<br/><code>events(since=cursor)</code>"]
+    feed --> t3["<b>Tier 3 — session hook</b><br/>fetch-and-inject at session start"]
+    feed --> t4["<b>Tier 4 — a person</b><br/>a digest to chat; they forward<br/>what matters"]
+
+    t1 --> z1(["owner effort: <b>zero</b>"])
+    t2 --> z2(["one config line"])
+    t3 --> z3(["small, owner-written"])
+    t4 --> z4(["manual, and honest about it"])
+```
+
+**Tier 1 is the only one that reaches a harness nobody configured**, which is the premise
+of the project. It is also the one that has to be careful, because it edits a file in
+somebody else's repository: the splice reads and writes bytes, matches the file's own line
+endings, never touches a byte outside its markers, never creates a file that does not
+exist, and is dry-run by default.
+
+Tiers 1 and 3 also carry *the instruction to pull* — which is what stops tier 2 being a
+tool the model has to remember on its own.
+
 ## What it is not
 
 **It is not your system of record.** Jira, Azure DevOps, Linear and GitHub Issues stay
