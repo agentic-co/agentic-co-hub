@@ -29,6 +29,7 @@ intersection logic rather than in a config file: the two are one decision.
 from __future__ import annotations
 
 import posixpath
+import re
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -76,6 +77,7 @@ def validate_prefix(raw: str, min_segments: int = MIN_SEGMENTS) -> str:
     to something inside the repo would record a lease over a directory the
     caller never named.
     """
+    reject_control_characters("path prefix", raw or "")
     if ".." in (raw or "").replace("\\", "/").split("/"):
         raise Refusal(
             code="scope_escapes_repo",
@@ -106,8 +108,39 @@ def validate_intent(raw: str) -> str:
     return intent
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def reject_control_characters(field: str, value: str) -> str:
+    """Refuse a control character in caller-supplied text. Never strip it.
+
+    An embedded newline in a `holder` or a path prefix is not a formatting
+    nuisance — these values are interpolated into a managed block that is
+    spliced into a repository's agent-context file, so a newline plus an END
+    marker escapes the block and writes permanent content into a file the whole
+    team commits and every teammate's agent reads.
+
+    Refusing rather than stripping, for the same reason `keys.normalize_component`
+    refuses: a silently repaired value is a value the caller did not send and
+    cannot see, and the repair hides the attempt. Stripping would also make the
+    injected text vanish without anyone learning somebody tried.
+    """
+    if _CONTROL_CHARS.search(value):
+        raise Refusal(
+            code="control_character",
+            message=f"{field} contains a control character ({value!r})",
+            remediation=(
+                f"Remove it. {field} is rendered into a shared agent-context file, "
+                f"so an embedded newline can break out of the managed block and "
+                f"write permanent content other people read. Refused rather than "
+                f"stripped, because a silently repaired value is one you did not send."
+            ),
+        )
+    return value
+
+
 def validate_repo(raw: str) -> str:
-    repo = (raw or "").strip()
+    repo = reject_control_characters("repo", raw or "").strip()
     if not repo:
         raise Refusal(
             code="repo_required",

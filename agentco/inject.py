@@ -88,6 +88,22 @@ def _detect_newline(raw: bytes) -> bytes:
     return b"\r\n" if crlf > 0 and crlf >= bare_lf else b"\n"
 
 
+class BlockEscapeError(ValueError):
+    """The content would break out of the managed block.
+
+    Defence in depth. The callers are validated (`scope.reject_control_characters`),
+    but the splice is the layer that can actually GUARANTEE the invariant — and
+    the invariant is not the one `_splice`'s docstring states. That one is true:
+    bytes outside the markers are copied verbatim. The one that matters is that
+    the managed block contains ONLY managed content, and nothing enforced it.
+
+    Content carrying an end marker escapes the block, and because `_splice`
+    replaces BEGIN..FIRST-END, everything after the injected marker becomes
+    permanent — a later render with clean state cannot remove it. The tool
+    cannot undo what it wrote.
+    """
+
+
 def _block_bytes(content: str, newline: bytes) -> bytes:
     """The managed block, rendered with the FILE's line ending, not the caller's.
 
@@ -96,6 +112,15 @@ def _block_bytes(content: str, newline: bytes) -> bytes:
     know or care what ending the target file happens to use. This is the one
     place that translation happens.
     """
+    for marker in (BEGIN_MARKER, END_MARKER):
+        if marker in content:
+            raise BlockEscapeError(
+                f"refusing to render content containing {marker!r}. It would "
+                f"close the managed block early, and because the splice replaces "
+                f"BEGIN through the FIRST end marker, everything after it would "
+                f"be permanent — this tool could not remove it on a later run."
+            )
+
     lines = [BEGIN_MARKER, *content.strip("\n").split("\n"), END_MARKER]
     return newline.join(line.encode("utf-8") for line in lines)
 

@@ -692,9 +692,12 @@ class Queue:
         **Expiry does not fail the item.** A failure is a claim about the work;
         an expired lease is a claim about the *worker*, and conflating them
         burns a retry and files an incident about work that was never even
-        attempted. The item goes back to PENDING with `lease_attempt` intact —
-        the attempt counter is what makes the next report from the old holder
-        get fenced out.
+        attempted. The item goes back to PENDING and its attempt is ADVANCED —
+        revoking the lease revokes the number with it, which is what fences out
+        a late report from the holder just reaped. An earlier version of this
+        docstring claimed the counter was left intact and did the fencing; it
+        was left intact and it fenced nothing, because only a subsequent claim
+        advanced it.
         """
         at = now or _now()
         reaped: list[WorkItem] = []

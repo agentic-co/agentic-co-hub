@@ -31,7 +31,7 @@ from typing import Optional
 
 from agentco import events
 from agentco.errors import Refusal
-from agentco.scope import Scope, find_conflicts
+from agentco.scope import Scope, find_conflicts, reject_control_characters
 
 DEFAULT_TTL_S = 8 * 3600  # one working day; a lease nobody renews should lapse
 MAX_TTL_S = 14 * 24 * 3600
@@ -118,7 +118,12 @@ def claim(
         )
 
     # docs/architecture.md — an unattested holder claim cannot block plane-run actuation.
-    claimed_holder = (holder or actor).strip() or actor
+    # `holder` is caller-supplied and is interpolated into the managed block
+    # that gets spliced into a repo's agent-context file. `.strip()` removes
+    # only leading and trailing whitespace, so an INTERIOR newline survived —
+    # and a newline followed by an end marker escapes the block and writes
+    # permanent content into a file the whole team commits.
+    claimed_holder = reject_control_characters("holder", holder or actor).strip() or actor
     attested = claimed_holder != actor
 
     existing = live_leases(conn, scope.repo, at)
