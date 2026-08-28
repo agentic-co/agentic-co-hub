@@ -16,11 +16,11 @@ in exactly the place it should have, the connectors.
 | Component | Built | Extracted | Notes |
 |---|:--:|:--:|---|
 | `leakguard` — the guard that keeps this repo publishable | ✅ | ✅ | Runs in CI and pre-commit |
-| Scope claims + conflict detection | ✅ | ⏳ | Prefix model, precision self-audit |
-| Snapshots + divergence digest | ✅ | ⏳ | Pointer-only, cadence-boundary delivery |
-| Change feed (opaque resumable cursor) | ✅ | ⏳ | |
-| HMAC authentication | ✅ | ⏳ | Actor from token, never payload |
-| Adoption metrics | ✅ | ⏳ | Weekly publishers, time-to-first-event, per-verb latency |
+| Scope claims + conflict detection | ✅ | ✅ | Prefix model, precision self-audit |
+| Snapshots + divergence digest | ✅ | ✅ | Pointer-only, cadence-boundary delivery, pluggable resolvers |
+| Change feed (opaque resumable cursor) | ✅ | ✅ | |
+| HMAC authentication | ✅ | ✅ | Actor from token, never payload |
+| Adoption metrics | ✅ | ✅ | Weekly publishers, time-to-first-event, per-verb latency |
 | Work queue + fenced leases | ✅ | ⏳ | CAS claim + fencing token |
 | Idempotency (one uniqueness rule on ingest) | ✅ | ⏳ | |
 | Scheduling with reservations + silent-schedule audit | ✅ | ⏳ | Catches "this has not run in ten days" |
@@ -28,6 +28,19 @@ in exactly the place it should have, the connectors.
 | Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
 | MCP surface | ✅ | ⏳ | Thin wrapper over the same core |
 | Cross-harness context + lesson sharing | ✅ | ⏳ | |
+
+### Extension points, so connectors never need a core change
+
+Two registries, both following the same shape:
+
+- `snapshots.register_resolver(scheme, fn)` — teach the registry to read one
+  URI scheme's version token. A resolver must obtain that token **without
+  fetching the body**; a connector that downloads a document to hash it has
+  broken the invariant, and no test in core can catch that on its behalf.
+- `delivery.register_sender(name, fn)` — deliver a digest somewhere, with
+  native formatting. The built-in sender posts plain JSON to a configured URL,
+  which is the honest default: a coordination layer has no business knowing
+  what any particular chat vendor's card format is.
 
 ## Next — the core
 
