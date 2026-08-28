@@ -36,6 +36,8 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from agentco.errors import Refusal
@@ -210,23 +212,107 @@ def route_view(payload: dict) -> dict:
     }
 
 
+DEFAULT_STATES = ("New", "Active", "To Do")
+
+
+@dataclass(frozen=True)
+class Connector:
+    """One organisation's Azure DevOps, as configuration.
+
+    `types` is the one that changes what work *means*. Azure DevOps nests Epic
+    above Feature above User Story, and picking a level is picking the size of
+    the thing an agent is handed. An Epic claimed as one work item is a whole
+    programme claimed as one work item — the lease is real, the fence is real,
+    and the unit is nonsense. Which level is right is a fact about how a team
+    writes its backlog, so it lives here rather than in a constant.
+    """
+
+    org_url: str
+    project: str
+    types: tuple[str, ...] = ()
+    states: tuple[str, ...] = DEFAULT_STATES
+    contains: Optional[str] = None
+    wiql: Optional[str] = None
+    limit: int = 50
+    pat_env: str = DEFAULT_PAT_ENV_VAR
+
+
+def load_connector(path: str | Path) -> Connector:
+    """Read and validate a connector file. Every refusal names the fix."""
+    try:
+        raw = json.loads(Path(path).read_text())
+    except FileNotFoundError:
+        raise Refusal(
+            code="connector_missing",
+            message=f"no connector file at {path}",
+            remediation='Point --connector at a JSON file with at least {"orgUrl": …, "project": …}.',
+            http_status=400,
+        ) from None
+    except json.JSONDecodeError as exc:
+        raise Refusal(
+            code="connector_bad_json",
+            message=f"{path} is not valid JSON: {exc}",
+            remediation="Fix the JSON — this file decides which work is pulled at all.",
+            http_status=400,
+        ) from None
+
+    missing = [k for k in ("orgUrl", "project") if not raw.get(k)]
+    if missing:
+        raise Refusal(
+            code="connector_incomplete",
+            message=f"connector file is missing: {', '.join(missing)}",
+            remediation='Both are required: {"orgUrl": "https://dev.azure.com/<org>", "project": "<project>"}.',
+            http_status=400,
+        )
+
+    types = tuple(raw.get("types") or ())
+    if any(not str(t).strip() for t in types):
+        raise Refusal(
+            code="connector_bad_types",
+            message="`types` contains a blank entry",
+            remediation=(
+                'List the work item types to pull, e.g. ["Feature"]. An empty '
+                "entry would widen the query rather than narrow it, which is the "
+                "opposite of what a filter is for."
+            ),
+            http_status=400,
+        )
+    return Connector(
+        org_url=raw["orgUrl"],
+        project=raw["project"],
+        types=types,
+        states=tuple(raw.get("states") or DEFAULT_STATES),
+        contains=raw.get("contains"),
+        wiql=raw.get("wiql"),
+        limit=int(raw.get("limit", 50)),
+        pat_env=raw.get("patEnv") or DEFAULT_PAT_ENV_VAR,
+    )
+
+
 def build_wiql(
     project: str,
     contains: Optional[str] = None,
-    item_type: Optional[str] = None,
-    states: Iterable[str] = ("New", "Active", "To Do"),
+    types: Iterable[str] = (),
+    states: Iterable[str] = DEFAULT_STATES,
 ) -> str:
     """A conservative default query: open work in one project, optionally filtered.
 
     Closed and Removed items are excluded rather than filtered afterwards — a
     pull that files finished work as pending is how a queue fills with things
     nobody should do.
+
+    The type filter is in the QUERY and not applied to the results, which is not
+    a micro-optimisation: `--limit` bounds what the query returns, so filtering
+    afterwards means asking for twenty items, being handed twenty Epics, and
+    filing nothing while reporting success.
     """
     clauses = [f"[System.TeamProject] = '{_escape(project)}'"]
     state_list = ", ".join(f"'{_escape(s)}'" for s in states)
     clauses.append(f"[System.State] IN ({state_list})")
-    if item_type:
-        clauses.append(f"[System.WorkItemType] = '{_escape(item_type)}'")
+    types = tuple(types)
+    if types:
+        type_list = ", ".join(f"'{_escape(t)}'" for t in types)
+        clauses.append(f"[System.WorkItemType] IN ({type_list})")
     if contains:
         clauses.append(f"[System.Title] CONTAINS '{_escape(contains)}'")
     return (
@@ -255,23 +341,36 @@ def _escape(value: str) -> str:
 
 def pull(
     fetch: Fetcher,
-    org_url: str,
-    project: str,
+    connector: Connector,
     *,
-    wiql: Optional[str] = None,
     ids: Optional[Iterable[int]] = None,
-    contains: Optional[str] = None,
-    item_type: Optional[str] = None,
     assign: Optional[str] = None,
-    limit: int = 50,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """Resolve a query to work payloads. Files nothing — the caller decides that.
 
-    Splitting the read from the write is what lets `--dry-run` be the default
-    and still show exactly what would be filed, rather than a description of
-    what it might be.
+    Returns `(payloads, dropped)`. Splitting the read from the write is what
+    lets dry-run be the default and still show exactly what would be filed
+    rather than a description of what it might be; returning the drops is what
+    stops a type filter from being a silent truncation. A pull that quietly
+    discards half its results reads identically to one that found half as much.
     """
     if ids is None:
-        ids = wiql_ids(fetch, org_url, project, wiql or build_wiql(project, contains, item_type), limit)
-    raw_items = fetch_items(fetch, org_url, ids)
-    return [to_work_payload(raw, org_url, assign) for raw in raw_items]
+        query = connector.wiql or build_wiql(
+            connector.project, connector.contains, connector.types, connector.states
+        )
+        ids = wiql_ids(fetch, connector.org_url, connector.project, query, connector.limit)
+    raw_items = fetch_items(fetch, connector.org_url, ids)
+
+    kept, dropped = [], []
+    for raw in raw_items:
+        payload = to_work_payload(raw, connector.org_url, assign)
+        item_type = (raw.get("fields") or {}).get("System.WorkItemType")
+        # Explicit ids and a raw WIQL both bypass the built query, so the type
+        # filter is re-applied here. Naming an id is not a licence to file an
+        # Epic into a queue configured for Features — but it is also not
+        # something to swallow, so the drop is returned and reported.
+        if connector.types and item_type not in connector.types:
+            dropped.append({**payload, "reason": f"type {item_type!r} is not in {list(connector.types)}"})
+            continue
+        kept.append(payload)
+    return kept, dropped
