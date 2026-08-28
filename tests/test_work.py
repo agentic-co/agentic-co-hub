@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from agentco.work import (
+    BlockedError,
     CapabilityError,
     LeaseError,
     Queue,
@@ -373,6 +374,45 @@ def test_ready_hides_an_item_under_a_live_lease(queue):
     item = queue.create("x")
     queue.claim(item.id, "worker-a", ttl_seconds=3600, now=NOW)
     assert item.id not in {i.id for i in queue.ready(now=NOW + timedelta(minutes=5))}
+
+
+def test_a_targeted_assignment_cannot_be_taken_by_someone_else(queue):
+    """`ready()` filtered on `assigned_agent` and `claim()` never looked at it,
+    so anyone holding the id could take work routed to someone specific. The two
+    must agree, or "ready" is advice rather than a contract."""
+    item = queue.create("for dana specifically", assigned_agent="dana")
+
+    with pytest.raises(BlockedError) as exc:
+        queue.claim(item.id, "kofi", now=NOW)
+    assert "assigned to 'dana'" in str(exc.value)
+
+    assert queue.claim(item.id, "dana", now=NOW) is not None
+
+
+# There WAS a third test here — `test_claiming_does_not_overwrite_who_the_work
+# _was_for` — and it was vacuous. It assigned an item to one identity, claimed
+# it as that same identity, and asserted `assigned_agent` still named them. It
+# passed against the pre-fix code too, because overwriting "dana" with "dana"
+# is invisible. Deleted rather than repaired: the only case where the overwrite
+# is observable is a claimant who is NOT the assignee, and that is now refused
+# outright by the test above, so the property has a real home. The test below
+# covers the other direction — claiming must not INVENT an assignment — and
+# that one does fail against the pre-fix code.
+#
+# Recording this because it is the same defect the whole adversarial review was
+# about: a test asserting the half that holds. I wrote it while fixing that
+# class of bug, and caught it only by running it against the unfixed code.
+
+
+def test_an_unassigned_item_stays_unassigned_when_claimed(queue):
+    """The same property from the other side: claiming must not INVENT an
+    assignment either. An item nobody routed is still an item nobody routed."""
+    item = queue.create("open to anyone")
+    queue.claim(item.id, "kofi", now=NOW)
+
+    stored = queue.get(item.id)
+    assert stored.assigned_agent is None
+    assert stored.leased_by == "kofi"
 
 
 def test_ready_does_not_hide_work_a_worker_lacks_capability_for(queue):

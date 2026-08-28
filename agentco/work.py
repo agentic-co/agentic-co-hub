@@ -537,6 +537,22 @@ class Queue:
                     f"those capabilities, or fix the item's requires. "
                     f"Retrying here cannot help."
                 )
+            # WHO IT IS FOR is not WHO IS DOING IT. `assigned_agent` is a
+            # routing decision made when the item was filed; `leased_by` is who
+            # holds it right now. `claim()` checked neither and then overwrote
+            # the first with the claimant — so a targeted assignment could be
+            # taken by anyone, and the record of who it was meant for was
+            # destroyed in the same write that took it. Afterwards nothing
+            # anywhere could answer "who was this for?", which makes a misroute
+            # undetectable rather than merely possible.
+            if item.assigned_agent and item.assigned_agent != agent:
+                raise BlockedError(
+                    f"cannot claim {item_id} for {agent!r}: it is assigned to "
+                    f"{item.assigned_agent!r}. `ready()` does not offer it to you, "
+                    f"so this id came from somewhere that does not know about "
+                    f"assignment. Retrying cannot help — claim it as "
+                    f"{item.assigned_agent!r}, or re-file it unassigned."
+                )
             unmet = item.unmet_blockers(done_ids)
             if unmet:
                 # `ready()` filtered these out and `claim()` did not look at all,
@@ -571,7 +587,10 @@ class Queue:
                 )
             return {
                 "status": WorkStatus.IN_PROGRESS,
-                "assigned_agent": agent,
+                # `assigned_agent` is deliberately NOT written here. Taking work
+                # is not the same act as being assigned it, and overwriting the
+                # routing decision with the claimant erased the only record that
+                # could show a misroute after the fact.
                 "leased_by": agent,
                 "lease_attempt": item.lease_attempt + 1,
                 "lease_expires_at": _iso(at + timedelta(seconds=ttl_seconds)),
