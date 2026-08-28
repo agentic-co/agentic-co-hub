@@ -540,6 +540,45 @@ def create_app(
 
         return await _handle(request, "sop_activate", work)
 
+    @app.post("/sops/{sop_id}/instantiate")
+    async def post_sop_instantiate(sop_id: str, request: Request) -> JSONResponse:
+        """File work that PINS this SOP version.
+
+        Here rather than assembled by the caller because the check that matters
+        is `instantiate`'s own: a draft is refused. Building the pin client-side
+        from a `GET /sops/{id}` would work right up until someone passed an
+        explicit version, and then it would hand somebody a half-written
+        procedure carrying the authority of a published one.
+
+        The pin is immutable for the life of the item. Later revisions do not
+        reach back — that is what makes outcomes comparable across versions.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            version = payload.get("version")
+            try:
+                item = library.instantiate(
+                    sop_id,
+                    queue,
+                    title=payload.get("title"),
+                    version=int(version) if version is not None else None,
+                    requires=payload.get("requires") or (),
+                    blocked_by=payload.get("blockedBy") or (),
+                    assigned_agent=payload.get("assignedAgent"),
+                    natural_key=payload.get("naturalKey"),
+                    source=payload.get("source"),
+                    source_id=payload.get("sourceId"),
+                    kind=payload.get("kind"),
+                    subject=payload.get("subject"),
+                    period=payload.get("period"),
+                    metadata=payload.get("metadata"),
+                )
+            except (SopError, WorkError, NaturalKeyError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+            return {"state": "accepted", "item": json.loads(item.to_json())}
+
+        return await _handle(request, "sop_instantiate", work)
+
     @app.get("/sops")
     async def get_sops(request: Request) -> JSONResponse:
         """Every SOP with an active version."""

@@ -194,6 +194,22 @@ def to_work_payload(raw: dict, org_url: str, assign: Optional[str] = None) -> di
     }
 
 
+def route_view(payload: dict) -> dict:
+    """The few facts a routing rule may see, projected out of one payload.
+
+    Narrow on purpose. A rule that could match on anything in the item would
+    couple one organisation's routing to this adapter's internal shape, and
+    every field added here becomes a field the rules file may come to depend on.
+    """
+    meta = payload.get("metadata") or {}
+    return {
+        "title": payload.get("title", ""),
+        "type": meta.get("adoType"),
+        "state": meta.get("adoState"),
+        "id": meta.get("adoId"),
+    }
+
+
 def build_wiql(
     project: str,
     contains: Optional[str] = None,

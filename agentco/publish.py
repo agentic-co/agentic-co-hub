@@ -247,3 +247,12 @@ class Registry:
     def sop_list(self) -> dict:
         """Every SOP with an active version."""
         return self._call("GET", "/sops")
+
+    def sop_instantiate(self, sop_id: str, **fields: Any) -> dict:
+        """File work pinned to this SOP's active version.
+
+        Use this rather than `work_create` whenever the work has a procedure:
+        the item then carries which procedure it was run under, which is the
+        only thing that makes "did the revision help" answerable later.
+        """
+        return self._call("POST", f"/sops/{sop_id}/instantiate", fields)

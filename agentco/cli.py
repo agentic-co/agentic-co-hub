@@ -18,9 +18,10 @@ import secrets
 import sys
 from pathlib import Path
 
-from agentco import ado, app as app_module
+from agentco import ado, app as app_module, routing
 from agentco import db, divergence, hook, inject, leases, metrics
 from agentco.publish import Registry
+from agentco.sop import SopLibrary, resolve_sop_store
 from agentco.work import Queue, resolve_work_store
 
 
@@ -198,13 +199,20 @@ def cmd_ado_pull(args) -> int:
 
     Dry-run by default, the same posture as `digest` and `inject`: this writes
     into a queue that other people's agents poll, so running it by mistake
-    should cost nothing but a printed list.
+    should cost nothing but a printed table.
 
     Nothing here writes to Azure DevOps. The adapter issues reads only, and a
     repeat run is a no-op because every item is keyed on its ADO id.
+
+    With `--routes`, each item is filed as an INSTANCE of the procedure its
+    rule selects, and inherits that file's `assign` and `requires`. Without it,
+    items are filed bare — which is fine for a queue nobody has written
+    procedures for yet, and wrong the moment somebody has.
     """
     fetch = ado.make_fetcher(ado.resolve_pat(args.pat_env))
     ids = [int(i) for i in args.ids.split(",")] if args.ids else None
+    routes = routing.load(args.routes) if args.routes else None
+
     payloads = ado.pull(
         fetch,
         args.org_url,
@@ -213,21 +221,38 @@ def cmd_ado_pull(args) -> int:
         ids=ids,
         contains=args.contains,
         item_type=args.item_type,
-        assign=args.assign,
+        assign=args.assign or (routes.assign if routes else None),
         limit=args.limit,
     )
+    requires = list(args.requires.split(",")) if args.requires else list(routes.requires if routes else ())
 
+    plan = []
     for payload in payloads:
-        meta = payload["metadata"]
-        print(f"  {meta['adoState']:<12} {payload['title']}")
-        print(f"               {meta['url']}")
-    if not payloads:
+        view = ado.route_view(payload)
+        sop_key, sop_id, matched = routes.sop_id_for(view) if routes else (None, None, False)
+        plan.append({"payload": payload, "sop_key": sop_key, "sop_id": sop_id, "matched": matched})
+
+    for row in plan:
+        meta = row["payload"]["metadata"]
+        # A default hit is marked, not hidden: it is the signal that the rules
+        # do not yet cover this backlog.
+        tag = row["sop_key"] or "-"
+        if row["sop_key"] and not row["matched"]:
+            tag += " (default)"
+        print(f"  {meta['adoState']:<10} {tag:<22} {row['payload']['title']}")
+    if not plan:
         print("  (nothing matched)")
 
     if not args.write:
-        print(f"\n{len(payloads)} item(s) would be filed"
-              f"{f' and assigned to {args.assign}' if args.assign else ''}. "
-              "Re-run with --write.")
+        assignee = args.assign or (routes.assign if routes else None)
+        print(
+            f"\n{len(plan)} item(s) would be filed"
+            + (f", assigned to {assignee}" if assignee else "")
+            + (f", requiring [{', '.join(requires)}]" if requires else "")
+            + ". Re-run with --write."
+        )
+        if routes and any(r["sop_key"] and not r["matched"] for r in plan):
+            print("(items marked (default) matched no rule — add one, or accept the default.)")
         return 0
 
     if args.registry_url:
@@ -240,29 +265,39 @@ def cmd_ado_pull(args) -> int:
             return 2
         registry = Registry(args.actor, secret, args.registry_url)
 
-        def file_one(p: dict) -> tuple[str, str]:
-            item = registry.work_create(
-                p["title"],
-                source=p["source"], sourceId=p["sourceId"],
-                metadata=p["metadata"],
+        def file_one(row: dict) -> tuple[str, str, str]:
+            p = row["payload"]
+            common = dict(
+                title=p["title"], source=p["source"], sourceId=p["sourceId"],
+                metadata=p["metadata"], requires=requires,
                 **({"assignedAgent": p["assignedAgent"]} if p["assignedAgent"] else {}),
-            )["item"]
-            return item["id"], item.get("assigned_agent") or "-"
+            )
+            if row["sop_id"]:
+                item = registry.sop_instantiate(row["sop_id"], **common)["item"]
+            else:
+                title = common.pop("title")
+                item = registry.work_create(title, **common)["item"]
+            return item["id"], item.get("assigned_agent") or "-", row["sop_key"] or "-"
     else:
         queue = Queue(resolve_work_store(args.work_store))
+        library = SopLibrary(resolve_sop_store(args.sop_store))
 
-        def file_one(p: dict) -> tuple[str, str]:
-            item = queue.create(
-                p["title"],
-                source=p["source"], source_id=p["sourceId"],
-                assigned_agent=p["assignedAgent"], metadata=p["metadata"],
+        def file_one(row: dict) -> tuple[str, str, str]:
+            p = row["payload"]
+            common = dict(
+                source=p["source"], source_id=p["sourceId"], metadata=p["metadata"],
+                assigned_agent=p["assignedAgent"], requires=requires,
             )
-            return item.id, item.assigned_agent or "-"
+            if row["sop_id"]:
+                item = library.instantiate(row["sop_id"], queue, title=p["title"], **common)
+            else:
+                item = queue.create(p["title"], **common)
+            return item.id, item.assigned_agent or "-", row["sop_key"] or "-"
 
-    filed = [file_one(p) for p in payloads]
+    filed = [file_one(row) for row in plan]
     print(f"\nfiled {len(filed)} item(s):")
-    for item_id, assignee in filed:
-        print(f"  {item_id}  assigned={assignee}")
+    for item_id, assignee, sop_key in filed:
+        print(f"  {item_id}  assigned={assignee:<10} sop={sop_key}")
     return 0
 
 
@@ -361,6 +396,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ado.add_argument("--ids", help="comma-separated work item ids, instead of a query")
     p_ado.add_argument("--wiql", help="a raw WIQL query, instead of the built one")
     p_ado.add_argument("--assign", help="the agent to assign every filed item to")
+    p_ado.add_argument("--routes", help="JSON rules deciding which SOP each item triggers")
+    p_ado.add_argument("--requires", help="comma-separated capabilities a worker must declare")
+    p_ado.add_argument("--sop-store", help="path to the local SOP library (local only)")
     p_ado.add_argument("--limit", type=int, default=20)
     p_ado.add_argument("--pat-env", default=ado.DEFAULT_PAT_ENV_VAR)
     # Where the work is filed. Absent, the local store; present, the shared
