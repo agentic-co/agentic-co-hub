@@ -30,10 +30,14 @@ any of them, and the docstring says so.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -658,10 +662,18 @@ def test_a_conflict_from_an_unverified_holder_claim_is_distinguishable(client):
     `MAX_TTL_S` allows fourteen days of it, and `release` refuses the filer,
     because the recorded holder is the impersonated party.
 
-    The blast radius grew with tier-1 injection: `leases.conflicts_for` reuses
-    the same records to splice live conflicts into `CLAUDE.md`/`AGENTS.md`, so
-    an unverified attribution now reaches a harness's context, not just an API
-    response.
+    The reach is the TIER-3 SESSION HOOK, not the shared repo file. Be precise
+    about this, because the wrong module wastes a fixer's time:
+      * `inject.py` renders the shared `CLAUDE.md`/`AGENTS.md` block from
+        `live_leases` directly, and it DOES surface the flag — `inject.py:258`
+        appends "(attested, unverified)". That path is fine.
+      * `hook.py:115` calls `leases.conflicts_for`, whose records come from
+        `scope.find_conflicts` and carry only `withHolder`, `overlaps` and
+        `theirIntent`. That output goes to `inject.render_session_block` and
+        into the harness's session context with no flag at all.
+    So the fix belongs in the conflict record itself (`scope.find_conflicts`),
+    which is where both the API response and the session hook read from —
+    not in either renderer.
 
     Either resolution satisfies this test: propagate the flag into the conflict
     so a consumer can weigh it, or do not fire third-party conflicts from an
@@ -757,4 +769,176 @@ def test_an_unknown_actor_and_a_bad_signature_are_indistinguishable_refusals():
 
     assert unknown_actor == wrong_secret, (
         "the refusals are distinguishable, so actor existence is a one-request oracle"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# leakguard — a guard that reports "clean" is worse than no guard
+# --------------------------------------------------------------------------- #
+#
+# The three below share a failure mode: the tool exits 0 and prints "clean"
+# while the thing it exists to catch goes straight past it. That is worse than
+# having no guard, because it converts an absent check into a false assurance
+# — and the whole publishability argument in CONTRIBUTING.md rests on this
+# tool actually running.
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "leakguard"))
+
+import leakguard  # noqa: E402
+
+
+def leakguard_rules_hit(text: str) -> set[str]:
+    return {f.rule for f in leakguard.scan_text(text, "f.md", leakguard.BASE_RULES)}
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
+    )
+
+
+git_available = shutil.which("git") is not None
+
+
+@pytest.mark.skipif(not git_available, reason="git is required to stage anything")
+@pytest.mark.xfail(
+    strict=True,
+    reason="staged_files() lists names from the index but scan_paths() reads each "
+    "path from the working tree, so the bytes being committed are never examined",
+)
+def test_staged_mode_scans_the_content_that_is_about_to_be_committed(tmp_path):
+    """`--staged` checks the working tree, so a scrubbed worktree hides a staged secret.
+
+    `staged_files` asks git for names only —
+    `git diff --cached --name-only --diff-filter=ACMR` — and hands back
+    `root / line`. `scan_paths` then calls `path.read_text()`, which reads the
+    WORKING TREE copy. The index, which is what `git commit` will actually
+    record, is never read.
+
+    So the pre-commit hook approves a commit containing a credential whenever
+    the worktree copy differs from the staged copy. That is not an exotic
+    sequence: stage a file, then keep editing it — which is what anyone does
+    when they stage a fix and then clean up around it. The hook reports
+    "clean (1 file(s) scanned)" and exits 0.
+
+    The same read is why a file staged and then DELETED from the worktree is
+    skipped silently rather than reported: `read_text` raises `FileNotFoundError`,
+    `scan_paths` catches `OSError`, and the loop continues.
+
+    Worth fixing together with the sibling fail-open in the same function: when
+    `git diff` exits non-zero, `staged_files` returns `[]`, so `main` finds no
+    findings and exits 0. A git failure currently reads as a pass.
+
+    Why the existing tests miss it: `test_leakguard.py` has no `--staged` test
+    at all. Every test there either calls `scan_text` on a literal string or
+    `main(["--root", ...])` in whole-tree mode, where worktree and index are
+    the same bytes by construction. The one mode the pre-commit hook actually
+    runs in is the one mode never exercised.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+
+    secret = repo / "config.py"
+    secret.write_text('TOKEN = "ghp_' + "a" * 30 + '"\n', encoding="utf-8")
+    _git(repo, "add", "config.py")
+
+    # The worktree is cleaned up afterwards; the index still holds the token.
+    secret.write_text('TOKEN = os.environ["TOKEN"]\n', encoding="utf-8")
+    staged = _git(repo, "show", ":config.py").stdout
+    assert "ghp_" in staged, "precondition: the credential is staged for commit"
+
+    exit_code = leakguard.main(["--root", str(repo), "--staged"])
+
+    assert exit_code == 1, "the hook approved a commit that records a live credential"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="the (?<!0\\.0\\.0\\.0) lookbehind sits after \\b and matches any address "
+    "whose last seven characters are 0.0.0.0, so the whole N0.0.0.0 family escapes",
+)
+def test_a_private_network_address_is_flagged_even_when_it_ends_in_zeros():
+    """`10.0.0.0/8` — the most common private range there is — is invisible to the guard.
+
+    The rule is
+    `\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b(?<!0\\.0\\.0\\.0)(?<!127\\.0\\.0\\.1)`.
+    Both lookbehinds are placed AFTER the closing `\\b`, so they are evaluated
+    at the position following the whole match and test the preceding
+    characters of whatever was matched — not whether the match IS the exempt
+    address. Any address whose final seven characters are `0.0.0.0` therefore
+    satisfies the negative lookbehind and is dropped.
+
+    That is the entire `N0.0.0.0` family: `10.0.0.0`, `20.0.0.0` … `90.0.0.0`,
+    `100.0.0.0`, `250.0.0.0`. It is not a broad rule failure — host addresses
+    and non-zero networks are still caught, as the second block below pins.
+    What escapes is precisely the NETWORK addresses, which are the ones most
+    likely to appear in a committed config, a firewall rule or a subnet
+    comment.
+
+    The loopback assertions are kept in the same test on purpose. They are what
+    stops the fix being "drop the lookbehinds and flag everything", which would
+    fire on every default binding in the repo and train people to suppress the
+    rule — the failure mode `test_loopback_is_not_flagged_as_a_private_host`
+    exists to prevent. A correct fix anchors the exemption to the match itself
+    rather than to the text behind it.
+
+    Why the existing test misses it: `test_loopback_is_not_flagged_as_a_private_host`
+    checks `127.0.0.1` and `0.0.0.0` — the two addresses the lookbehinds were
+    written for, both of which work. `test_an_internal_hostname_is_caught` uses
+    a hostname, not an address. No test asserts that a non-exempt address IS
+    caught, so the over-broad exemption has nothing to fail against.
+    """
+    for address in ("10.0.0.0", "100.0.0.0", "20.0.0.0", "250.0.0.0"):
+        assert "private-host" in leakguard_rules_hit(f"upstream {address}"), (
+            f"{address} is a private network address and was not flagged"
+        )
+
+    # Addresses that already work must keep working, so the fix cannot narrow
+    # the rule instead of correcting the exemption.
+    assert "private-host" in leakguard_rules_hit("upstream 10.0.0.1")  # leakguard: allow
+    assert "private-host" in leakguard_rules_hit("upstream 172.16.0.0")  # leakguard: allow
+
+    # The exemptions must survive the fix — otherwise every default binding in
+    # the repo becomes a finding, and the rule gets suppressed rather than used.
+    # (`test_loopback_is_not_flagged_as_a_private_host` in test_leakguard.py is
+    # the backstop that goes RED if someone "fixes" this by dropping the
+    # lookbehinds wholesale; these two keep that visible from here as well.)
+    assert "private-host" not in leakguard_rules_hit("uvicorn --host 127.0.0.1")
+    assert "private-host" not in leakguard_rules_hit("bind 0.0.0.0:8787")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason='Path(".env.example").suffix is ".example", so the ".env.example" entry in '
+    "DEFAULT_INCLUDE_SUFFIXES can never match and the file is never opened",
+)
+def test_an_env_example_file_is_scanned_for_leaks(tmp_path):
+    """The one filename most likely to hold a credential is excluded by a typo in the include set.
+
+    `iter_files` filters on `path.suffix.lower() not in config.include_suffixes`.
+    `Path.suffix` returns only the FINAL extension, so `.env.example` yields
+    `".example"` — while `DEFAULT_INCLUDE_SUFFIXES` lists the full
+    `".env.example"`. The entry is unreachable: no path's `suffix` can ever
+    equal it. The file is silently skipped and the tool reports "clean".
+
+    An `.env.example` is precisely where a real value gets pasted by accident
+    instead of a placeholder, which is why someone thought to list it.
+
+    The same `suffix`-based filter also skips every extensionless file —
+    `Dockerfile`, `Makefile`, and `tools/leakguard/pre-commit`, the hook script
+    shipped in this repo. Verified: a `ghp_` token in either `.env.example` or
+    `Dockerfile` passes the whole-tree scan.
+
+    Why the existing tests miss it: every fixture in `test_leakguard.py` that
+    goes through `main`/`iter_files` is named `*.md` or `*.py`. Nothing tests
+    the include-set membership itself, so an entry that can never match looks
+    identical to one that works.
+    """
+    (tmp_path / ".env.example").write_text(
+        "API_TOKEN=ghp_" + "a" * 30 + "\n", encoding="utf-8"
+    )
+
+    assert leakguard.main(["--root", str(tmp_path)]) == 1, (
+        "a credential in .env.example passed the scan; the include-set entry is unreachable"
     )

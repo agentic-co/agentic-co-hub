@@ -22,6 +22,7 @@ from __future__ import annotations
 import builtins
 import json
 import subprocess
+from pathlib import Path
 import sys
 
 import pytest
@@ -226,6 +227,15 @@ def test_main_as_a_real_subprocess_with_a_broken_registry_still_exits_zero(tmp_p
     broken_db.mkdir()
     env = {
         "PATH": "/usr/bin:/bin",
+        # `env=` REPLACES the environment rather than extending it, and `cwd` is
+        # outside the repo — so without this the subprocess can only import
+        # agentco when the package happens to be installed in the interpreter
+        # running the tests. It is under `uv run`; it is not under a bare
+        # interpreter, and the test then fails for a reason that has nothing to
+        # do with what it is checking. A test that passes only in the author's
+        # environment is the same defect class as one that passes only this
+        # month.
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
         "AGENTCO_REGISTRY_DB": str(broken_db),
         "AGENTCO_WORK_STORE": str(tmp_path / "work.jsonl"),
         "AGENTCO_SOP_STORE": str(tmp_path / "sops.jsonl"),
