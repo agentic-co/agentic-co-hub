@@ -160,6 +160,15 @@ def _truncate(text: str, max_bytes: int) -> str:
     if len(encoded) <= max_bytes:
         return text
     notice = f"\n… truncated to stay under the {max_bytes}-byte session-context budget."
+    if len(notice.encode("utf-8")) >= max_bytes:
+        # The notice alone does not fit. Returning it anyway EXCEEDED the cap
+        # this function is named for — a "hard cap" that is not one is worse
+        # than a soft cap that says so, because callers size their budgets
+        # against the promise. A marker short enough to fit is the honest
+        # answer; if even that does not fit, the caller asked for a budget too
+        # small to say anything in and gets nothing rather than a lie.
+        short = "…[truncated]"
+        return short if len(short.encode("utf-8")) <= max_bytes else ""
     budget = max(0, max_bytes - len(notice.encode("utf-8")))
     truncated = encoded[:budget].decode("utf-8", errors="ignore")
     last_newline = truncated.rfind("\n")
@@ -190,7 +199,17 @@ def build_additional_context(actor: str, max_bytes: int = DEFAULT_MAX_CONTEXT_BY
         # Named, not summarised into "some things failed" — a colleague
         # debugging why their SOP count never showed up needs the dependency
         # name, not just the fact that something, somewhere, was unhappy.
-        sections.append("Unavailable this session: " + "; ".join(warnings))
+        #
+        # AND PLACED SECOND, not last. `_truncate` cuts from the tail, so
+        # appending this at the end made it the FIRST thing to disappear under
+        # budget pressure — the one piece of content this module argues at
+        # length must never vanish silently. Worse, a truncated session is
+        # exactly when a degraded dependency matters most, because the reader
+        # has less context to notice the gap for themselves.
+        #
+        # Immediately after the pull instruction: that stays first because a
+        # reader who is told nothing else must still be told what to call.
+        sections.insert(1, "Unavailable this session: " + "; ".join(warnings))
 
     return _truncate("\n\n".join(sections), max_bytes)
 

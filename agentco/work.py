@@ -299,7 +299,18 @@ class Queue:
             try:
                 items.append(WorkItem.from_json(json.dumps(row)))
             except (ValueError, TypeError):
-                quarantined.append(json.dumps(row).encode("utf-8"))
+                # NOT appended to `quarantined`. Two docstrings promise that
+                # list holds the exact bytes read — `_read_raw` says re-encoding
+                # a guess is how the original bytes get lost, `_write_all` says
+                # they go back verbatim — and `json.dumps(row)` is a
+                # re-serialisation, not the original line. Worse, this row is
+                # ALSO in `rows`, so passing both to `_write_all` would write it
+                # twice: once as a row and once as a "quarantined line".
+                #
+                # The row is already preserved by being in `raw_rows`, which
+                # every write path carries through. Nothing is lost by leaving
+                # it out of a list whose contract it does not satisfy.
+                pass
         self.quarantined = quarantined
         return items
 

@@ -2304,11 +2304,6 @@ def test_a_finished_blocker_releases_its_dependents_whatever_else_its_row_contai
     assert taken is not None, "a dependent was stranded by a blocker that is finished"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="warnings are appended last and _truncate cuts from the tail, so the named "
-    "degradation is the first content to be dropped",
-)
 def test_the_named_unavailability_warning_survives_truncation(monkeypatch):
     """The session hook drops the one thing it argues must never be silent.
 
@@ -2357,11 +2352,6 @@ def test_the_named_unavailability_warning_survives_truncation(monkeypatch):
     assert "SOP library unavailable" in context
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="when max_bytes is smaller than the truncation notice, the notice alone is "
-    "returned and it is longer than the budget",
-)
 def test_truncate_never_returns_more_than_the_budget_it_was_given():
     """The byte cap is exceeded exactly when the budget is tightest.
 
