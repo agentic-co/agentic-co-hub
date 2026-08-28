@@ -21,11 +21,17 @@ from __future__ import annotations
 
 import pytest
 
+import json
+
 from agentco import ado
 from agentco.errors import Refusal
 from agentco.work import Queue
 
 ORG = "https://dev.azure.com/example-org"
+
+
+def connector(**over) -> ado.Connector:
+    return ado.Connector(org_url=ORG, project="Platform", **over)
 
 
 def fake_fetch(recorder: list | None = None, items: list[dict] | None = None, ids: list[int] | None = None):
@@ -64,7 +70,7 @@ def work_item(item_id: int, title: str, item_type: str = "Task", state: str = "A
 def test_a_pull_issues_reads_only(monkeypatch):
     """A WIQL query is a POST that reads; nothing else may be a POST."""
     fetch = fake_fetch(items=[work_item(41234, "Add an MCP tool")])
-    ado.pull(fetch, ORG, "Platform", contains="MCP")
+    ado.pull(fetch, connector(contains="MCP"))
 
     posts = [c for c in fetch.calls if c["method"] == "POST"]
     assert len(posts) == 1
@@ -173,3 +179,88 @@ def test_a_newline_in_a_filter_is_refused_rather_than_repaired():
     with pytest.raises(Refusal) as caught:
         ado.build_wiql("Platform", contains="one\nDROP")
     assert caught.value.code == "ado_bad_filter"
+
+
+# --------------------------------------------------------------------------- #
+# The connector config — which level of the backlog counts as a unit of work
+# --------------------------------------------------------------------------- #
+
+
+def write_connector(tmp_path, doc) -> str:
+    path = tmp_path / "connector.json"
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+def test_the_type_filter_is_in_the_query_not_applied_to_the_results():
+    """`limit` bounds what the query returns. Filtering afterwards means asking
+    for twenty, being handed twenty Epics, and filing nothing while reporting
+    success."""
+    fetch = fake_fetch(items=[work_item(1, "x", item_type="Feature")])
+    ado.pull(fetch, connector(types=("Feature",)))
+    query = fetch.calls[0]["body"]["query"]
+    assert "[System.WorkItemType] IN ('Feature')" in query
+
+
+def test_several_types_are_expressed_as_one_in_clause():
+    wiql = ado.build_wiql("Platform", types=("Feature", "Bug"))
+    assert "[System.WorkItemType] IN ('Feature', 'Bug')" in wiql
+
+
+def test_no_types_configured_means_no_type_clause_at_all():
+    """An empty filter must widen to everything, not narrow to nothing."""
+    assert "WorkItemType" not in ado.build_wiql("Platform")
+
+
+def test_an_explicit_id_of_the_wrong_type_is_dropped_and_reported(tmp_path):
+    """Naming an id is not a licence to file an Epic into a Feature-level queue —
+    but it is not something to swallow either."""
+    fetch = fake_fetch(items=[
+        work_item(1, "a feature", item_type="Feature"),
+        work_item(2, "a whole programme", item_type="Epic"),
+    ])
+    kept, dropped = ado.pull(fetch, connector(types=("Feature",)), ids=[1, 2])
+    assert [k["metadata"]["adoId"] for k in kept] == [1]
+    assert [d["metadata"]["adoId"] for d in dropped] == [2]
+    assert "Epic" in dropped[0]["reason"]
+    assert "Feature" in dropped[0]["reason"]
+
+
+def test_a_raw_wiql_is_still_held_to_the_configured_types():
+    """A hand-written query bypasses the builder; the level filter still holds."""
+    fetch = fake_fetch(items=[work_item(2, "an epic", item_type="Epic")])
+    kept, dropped = ado.pull(fetch, connector(types=("Feature",), wiql="SELECT [System.Id] FROM WorkItems"))
+    assert kept == []
+    assert len(dropped) == 1
+
+
+def test_a_connector_file_carries_the_level_and_the_project(tmp_path):
+    conn = ado.load_connector(write_connector(tmp_path, {
+        "orgUrl": ORG, "project": "Platform", "types": ["Feature"], "contains": "MCP",
+    }))
+    assert conn.types == ("Feature",)
+    assert conn.project == "Platform"
+    assert conn.contains == "MCP"
+    assert conn.states == ado.DEFAULT_STATES
+
+
+def test_a_connector_missing_org_or_project_is_refused(tmp_path):
+    with pytest.raises(Refusal) as caught:
+        ado.load_connector(write_connector(tmp_path, {"orgUrl": ORG}))
+    assert caught.value.code == "connector_incomplete"
+    assert "project" in caught.value.message
+
+
+def test_a_blank_type_entry_is_refused_because_it_would_widen_the_query(tmp_path):
+    with pytest.raises(Refusal) as caught:
+        ado.load_connector(write_connector(tmp_path, {
+            "orgUrl": ORG, "project": "Platform", "types": ["Feature", ""],
+        }))
+    assert caught.value.code == "connector_bad_types"
+
+
+def test_a_missing_connector_file_names_the_shape_it_wanted(tmp_path):
+    with pytest.raises(Refusal) as caught:
+        ado.load_connector(tmp_path / "nope.json")
+    assert caught.value.code == "connector_missing"
+    assert "orgUrl" in caught.value.remediation

@@ -209,20 +209,16 @@ def cmd_ado_pull(args) -> int:
     items are filed bare — which is fine for a queue nobody has written
     procedures for yet, and wrong the moment somebody has.
     """
-    fetch = ado.make_fetcher(ado.resolve_pat(args.pat_env))
+    connector = _ado_connector(args)
+    fetch = ado.make_fetcher(ado.resolve_pat(connector.pat_env))
     ids = [int(i) for i in args.ids.split(",")] if args.ids else None
     routes = routing.load(args.routes) if args.routes else None
 
-    payloads = ado.pull(
+    payloads, dropped = ado.pull(
         fetch,
-        args.org_url,
-        args.project,
-        wiql=args.wiql,
+        connector,
         ids=ids,
-        contains=args.contains,
-        item_type=args.item_type,
         assign=args.assign or (routes.assign if routes else None),
-        limit=args.limit,
     )
     requires = list(args.requires.split(",")) if args.requires else list(routes.requires if routes else ())
 
@@ -242,6 +238,11 @@ def cmd_ado_pull(args) -> int:
         print(f"  {meta['adoState']:<10} {tag:<22} {row['payload']['title']}")
     if not plan:
         print("  (nothing matched)")
+
+    # Never a silent truncation: a filter that quietly discards half the results
+    # reads exactly like a query that found half as much.
+    for row in dropped:
+        print(f"  {'dropped':<10} {'':<22} {row['title']}  — {row['reason']}")
 
     if not args.write:
         assignee = args.assign or (routes.assign if routes else None)
@@ -299,6 +300,37 @@ def cmd_ado_pull(args) -> int:
     for item_id, assignee, sop_key in filed:
         print(f"  {item_id}  assigned={assignee:<10} sop={sop_key}")
     return 0
+
+
+def _ado_connector(args) -> "ado.Connector":
+    """The connector file, with any CLI flag overriding one field of it.
+
+    A file rather than nine flags because which project, which work item types
+    and which states count as open are facts about one organisation's backlog —
+    the same class of thing as the org URL, and the same reason they are not
+    constants. The flags stay for a one-off query without editing config.
+    """
+    base = ado.load_connector(args.connector) if args.connector else None
+    org_url = args.org_url or (base.org_url if base else None)
+    project = args.project or (base.project if base else None)
+    if not org_url or not project:
+        raise SystemExit(
+            "need --connector, or both --org-url and --project. "
+            "Which project and which work item types are pulled is configuration."
+        )
+    types = tuple(t.strip() for t in args.types.split(",") if t.strip()) if args.types else (
+        base.types if base else ()
+    )
+    return ado.Connector(
+        org_url=org_url,
+        project=project,
+        types=types,
+        states=base.states if base else ado.DEFAULT_STATES,
+        contains=args.contains if args.contains is not None else (base.contains if base else None),
+        wiql=args.wiql or (base.wiql if base else None),
+        limit=args.limit if args.limit is not None else (base.limit if base else 50),
+        pat_env=args.pat_env or (base.pat_env if base else ado.DEFAULT_PAT_ENV_VAR),
+    )
 
 
 def cmd_keygen(args) -> int:
@@ -389,18 +421,23 @@ def build_parser() -> argparse.ArgumentParser:
         "ado-pull",
         help="file open Azure DevOps work items onto the queue (dry-run by default)",
     )
-    p_ado.add_argument("--org-url", required=True, help="https://dev.azure.com/<org>")
-    p_ado.add_argument("--project", required=True)
+    p_ado.add_argument("--connector", help="JSON connector config: org, project, types, states")
+    p_ado.add_argument("--org-url", help="https://dev.azure.com/<org> (overrides the connector)")
+    p_ado.add_argument("--project", help="overrides the connector")
     p_ado.add_argument("--contains", help="filter on words in the title")
-    p_ado.add_argument("--type", dest="item_type", help="e.g. Task, User Story, Bug")
+    p_ado.add_argument(
+        "--types",
+        help="comma-separated work item types to pull, e.g. Feature. "
+             "Picking a level is picking the size of the thing an agent is handed.",
+    )
     p_ado.add_argument("--ids", help="comma-separated work item ids, instead of a query")
     p_ado.add_argument("--wiql", help="a raw WIQL query, instead of the built one")
     p_ado.add_argument("--assign", help="the agent to assign every filed item to")
     p_ado.add_argument("--routes", help="JSON rules deciding which SOP each item triggers")
     p_ado.add_argument("--requires", help="comma-separated capabilities a worker must declare")
     p_ado.add_argument("--sop-store", help="path to the local SOP library (local only)")
-    p_ado.add_argument("--limit", type=int, default=20)
-    p_ado.add_argument("--pat-env", default=ado.DEFAULT_PAT_ENV_VAR)
+    p_ado.add_argument("--limit", type=int, default=None)
+    p_ado.add_argument("--pat-env", default=None)
     # Where the work is filed. Absent, the local store; present, the shared
     # registry over HTTP — the same switch the MCP server takes.
     p_ado.add_argument("--registry-url", help="file into a remote registry instead of local files")
