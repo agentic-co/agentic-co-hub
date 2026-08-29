@@ -264,3 +264,62 @@ def test_a_missing_connector_file_names_the_shape_it_wanted(tmp_path):
         ado.load_connector(tmp_path / "nope.json")
     assert caught.value.code == "connector_missing"
     assert "orgUrl" in caught.value.remediation
+
+
+def test_a_team_is_an_area_path_not_a_project():
+    """Pulling one team's work means querying UNDER its area — teams share a project."""
+    wiql = ado.build_wiql("Platform", area_path="Platform\\Guardians")
+    assert "[System.AreaPath] UNDER 'Platform\\Guardians'" in wiql
+    assert " = 'Platform\\Guardians'" not in wiql, (
+        "UNDER, not =: a team that later splits its area into children would "
+        "silently stop matching"
+    )
+
+
+def test_tags_are_anded_as_separate_contains_clauses():
+    """ADO stores tags as one semicolon-joined string, so CONTAINS is all there is."""
+    wiql = ado.build_wiql("Platform", tags=("AI Accepted and Ready", "CommOps"))
+    assert wiql.count("[System.Tags] CONTAINS") == 2
+    assert "[System.Tags] CONTAINS 'AI Accepted and Ready'" in wiql
+
+
+def test_a_connector_carries_the_team_area_and_its_intake_tag(tmp_path):
+    conn = ado.load_connector(write_connector(tmp_path, {
+        "orgUrl": ORG, "project": "Platform",
+        "areaPath": "Platform\\Guardians", "tags": ["AI Accepted and Ready"],
+    }))
+    assert conn.area_path == "Platform\\Guardians"
+    assert conn.tags == ("AI Accepted and Ready",)
+
+
+def test_a_blank_tag_is_refused_because_it_would_match_everything(tmp_path):
+    with pytest.raises(Refusal) as caught:
+        ado.load_connector(write_connector(tmp_path, {
+            "orgUrl": ORG, "project": "Platform", "tags": ["AI Accepted and Ready", "  "],
+        }))
+    assert caught.value.code == "connector_bad_tags"
+
+
+def test_the_area_and_tag_filters_reach_the_query():
+    fetch = fake_fetch(items=[work_item(1, "x", item_type="Bug")])
+    ado.pull(fetch, connector(area_path="Platform\\Guardians", tags=("AI Accepted and Ready",)))
+    query = fetch.calls[0]["body"]["query"]
+    assert "UNDER 'Platform\\Guardians'" in query
+    assert "CONTAINS 'AI Accepted and Ready'" in query
+
+
+def test_an_excluded_product_never_reaches_the_query(tmp_path):
+    """A board can carry several products; one deliberately out of scope should
+    not be filed and left for nobody to pick up."""
+    wiql = ado.build_wiql("Platform", exclude_title_matches=("[CAL]",))
+    assert "NOT [System.Title] CONTAINS '[CAL]'" in wiql
+
+
+def test_an_excluded_title_is_dropped_and_reported_on_the_ids_path():
+    fetch = fake_fetch(items=[
+        work_item(1, "[MGR] a manager bug", item_type="Bug"),
+        work_item(2, "[CAL] a caliber bug", item_type="Bug"),
+    ])
+    kept, dropped = ado.pull(fetch, connector(exclude_title_matches=("[CAL]",)), ids=[1, 2])
+    assert [k["metadata"]["adoId"] for k in kept] == [1]
+    assert "[CAL]" in dropped[0]["reason"]
