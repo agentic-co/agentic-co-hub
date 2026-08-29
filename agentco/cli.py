@@ -16,6 +16,7 @@ import json
 import os
 import secrets
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from agentco import ado, app as app_module, routing
@@ -305,32 +306,45 @@ def cmd_ado_pull(args) -> int:
 def _ado_connector(args) -> "ado.Connector":
     """The connector file, with any CLI flag overriding one field of it.
 
-    A file rather than nine flags because which project, which work item types
-    and which states count as open are facts about one organisation's backlog —
-    the same class of thing as the org URL, and the same reason they are not
-    constants. The flags stay for a one-off query without editing config.
+    A file rather than a dozen flags because which project, which team area,
+    which work item types and which tags count as intake are facts about one
+    organisation's backlog — the same class of thing as the org URL, and the
+    same reason they are not constants. The flags stay for a one-off query
+    without editing config.
+
+    Built with `dataclasses.replace` rather than by naming every field. The
+    enumerated version silently dropped `exclude_title_matches` the day it was
+    added — the file said to exclude a product, the CLI rebuilt the connector
+    without that field, and the pull returned it anyway with nothing reporting
+    a problem. Any hand-kept list of fields eventually disagrees with the
+    dataclass; this cannot.
     """
     base = ado.load_connector(args.connector) if args.connector else None
-    org_url = args.org_url or (base.org_url if base else None)
-    project = args.project or (base.project if base else None)
-    if not org_url or not project:
-        raise SystemExit(
-            "need --connector, or both --org-url and --project. "
-            "Which project and which work item types are pulled is configuration."
-        )
-    types = tuple(t.strip() for t in args.types.split(",") if t.strip()) if args.types else (
-        base.types if base else ()
-    )
-    return ado.Connector(
-        org_url=org_url,
-        project=project,
-        types=types,
-        states=base.states if base else ado.DEFAULT_STATES,
-        contains=args.contains if args.contains is not None else (base.contains if base else None),
-        wiql=args.wiql or (base.wiql if base else None),
-        limit=args.limit if args.limit is not None else (base.limit if base else 50),
-        pat_env=args.pat_env or (base.pat_env if base else ado.DEFAULT_PAT_ENV_VAR),
-    )
+
+    # Only what the caller actually passed. `None` here means "not overridden",
+    # which is why an empty --contains cannot be expressed as a flag: clearing a
+    # configured value is an edit to the file, where a reader can see it.
+    overrides = {
+        "org_url": args.org_url,
+        "project": args.project,
+        "contains": args.contains,
+        "wiql": args.wiql,
+        "limit": args.limit,
+        "pat_env": args.pat_env,
+        "area_path": args.area_path,
+        "types": tuple(t.strip() for t in args.types.split(",") if t.strip()) if args.types else None,
+        "tags": tuple(t.strip() for t in args.tags.split(",") if t.strip()) if args.tags else None,
+    }
+    overrides = {k: v for k, v in overrides.items() if v is not None}
+
+    if base is None:
+        if not overrides.get("org_url") or not overrides.get("project"):
+            raise SystemExit(
+                "need --connector, or both --org-url and --project. Which project, "
+                "which team area and which work item types are pulled is configuration."
+            )
+        return ado.Connector(**overrides)
+    return replace(base, **overrides)
 
 
 def cmd_keygen(args) -> int:
@@ -430,6 +444,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated work item types to pull, e.g. Feature. "
              "Picking a level is picking the size of the thing an agent is handed.",
     )
+    p_ado.add_argument("--area-path", help=r"e.g. PROJECT\Team — an ADO team is an area path, not a project")
+    p_ado.add_argument("--tags", help="comma-separated tags every item must carry")
     p_ado.add_argument("--ids", help="comma-separated work item ids, instead of a query")
     p_ado.add_argument("--wiql", help="a raw WIQL query, instead of the built one")
     p_ado.add_argument("--assign", help="the agent to assign every filed item to")

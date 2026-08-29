@@ -231,6 +231,19 @@ class Connector:
     project: str
     types: tuple[str, ...] = ()
     states: tuple[str, ...] = DEFAULT_STATES
+    # An ADO *team* is not a project — it is an area path. Pulling "the
+    # Guardians team's work" means querying UNDER its area, which is why this
+    # exists separately from `project`: a team's items live in the same project
+    # as everyone else's.
+    area_path: Optional[str] = None
+    # Tags are ANDed. A tag is the usual way a team marks intake ("this is
+    # ready for an agent"), and it is the narrowest, cheapest filter available.
+    tags: tuple[str, ...] = ()
+    # Title fragments that keep an item OUT. Needed because a board can carry
+    # several products' work under one team, and a product that is deliberately
+    # out of scope should never reach the queue at all — filing it and relying
+    # on nobody picking it up is how out-of-scope work gets done anyway.
+    exclude_title_matches: tuple[str, ...] = ()
     contains: Optional[str] = None
     wiql: Optional[str] = None
     limit: int = 50
@@ -277,11 +290,25 @@ def load_connector(path: str | Path) -> Connector:
             ),
             http_status=400,
         )
+    tags = tuple(raw.get("tags") or ())
+    if any(not str(t).strip() for t in tags):
+        raise Refusal(
+            code="connector_bad_tags",
+            message="`tags` contains a blank entry",
+            remediation=(
+                'List the tags to require, e.g. ["AI Accepted and Ready"]. A blank entry '
+                "would match every item, widening the pull rather than narrowing it."
+            ),
+            http_status=400,
+        )
     return Connector(
+        exclude_title_matches=tuple(raw.get("excludeTitleMatches") or ()),
         org_url=raw["orgUrl"],
         project=raw["project"],
         types=types,
         states=tuple(raw.get("states") or DEFAULT_STATES),
+        area_path=raw.get("areaPath"),
+        tags=tags,
         contains=raw.get("contains"),
         wiql=raw.get("wiql"),
         limit=int(raw.get("limit", 50)),
@@ -294,6 +321,9 @@ def build_wiql(
     contains: Optional[str] = None,
     types: Iterable[str] = (),
     states: Iterable[str] = DEFAULT_STATES,
+    area_path: Optional[str] = None,
+    tags: Iterable[str] = (),
+    exclude_title_matches: Iterable[str] = (),
 ) -> str:
     """A conservative default query: open work in one project, optionally filtered.
 
@@ -313,8 +343,18 @@ def build_wiql(
     if types:
         type_list = ", ".join(f"'{_escape(t)}'" for t in types)
         clauses.append(f"[System.WorkItemType] IN ({type_list})")
+    if area_path:
+        # UNDER, not =, so a team's sub-areas come with it. A team that later
+        # splits its area into children would otherwise silently stop matching.
+        clauses.append(f"[System.AreaPath] UNDER '{_escape(area_path)}'")
+    for tag in tags:
+        # ADO stores tags as one semicolon-joined string, so CONTAINS is the
+        # only operator available; each tag is its own clause so they AND.
+        clauses.append(f"[System.Tags] CONTAINS '{_escape(tag)}'")
     if contains:
         clauses.append(f"[System.Title] CONTAINS '{_escape(contains)}'")
+    for fragment in exclude_title_matches:
+        clauses.append(f"NOT [System.Title] CONTAINS '{_escape(fragment)}'")
     return (
         "SELECT [System.Id] FROM WorkItems WHERE "
         + " AND ".join(clauses)
@@ -356,7 +396,8 @@ def pull(
     """
     if ids is None:
         query = connector.wiql or build_wiql(
-            connector.project, connector.contains, connector.types, connector.states
+            connector.project, connector.contains, connector.types, connector.states,
+            connector.area_path, connector.tags, connector.exclude_title_matches,
         )
         ids = wiql_ids(fetch, connector.org_url, connector.project, query, connector.limit)
     raw_items = fetch_items(fetch, connector.org_url, ids)
@@ -371,6 +412,13 @@ def pull(
         # something to swallow, so the drop is returned and reported.
         if connector.types and item_type not in connector.types:
             dropped.append({**payload, "reason": f"type {item_type!r} is not in {list(connector.types)}"})
+            continue
+        excluded = next(
+            (f for f in connector.exclude_title_matches if f.lower() in payload["title"].lower()),
+            None,
+        )
+        if excluded:
+            dropped.append({**payload, "reason": f"title carries excluded fragment {excluded!r}"})
             continue
         kept.append(payload)
     return kept, dropped
