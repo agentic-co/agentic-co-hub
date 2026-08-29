@@ -57,7 +57,7 @@ from fastapi.responses import JSONResponse
 from agentco import auth, db, divergence, events, leases, metrics, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
-from agentco.sop import SopError, SopLibrary, resolve_sop_store
+from agentco.sop import LINK_FIELD, TEXT_FIELDS, SopError, SopLibrary, resolve_sop_store
 from agentco.work import (
     DEFAULT_LEASE_TTL_S,
     CapabilityError,
@@ -67,6 +67,11 @@ from agentco.work import (
     WorkStatus,
     resolve_work_store,
 )
+
+# Derived, never hand-kept: a literal list here would silently drop any field
+# added to sop.py, and the symptom is an SOP that saves without the half the
+# author just wrote.
+SOP_BODY_KEYS = (*TEXT_FIELDS, "common_mistakes", LINK_FIELD)
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
@@ -492,9 +497,7 @@ def create_app(
         """Author version 1, as a DRAFT — activation is a separate, deliberate act."""
 
         def work(actor: str, payload: dict) -> dict:
-            body = {k: payload[k] for k in
-                    ("purpose", "trigger", "inputs", "definition_of_done", "common_mistakes")
-                    if k in payload}
+            body = {k: payload[k] for k in SOP_BODY_KEYS if k in payload}
             try:
                 sop = library.create(payload.get("title", ""), **body)
             except (SopError, ValueError) as exc:
@@ -508,9 +511,7 @@ def create_app(
         """Write the next version. Unset fields carry forward; the old one is superseded."""
 
         def work(actor: str, payload: dict) -> dict:
-            body = {k: payload[k] for k in
-                    ("purpose", "trigger", "inputs", "definition_of_done", "common_mistakes")
-                    if k in payload}
+            body = {k: payload[k] for k in SOP_BODY_KEYS if k in payload}
             try:
                 sop = library.revise(sop_id, title=payload.get("title"), **body)
             except (SopError, ValueError) as exc:
@@ -578,6 +579,26 @@ def create_app(
             return {"state": "accepted", "item": json.loads(item.to_json())}
 
         return await _handle(request, "sop_instantiate", work)
+
+    @app.get("/sops/{sop_id}/chain")
+    async def get_sop_chain(sop_id: str, request: Request) -> JSONResponse:
+        """The process this SOP starts, one step per entry.
+
+        Served rather than walked client-side because the interesting answers
+        are the negative ones — a link naming an SOP that does not exist, or one
+        with no active version — and a client walking `next_sop` with
+        `GET /sops/{id}` would see both as an ordinary end of chain.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            steps = library.chain(sop_id)
+            return {
+                "state": "accepted",
+                "steps": steps,
+                "broken": [s for s in steps if s["state"] != "active"],
+            }
+
+        return await _handle(request, "sop_chain", work)
 
     @app.get("/sops")
     async def get_sops(request: Request) -> JSONResponse:
