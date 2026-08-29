@@ -248,6 +248,10 @@ class Registry:
         """Every SOP with an active version."""
         return self._call("GET", "/sops")
 
+    def sop_chain(self, sop_id: str) -> dict:
+        """The whole process starting here, with any broken link named."""
+        return self._call("GET", f"/sops/{sop_id}/chain")
+
     def sop_instantiate(self, sop_id: str, **fields: Any) -> dict:
         """File work pinned to this SOP's active version.
 

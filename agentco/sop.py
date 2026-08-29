@@ -58,7 +58,27 @@ from agentco.work import Queue, WorkItem, WorkStatus
 # page, and a wiki page is not read at handoff time. Keep the ones that bite.
 MAX_COMMON_MISTAKES = 3
 
-TEXT_FIELDS = ("purpose", "trigger", "inputs", "definition_of_done")
+# Order matters: this is the order a procedure is READ in, from "may I start"
+# through to "where does the result go". The three added after the original four
+# exist because a procedure that only says what done means leaves the two most
+# expensive questions unanswered — did I have what I needed before I started,
+# and who is waiting for what I produced.
+TEXT_FIELDS = (
+    "purpose",
+    "trigger",
+    "entry_check",
+    "inputs",
+    "definition_of_done",
+    "validation",
+    "write_back",
+)
+
+# The successor. Not a TEXT_FIELD because it is a reference, not prose, and it
+# is checked for shape rather than for existence: a chain is almost always
+# authored in order, so the target of a link routinely does not exist yet at the
+# moment the link is written. `SopLibrary.chain()` is where a broken link is
+# reported — loudly, by name, rather than by the walk quietly stopping short.
+LINK_FIELD = "next_sop"
 
 
 class SopError(Exception):
@@ -109,9 +129,24 @@ class SOP:
 
     purpose: Optional[str] = None
     trigger: Optional[str] = None
+    # What must be true, and in hand, BEFORE starting — phrased so that a
+    # missing item becomes a question to ask rather than an assumption to make.
+    entry_check: Optional[str] = None
     inputs: Optional[str] = None
     definition_of_done: Optional[str] = None
+    # How to prove the claim above. Distinct from it on purpose: the definition
+    # of done is what is being claimed, and this is the check that would FAIL if
+    # the claim were false. Collapsing the two is how "done" comes to mean "I
+    # believe I finished".
+    validation: Optional[str] = None
+    # Where the outcome is recorded when finishing, and for whom. This is the
+    # half of a handoff that gets dropped, and it is the half the next
+    # procedure's entry_check is written against.
+    write_back: Optional[str] = None
     common_mistakes: list[str] = field(default_factory=list)
+    # The procedure that follows this one, by id. Makes a process walkable
+    # rather than merely described.
+    next_sop: Optional[str] = None
 
     # Set when a later version replaces this one. Kept rather than deleted:
     # instances pinned to this version must stay resolvable forever, or their
@@ -145,7 +180,7 @@ def validate_fields(payload: dict) -> dict:
     believes they wrote one thing and the store holds another, and the
     difference surfaces at handoff time to whoever is least able to notice it.
     """
-    allowed = set(TEXT_FIELDS) | {"common_mistakes"}
+    allowed = set(TEXT_FIELDS) | {"common_mistakes", LINK_FIELD}
     unknown = set(payload) - allowed
     if unknown:
         raise SopContractError(
@@ -198,6 +233,15 @@ def validate_fields(payload: dict) -> dict:
                 )
             cleaned.append(mistake.strip())
         out["common_mistakes"] = cleaned
+
+    if LINK_FIELD in payload and payload[LINK_FIELD] is not None:
+        link = payload[LINK_FIELD]
+        if not isinstance(link, str) or not link.strip():
+            raise SopContractError(
+                f"'{LINK_FIELD}' must be an SOP id, got {link!r} — omit the key "
+                f"if this procedure ends the chain."
+            )
+        out[LINK_FIELD] = link.strip()
 
     if not out:
         raise SopContractError(
@@ -343,6 +387,8 @@ class SopLibrary:
             }
             if latest.common_mistakes:
                 carried["common_mistakes"] = list(latest.common_mistakes)
+            if latest.next_sop:
+                carried[LINK_FIELD] = latest.next_sop
             carried.update({k: v for k, v in body.items()})
             validated = validate_fields({k: v for k, v in carried.items() if v is not None})
 
@@ -408,6 +454,65 @@ class SopLibrary:
 
     def list_active(self) -> list[SOP]:
         return [s for s in self._read_all() if s.status == SopStatus.ACTIVE]
+
+    def chain(self, sop_id: str) -> list[dict]:
+        """Walk `next_sop` from here and return the process, one step per entry.
+
+        Every step reports its own `state`, because the two ways a chain lies
+        both look like a short chain:
+
+        - **`missing`** — the link names an SOP that does not exist. The link is
+          shape-checked at write time and never existence-checked, since a chain
+          is authored in order and its successor routinely does not exist yet.
+          A walk that simply stopped here would present a broken process as a
+          finished one.
+        - **`inactive`** — the SOP exists but has no active version. Work cannot
+          be instantiated from it, so the process is interrupted even though
+          every link resolves.
+
+        A cycle terminates the walk with `state: "cycle"` rather than raising.
+        A cycle is usually a real intent expressed badly (test → fix → test),
+        and refusing to report a chain because its tail loops would hide the
+        first steps, which are the ones being asked about.
+        """
+        steps: list[dict] = []
+        seen: set[str] = set()
+        current: Optional[str] = sop_id
+
+        while current:
+            if current in seen:
+                steps.append({"sop_id": current, "state": "cycle"})
+                break
+            seen.add(current)
+
+            sop = self.get(current)
+            if sop is None:
+                # Distinguish "no such id" from "exists, nothing active" — they
+                # have different fixes, and a message naming the wrong one sends
+                # the reader looking in the wrong place.
+                if self.history(current):
+                    latest = self.history(current)[-1]
+                    steps.append({
+                        "sop_id": current,
+                        "title": latest.title,
+                        "state": "inactive",
+                        "latestVersion": latest.version,
+                        "latestStatus": latest.status.value,
+                    })
+                else:
+                    steps.append({"sop_id": current, "state": "missing"})
+                break
+
+            steps.append({
+                "sop_id": sop.sop_id,
+                "version": sop.version,
+                "title": sop.title,
+                "state": "active",
+                "entry_check": sop.entry_check,
+                "write_back": sop.write_back,
+            })
+            current = sop.next_sop
+        return steps
 
     # -- instantiation ---------------------------------------------------
 
