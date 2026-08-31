@@ -16,6 +16,17 @@ about each other's work**, **the pointers you built against, so you are told whe
 move**, and **a router that puts a decision in front of a named human and records the
 acknowledgement**.
 
+The organizing idea is the **ASOP — Agentic Standard Operating Procedure**
+([full definition](docs/asop.md)): a procedure that is **versioned** (outcomes
+recorded per version, never per vibe), **verified** (it carries its own definition
+of done — a deterministic check, a fixed rubric, or a named human's sign-off,
+enforced where completion is recorded so no executor grades its own homework), and
+**self-revising** (plan-vs-actual divergence feeds the next version instead of a
+postmortem nobody reads). *An SOP tells an agent what to do; an ASOP can prove it
+was done and gets better when it wasn't.* AgentCo is the plane that stores ASOPs,
+versions them, records their outcomes, and routes their human gates — whatever
+work-unit your harness uses to execute them (ours is called a bead).
+
 It sits **above** agent memory and context stores — an agent's own recall is its
 harness's business (that layer is well served by projects like
 [OpenViking](https://github.com/volcengine/OpenViking)); AgentCo coordinates what

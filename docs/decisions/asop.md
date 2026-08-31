@@ -27,3 +27,5 @@ AgentCo's SOP objects already implement all three properties. Naming the contrac
 rather than the document — is the point: it is the difference between prompt files and
 operating procedure as infrastructure. Prior art reviewed 2026-08-31 (AWS, Decagon,
 Skan, Agent-S paper): the acronym is unclaimed; the contract is unmatched.
+
+**Promoted to project framing 2026-08-31** — canonical spec: [`docs/asop.md`](../asop.md).
