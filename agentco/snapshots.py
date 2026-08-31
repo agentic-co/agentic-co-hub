@@ -230,6 +230,7 @@ def take(
     purpose: str,
     ttl_days: int = DEFAULT_TTL_DAYS,
     now: Optional[datetime] = None,
+    agent_label: Optional[str] = None,
 ) -> dict:
     """Record a pointer plus its current version token. Returns the receipt."""
     at = now or datetime.now(timezone.utc)
@@ -271,6 +272,7 @@ def take(
         conn,
         kind="SnapshotTaken",
         actor=actor,
+        agent_label=agent_label,
         occurred_at=_iso(at),
         payload={
             "snapId": uid,

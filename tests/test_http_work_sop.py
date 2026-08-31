@@ -103,10 +103,26 @@ def test_one_actor_files_work_and_another_pulls_and_reports_it(client):
     assert listed[0]["result"] == "exporter rebuilt"
 
 
+def test_a_body_that_names_its_own_actor_is_refused_not_quietly_ignored(client):
+    """Silently dropping the field leaves the caller believing it took effect.
+
+    Ignoring `actor` would be safe and unreadable: the lease would be correct
+    and the caller would go on thinking they had claimed as dana. The same
+    argument the SOP library makes about repairing a malformed payload applies
+    — the caller believes they wrote one thing and the store holds another.
+    """
+    create_item(client)
+    refused = post(client, "/work/pull", "kofi", {"actor": "dana"})
+    assert refused.status_code == 400
+    body = refused.json()
+    assert body["code"] == "actor_in_body"
+    assert "agentLabel" in body["remediation"], "a refusal must name the thing to do instead"
+
+
 def test_the_claiming_identity_is_the_authenticated_actor_not_the_payload(client):
     """A worker must not be able to name itself into someone else's lease."""
     create_item(client)
-    pulled = post(client, "/work/pull", "kofi", {"agent": "dana", "actor": "dana"}).json()
+    pulled = post(client, "/work/pull", "kofi", {"agent": "dana"}).json()
     assert pulled["item"]["leased_by"] == "kofi", (
         "the body named dana and the server believed it — any actor could now "
         "take any other actor's lease, and the fence would record it as valid"

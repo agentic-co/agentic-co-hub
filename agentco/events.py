@@ -101,6 +101,7 @@ def append(
     payload: dict[str, Any],
     repo: Optional[str] = None,
     occurred_at: Optional[str] = None,
+    agent_label: Optional[str] = None,
 ) -> dict:
     """Append one event. Returns the stored row (including its `seq`).
 
@@ -115,15 +116,21 @@ def append(
     body = json.dumps(payload, sort_keys=True)
     with conn:
         cur = conn.execute(
-            "INSERT INTO events(uid, kind, actor, repo, occurred_at, payload) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (uid, kind, actor, repo, at, body),
+            "INSERT INTO events(uid, kind, actor, agent_label, repo, occurred_at, payload) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (uid, kind, actor, agent_label, repo, at, body),
         )
     return {
         "seq": cur.lastrowid,
         "uid": uid,
         "kind": kind,
         "actor": actor,
+        # Rendered as a sibling of `actor`, never merged into it. A consumer
+        # that wants to attribute an event to a harness must reach for a
+        # differently-named key and can see, at the point of use, that it is
+        # reaching for the unverified one.
+        "agentLabel": agent_label,
+        "agentLabelVerified": False,
         "repo": repo,
         "occurredAt": at,
         "payload": payload,
@@ -165,6 +172,8 @@ def read(
             "uid": r["uid"],
             "kind": r["kind"],
             "actor": r["actor"],
+            "agentLabel": r["agent_label"],
+            "agentLabelVerified": False,
             "repo": r["repo"],
             "occurredAt": r["occurred_at"],
             "payload": json.loads(r["payload"]),

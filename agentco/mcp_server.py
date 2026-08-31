@@ -58,7 +58,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
-from agentco import db, events as events_module, leases, scope, snapshots
+from agentco import auth, db, events as events_module, leases, scope, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
 # publish.py is standard-library only, so importing it here costs the `mcp`
@@ -82,6 +82,12 @@ DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
 
 ACTOR_ENV_VAR = "AGENTCO_ACTOR"
+# Which harness is speaking, self-reported and never verified. Over stdio
+# NOTHING here is verified — the actor itself is only as trustworthy as the
+# process that set it — so the label adds no new weakness locally. It exists
+# so that the same field is populated on both transports, and so a digest can
+# say "cursor" instead of leaving the reader to guess from the actor name.
+AGENT_LABEL_ENV_VAR = "AGENTCO_AGENT_LABEL"
 # A generic default, same posture as app.py's DEFAULT_OPERATOR = "operator" —
 # it works out of the box for a single harness and is the first thing a
 # multi-harness deployment overrides in its own `.mcp.json` entry.
@@ -99,6 +105,16 @@ def resolve_db_path(path: Optional[str] = None) -> str:
 
 def resolve_actor(actor: Optional[str] = None) -> str:
     return actor or os.environ.get(ACTOR_ENV_VAR) or DEFAULT_ACTOR
+
+
+def resolve_agent_label(label: Optional[str] = None) -> Optional[str]:
+    """The self-reported harness name, or None. Unset is None, never a guess.
+
+    There is no default. Inferring the harness from the process tree would be a
+    guess rendered beside authenticated data, and a plausible wrong label is
+    worse than an absent one — absent is legible.
+    """
+    return auth.normalise_agent_label(label or os.environ.get(AGENT_LABEL_ENV_VAR))
 
 
 def resolve_registry_url(base_url: Optional[str] = None) -> Optional[str]:
@@ -145,18 +161,21 @@ class _LocalBackend:
 
     remote = False
 
-    def __init__(self, conn, queue: Queue, library: SopLibrary, actor: str, db_path: str):
+    def __init__(self, conn, queue: Queue, library: SopLibrary, actor: str, db_path: str,
+                 agent_label: Optional[str] = None):
         self.conn, self.queue, self.library, self.actor = conn, queue, library, actor
+        self.agent_label = agent_label
         self._db_path = db_path
 
     def claim_scope(self, **kw) -> dict:
-        return leases.claim(self.conn, actor=self.actor, **kw)
+        return leases.claim(self.conn, actor=self.actor, agent_label=self.agent_label, **kw)
 
     def release_scope(self, lease_uid: str, action: str) -> dict:
-        return leases.release(self.conn, actor=self.actor, lease_uid=lease_uid, action=action)
+        return leases.release(self.conn, actor=self.actor, lease_uid=lease_uid, action=action,
+                              agent_label=self.agent_label)
 
     def snapshot(self, **kw) -> dict:
-        return snapshots.take(self.conn, actor=self.actor, **kw)
+        return snapshots.take(self.conn, actor=self.actor, agent_label=self.agent_label, **kw)
 
     def events(self, **kw) -> dict:
         return events_module.read(self.conn, **kw)
@@ -264,6 +283,7 @@ def create_server(
     base_url: Optional[str] = None,
     secret: Optional[str] = None,
     registry: Optional[Registry] = None,
+    agent_label: Optional[str] = None,
 ) -> FastMCP:
     """Build the server. Paths/actor/registry are injectable so tests need no env vars.
 
@@ -307,6 +327,7 @@ def create_server(
             open_sop_library(sop_store),
             who,
             resolve_db_path(db_path),
+            resolve_agent_label(agent_label),
         )
 
     mcp = FastMCP(

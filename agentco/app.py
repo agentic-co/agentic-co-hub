@@ -221,6 +221,12 @@ def create_app(
                     )
                 payload = parsed
 
+            # Both identity rules, enforced once, on every verb — including the
+            # ones added later by someone who never read this function. A rule
+            # applied per-handler is a rule the next handler forgets.
+            auth.reject_actor_in_body(payload)
+            payload["agentLabel"] = auth.normalise_agent_label(payload.get("agentLabel"))
+
             result = work(actor, payload)
             elapsed = (time.perf_counter() - started) * 1000
             metrics.record_call(
@@ -277,6 +283,7 @@ def create_app(
                 intent=payload.get("intent", ""),
                 holder=payload.get("holder"),
                 ttl_seconds=int(payload.get("ttlSeconds") or leases.DEFAULT_TTL_S),
+                agent_label=payload.get("agentLabel"),
             )
 
         return await _handle(request, "claim_scope", work)
@@ -289,6 +296,7 @@ def create_app(
                 actor=actor,
                 lease_uid=lease_uid,
                 action=payload.get("action") or "released",
+                agent_label=payload.get("agentLabel"),
             )
 
         return await _handle(request, "release_scope", work)
@@ -301,6 +309,7 @@ def create_app(
                 actor=actor,
                 artifact_uri=payload.get("artifactUri", ""),
                 purpose=payload.get("purpose", ""),
+                agent_label=payload.get("agentLabel"),
             )
 
         return await _handle(request, "snapshot", work)

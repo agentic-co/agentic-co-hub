@@ -29,7 +29,8 @@ import time
 from pathlib import Path
 from typing import Mapping, Optional
 
-from agentco.errors import Unauthenticated
+from agentco.errors import Refusal, Unauthenticated
+from agentco.scope import reject_control_characters
 
 class AmbiguousIdentityError(RuntimeError):
     """The key file defines two identities distinguishable only by case.
@@ -126,6 +127,70 @@ def sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> st
         signing_string(method, path, timestamp, body).encode(),
         hashlib.sha256,
     ).hexdigest()
+
+
+
+# A self-reported harness name is spliced into files and rendered in digests,
+# so it gets the same treatment `leases.claim` gives `holder`: bounded, and
+# stripped of anything that could escape the context it is rendered into.
+AGENT_LABEL_MAX = 64
+
+
+def normalise_agent_label(value: object) -> Optional[str]:
+    """Validate a self-reported harness name, or raise `Refusal`.
+
+    **This value is never authenticated and must never be treated as though it
+    were.** It says which harness claims to have acted; the authenticated actor
+    says who is accountable. The first is useful for reporting, the second is
+    the only one that decides anything.
+
+    It is carried in the signed request body rather than an unsigned header, so
+    a third party cannot inject one — the signature binds the label to the
+    actor's key. That makes it *attributable*, which is a different and much
+    weaker property than *true*: the actor could have written anything.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise Refusal(
+            code="bad_agent_label",
+            message=f"agentLabel must be a string, got {type(value).__name__}",
+            remediation="Send a short harness name, e.g. \"claude-code\". Omit the key if unknown.",
+            http_status=400,
+        )
+    label = reject_control_characters("agentLabel", value).strip()
+    if not label:
+        return None
+    if len(label) > AGENT_LABEL_MAX:
+        raise Refusal(
+            code="bad_agent_label",
+            message=f"agentLabel is {len(label)} characters; the cap is {AGENT_LABEL_MAX}",
+            remediation="Send the harness name, not a version banner or a user agent string.",
+            http_status=400,
+        )
+    return label
+
+
+def reject_actor_in_body(payload: Mapping[str, object]) -> None:
+    """Refuse a body that tries to name its own actor.
+
+    The invariant this protects is already load-bearing elsewhere: a client
+    that can name itself can take another worker's lease, and the fence would
+    faithfully record the theft as legitimate. The signature decides the actor.
+    The body never does — and that has to stay true on every transport,
+    including the ones that do not exist yet.
+    """
+    if "actor" in payload:
+        raise Refusal(
+            code="actor_in_body",
+            message="the request body may not carry an 'actor' field",
+            remediation=(
+                "The actor is derived from the signature and cannot be set by the "
+                "caller. To record which harness acted, send 'agentLabel' instead "
+                "— it is kept, and it is rendered as unverified."
+            ),
+            http_status=400,
+        )
 
 
 def authenticate(
