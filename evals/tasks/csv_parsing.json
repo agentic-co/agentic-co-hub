@@ -1,0 +1,21 @@
+[
+  {
+    "task_id": "csv-quoted-commas",
+    "family": "csv-parsing",
+    "prompt": "Write a Python function `parse_row(line: str) -> list[str]` that splits one CSV row into fields. Handle quoted fields containing commas, and doubled quotes as an escaped quote. Output only the function.",
+    "gate": {"class": "deterministic", "spec": "python3 check.py", "timeout_s": 30},
+    "fixtures": {
+      "check.py": "import re, pathlib\nsrc = pathlib.Path('ANSWER.md').read_text()\nsrc = re.sub(r'^```[a-zA-Z]*\\n|```$', '', src.strip(), flags=re.M)\nns = {}\nexec(src, ns)\nf = ns['parse_row']\nassert f('a,b,c') == ['a','b','c'], f('a,b,c')\nassert f('a,\"b,c\",d') == ['a','b,c','d'], f('a,\"b,c\",d')\nassert f('\"he said \"\"hi\"\"\",x') == ['he said \"hi\"','x'], f('\"he said \"\"hi\"\"\",x')\nassert f('') == [''], f('')\nprint('ok')\n"
+    }
+  },
+  {
+    "task_id": "csv-trailing-newline",
+    "family": "csv-parsing",
+    "holdout": true,
+    "prompt": "Write a Python function `parse_row(line: str) -> list[str]` that splits one CSV row into fields. Handle quoted fields containing commas, doubled quotes as an escaped quote, and a trailing newline on the input. Output only the function.",
+    "gate": {"class": "deterministic", "spec": "python3 check.py", "timeout_s": 30},
+    "fixtures": {
+      "check.py": "import re, pathlib\nsrc = pathlib.Path('ANSWER.md').read_text()\nsrc = re.sub(r'^```[a-zA-Z]*\\n|```$', '', src.strip(), flags=re.M)\nns = {}\nexec(src, ns)\nf = ns['parse_row']\nassert f('a,b\\n') == ['a','b'], f('a,b\\n')\nassert f('a,\"b,c\"\\n') == ['a','b,c'], f('a,\"b,c\"\\n')\nassert f('\"x\"\"y\",z') == ['x\"y','z'], f('\"x\"\"y\",z')\nprint('ok')\n"
+    }
+  }
+]

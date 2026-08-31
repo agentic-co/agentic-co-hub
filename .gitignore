@@ -32,3 +32,13 @@ keys.json
 # per-deployment connector configs — never commit
 ado.*.json
 routes.*.json
+
+# Eval harness output: trial ledgers, SOP stores and run artifacts. Results are
+# reproducible from the task set and the ledger is large, machine-local, and
+# carries whatever a model happened to emit — including its mistakes verbatim.
+evals-out/
+
+# The eval fleet's own config: proxy URL, virtual key, model names. The proxy
+# hostname alone names an employer, which is exactly the class of thing that
+# keeps this repo publishable when it stays out of the tree.
+evals/.env.eval
