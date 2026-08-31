@@ -348,20 +348,20 @@ def test_work_requiring_a_capability_is_invisible_to_a_worker_without_it(client)
     post(client, "/work", "dana", {
         "title": "build the MCP tool",
         "assignedAgent": "kofi",
-        "requires": ["frontsteps"],
+        "requires": ["billing-erp"],
     })
 
     # The wrong machine, even declaring the capability, is not offered work
     # assigned to someone else.
-    assert post(client, "/work/pull", "dana", {"capabilities": ["frontsteps"]}).json()["state"] == "empty"
+    assert post(client, "/work/pull", "dana", {"capabilities": ["billing-erp"]}).json()["state"] == "empty"
 
     # The right machine, declaring nothing, is refused by the gate — closed.
     assert post(client, "/work/pull", "kofi", {}).json()["state"] == "empty"
 
     # The right machine declaring the capability gets it.
-    pulled = post(client, "/work/pull", "kofi", {"capabilities": ["frontsteps"]}).json()
+    pulled = post(client, "/work/pull", "kofi", {"capabilities": ["billing-erp"]}).json()
     assert pulled["state"] == "leased"
-    assert pulled["item"]["requires"] == ["frontsteps"]
+    assert pulled["item"]["requires"] == ["billing-erp"]
 
 
 def test_an_sop_instance_carries_the_pin_and_the_capability(client):
@@ -371,15 +371,15 @@ def test_an_sop_instance_carries_the_pin_and_the_capability(client):
     filed = post(client, f"/sops/{sop['sop_id']}/instantiate", "dana", {
         "title": "[User Story 91166] Expose Client COA",
         "assignedAgent": "kofi",
-        "requires": ["frontsteps"],
+        "requires": ["billing-erp"],
         "source": "ado",
         "sourceId": "example-org/91166",
     }).json()["item"]
     assert filed["metadata"]["sop_ref"] == {"sop_id": sop["sop_id"], "version": 1}
-    assert filed["requires"] == ["frontsteps"]
+    assert filed["requires"] == ["billing-erp"]
 
     # And the worker that pulls it can read the procedure it is pinned to.
-    pulled = post(client, "/work/pull", "kofi", {"capabilities": ["frontsteps"]}).json()["item"]
+    pulled = post(client, "/work/pull", "kofi", {"capabilities": ["billing-erp"]}).json()["item"]
     ref = pulled["metadata"]["sop_ref"]
     procedure = get(client, f"/sops/{ref['sop_id']}", "kofi", f"?version={ref['version']}").json()["sop"]
     assert procedure["definition_of_done"]

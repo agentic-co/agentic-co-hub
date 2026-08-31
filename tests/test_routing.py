@@ -25,7 +25,7 @@ BASE = {
     "sops": {"development": "sop-dev", "testing": "sop-test", "gap-analysis": "sop-gap"},
     "default": "development",
     "assign": "macbook",
-    "requires": ["frontsteps"],
+    "requires": ["billing-erp"],
     "rules": [
         {"when": {"title_contains": "gap analysis"}, "sop": "gap-analysis"},
         {"when": {"state_in": ["In Beta", "Ready for Test"]}, "sop": "testing"},
@@ -81,7 +81,7 @@ def test_the_route_resolves_to_a_real_sop_id(tmp_path):
 def test_assignment_and_capability_come_from_the_routes_file(tmp_path):
     routes = routing.load(write(tmp_path, BASE))
     assert routes.assign == "macbook"
-    assert routes.requires == ("frontsteps",)
+    assert routes.requires == ("billing-erp",)
 
 
 # --------------------------------------------------------------------------- #
