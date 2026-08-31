@@ -39,12 +39,22 @@ The gate is enforced **where completion is recorded, not where work is executed*
 executor that grades its own homework is the failure mode this contract exists to kill.
 A run that cannot pass its gate did not complete, whatever the transcript says.
 
+Two clauses keep the gate honest: **the gate's author must not be its executor** — a
+party that writes its own check can write a tautology, so gates are authored at plan
+time by the planning authority and are immutable to the executor; and **every gate
+carries liveness semantics** (Part III) — a gate with no timeout is a deadlock, not a
+control.
+
 ### 3. Self-revising — divergence is input, not embarrassment
 
 When execution departs from the procedure, the divergence is captured and tagged:
 
 - **good divergence** — the procedure was wrong; the deviation feeds the next version.
 - **bad divergence** — the execution took a shortcut; it feeds root-cause analysis.
+
+The tag is an *adjudication, not a confession*: whoever tags divergence must be a
+different party from the executor whose fault a "bad" tag would admit, and the tag
+carries the adjudicator's identity and pointed evidence.
 
 A plan-vs-actual review is generated **at the moment of completion** (while the context
 still exists), and revision proposals accumulate against the template. The loop closes
@@ -119,8 +129,80 @@ Every Part-I property has a concrete home:
 - **Watchdogs at the seam:** silence-based idle timeout and an explicit completion
   marker (`AGENTCO_DONE:`) make "agent went quiet" a handled state, not a discovery.
 
+---
+
+## Part III — Enforcement model
+
+Added in v2, after a three-vendor adversarial review (GPT-5.5, Gemini 3.1 Pro, GLM-4.7 —
+unanimous "adapt") converged on one gap: v1 named the gates but left *who may run them,
+where, and for how long* as prose. That is the dangerous part, so it is now contract.
+
+### Trust domains — who enforces what
+
+Gate enforcement happens **inside the trust domain that owns the work record**, never in
+a shared coordination plane:
+
+- A **work-unit store** (like the bead runtime) enforces gates at its own status flip.
+  That store is a system of record *for its owner* — gating its own flip is local
+  policy, exactly as a git host enforces required status checks.
+- A **coordination plane** (AgentCo) stays advisory: it never executes a check and never
+  blocks a harness. For plane-level assurance the contract is **attestation**: the
+  executing domain submits a proof-of-execution record (check identity, exit status,
+  environment fingerprint, timestamp, submitter identity) and the plane *verifies and
+  stores the claim* — it does not run commands. "Advisory, never blocking" and
+  "gate at the flip" are statements about different layers; v1 blurred them.
+
+### Execution contract for deterministic checks
+
+A conforming implementation must pin, per gate: **identity** (which principal runs the
+check), **environment** (working directory and permitted secrets — a check receives no
+ambient credentials), **isolation** (the check cannot rewrite the record it is
+verifying), **timeout** (mandatory; expiry = failure, never a hang), and **idempotency**
+(re-running a passed gate must be safe).
+
+### Liveness — gates must terminate
+
+- Every human gate declares a **maximum park time and an escalation path** at authoring
+  time. Silence past the deadline resolves by the gate's **declared default** — decided
+  by omission is an outcome, an ignored queue is not.
+- Parked and failed verify states never release dependents, but they **escalate on a
+  clock**: quarantine surfaces stalled gates on a periodic digest, and the
+  default-with-deadline closes them. Correctness without liveness is a deadlock with
+  good intentions.
+
+### Failure and repair — the re-verify invariant
+
+A fix item **never substitutes** for the work it repairs. The failed unit keeps its
+failed status — still blocking everything downstream of it — until **its own gate is
+re-run and passes**. Repair restores the original's ability to prove itself; it does not
+vouch for it. (Fix items are filed beside, not beneath, to keep repair depth bounded.)
+
+### Decomposition bounds
+
+The ≤6-work-units-plus-verify budget is not a law of nature; it is a **human review
+bound** — a decomposition sized to what the accountable person can actually sanity-check.
+Implementations may raise it, but the escape hatch is explicit: a goal that genuinely
+needs more is usually two goals.
+
+### Explicitly not covered (yet)
+
+ASOP v2 does not specify **rollback/compensation** (a gate that passed on work later
+found wrong triggers no automatic undo — pair with saga/compensation patterns where
+consequences are transactional) or **dispute arbitration** between executor and
+adjudicator beyond "escalate to the routing spine." Claiming otherwise would repeat v1's
+mistake.
+
+### On novelty, plainly
+
+Most ASOP ingredients exist elsewhere — required status checks in CI, Temporal's
+determinism, BPMN compensation, ITIL's improvement loops. The unclaimed part is the
+**combination under one contract**: a gate bound at authoring time, enforced where the
+outcome is recorded, with outcomes accounted per version and divergence feeding
+revision. ASOP names that contract; it does not claim a new computing primitive.
+
 *Provenance: contract adversarially reviewed (architecture + operations lenses) before
-implementation; gate placement moved from executor to store as a result. Prior-art
+implementation, then cross-validated by three frontier-model vendors (2026-08-31, unanimous
+"adapt" — their must-fixes became Part III); gate placement moved from executor to store as a result. Prior-art
 review 2026-08-31 (AWS Agentic SOPs/Strands, Decagon AOPs, Skan, Agent-S): instruction
 documents all — none carry per-version outcomes, embedded gates, or divergence-driven
 revision. See `decisions/asop.md`.*
