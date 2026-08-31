@@ -1,0 +1,21 @@
+[
+  {
+    "task_id": "retry-exponential-backoff",
+    "family": "retry-logic",
+    "prompt": "Write a Python function `retry(fn, attempts=3, base=0.0)` that calls `fn()` and retries on any exception up to `attempts` total calls, sleeping `base * 2**(n-1)` before retry n. Return fn's value on success; re-raise the last exception if every attempt fails. Output only the function.",
+    "gate": {"class": "deterministic", "spec": "python3 check.py", "timeout_s": 30},
+    "fixtures": {
+      "check.py": "import re, pathlib\nsrc = pathlib.Path('ANSWER.md').read_text()\nsrc = re.sub(r'^```[a-zA-Z]*\\n|```$', '', src.strip(), flags=re.M)\nns = {}\nexec(src, ns)\nr = ns['retry']\ncalls = []\ndef flaky():\n    calls.append(1)\n    if len(calls) < 3: raise ValueError('nope')\n    return 'ok'\nassert r(flaky) == 'ok', 'should succeed on third attempt'\nassert len(calls) == 3, len(calls)\ndef always():\n    raise KeyError('always')\ntry:\n    r(always, attempts=2)\n    raise AssertionError('should have re-raised')\nexcept KeyError:\n    pass\nassert r(lambda: 7) == 7\nprint('ok')\n"
+    }
+  },
+  {
+    "task_id": "retry-preserves-return-falsy",
+    "family": "retry-logic",
+    "holdout": true,
+    "prompt": "Write a Python function `retry(fn, attempts=3, base=0.0)` that calls `fn()` and retries on any exception up to `attempts` total calls, sleeping `base * 2**(n-1)` before retry n. Return fn's value on success even when it is falsy (0, '', None, False); re-raise the last exception if every attempt fails. Output only the function.",
+    "gate": {"class": "deterministic", "spec": "python3 check.py", "timeout_s": 30},
+    "fixtures": {
+      "check.py": "import re, pathlib\nsrc = pathlib.Path('ANSWER.md').read_text()\nsrc = re.sub(r'^```[a-zA-Z]*\\n|```$', '', src.strip(), flags=re.M)\nns = {}\nexec(src, ns)\nr = ns['retry']\nfor falsy in (0, '', None, False, []):\n    assert r(lambda v=falsy: v) == falsy or r(lambda v=falsy: v) is falsy, repr(falsy)\ncalls = []\ndef flaky():\n    calls.append(1)\n    if len(calls) < 2: raise RuntimeError('x')\n    return 0\nassert r(flaky) == 0\nprint('ok')\n"
+    }
+  }
+]

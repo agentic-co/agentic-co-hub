@@ -26,6 +26,12 @@ dependencies = []
 server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 mcp = ["mcp<2"]
 dev = ["pytest>=8.0"]
+# The ASOP eval harness (`evals/`, not shipped in the wheel). LiteLLM is a
+# heavy transitive tree and only the harness needs it — an adopter running
+# the coordination layer must never pay for an experiment they are not
+# running. See evals/README.md.
+eval = ["litellm>=1.70"]
 
 [tool.hatch.build.targets.wheel]
+# `evals` is deliberately absent: it lives in the repo, not in the package.
 packages = ["agentco"]
