@@ -136,6 +136,13 @@ when their sections come up — recorded here so the attribution survives:
 - **Session-end auto-extraction** as the shape of the deliberately-absent improvement
   loop: auto-proposing SOP revisions from failed work items rather than waiting for a
   human to notice the pattern.
+- *(from the LifeOS review, same date)* **Definition-of-done at `work_create`** — LifeOS's
+  ISA discipline articulates the ideal state before work starts; SOPs version procedures
+  but nothing forces acceptance criteria onto a work item at creation.
+- *(LifeOS)* **`pai-freshness-v1`-style frontmatter** (`last_updated`/`last_reviewed`) as
+  cheap staleness metadata for SOPs and docs, complementing Snapshot's artifact staleness.
+- *(LifeOS)* **Tiered effort routing** as the template for review-routing capacity
+  modelling — match decision urgency to responder tier.
 
 ## Not planned
 

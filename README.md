@@ -19,7 +19,10 @@ acknowledgement**.
 It sits **above** agent memory and context stores — an agent's own recall is its
 harness's business (that layer is well served by projects like
 [OpenViking](https://github.com/volcengine/OpenViking)); AgentCo coordinates what
-happens **between** agents and the people who own them.
+happens **between** agents and the people who own them. Likewise it is not a personal-AI
+framework: projects like [LifeOS](https://github.com/danielmiessler/LifeOS) run *one*
+principal's assistant superbly — AgentCo is the layer they plug into the moment an
+organisation runs more than one.
 
 ## How it works
 
