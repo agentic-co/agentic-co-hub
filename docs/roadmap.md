@@ -124,6 +124,19 @@ defer reasons, escalation, and a terminal `Undeliverable` state. Capacity modell
 as **measurement** — observed and published — and throttles nothing until there is real
 data to throttle on.
 
+### Borrowed candidates (from the 2026-08-31 OpenViking review)
+
+Three patterns from [OpenViking](https://github.com/volcengine/OpenViking) worth weighing
+when their sections come up — recorded here so the attribution survives:
+
+- **Tiered object delivery (L0 abstract → L1 overview → L2 full)** for change-feed events
+  and SOP objects, so a Tier-1 CLAUDE.md splice stays cheap at scale.
+- **A uniform, deterministic addressing scheme** for snapshot URIs (their `viking://`
+  filesystem convention) — browsable and debuggable beats opaque strings.
+- **Session-end auto-extraction** as the shape of the deliberately-absent improvement
+  loop: auto-proposing SOP revisions from failed work items rather than waiting for a
+  human to notice the pattern.
+
 ## Not planned
 
 Writing to a system of record. Any path that does eventually exist will be separately

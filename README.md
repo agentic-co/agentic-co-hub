@@ -16,6 +16,11 @@ about each other's work**, **the pointers you built against, so you are told whe
 move**, and **a router that puts a decision in front of a named human and records the
 acknowledgement**.
 
+It sits **above** agent memory and context stores — an agent's own recall is its
+harness's business (that layer is well served by projects like
+[OpenViking](https://github.com/volcengine/OpenViking)); AgentCo coordinates what
+happens **between** agents and the people who own them.
+
 ## How it works
 
 ```mermaid

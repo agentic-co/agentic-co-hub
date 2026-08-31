@@ -28,3 +28,7 @@ leakguard.toml
 # mounted read-only into the container. A secret in git is a secret in every
 # clone and every fork.
 keys.json
+
+# per-deployment connector configs — never commit
+ado.*.json
+routes.*.json
