@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS events (
     uid         TEXT NOT NULL UNIQUE,
     kind        TEXT NOT NULL,
     actor       TEXT NOT NULL,
+    -- The harness that SAYS it did this: "claude-code", "cursor", a bespoke
+    -- agent's name. Self-reported and therefore UNVERIFIED — it is carried
+    -- beside the authenticated actor, never instead of it, and every surface
+    -- that renders it marks it. Same shape and same reasoning as
+    -- `leases.holder_attested`: a weaker claim is kept as a weaker claim
+    -- rather than refused, because an agent legitimately acts for a principal.
     repo        TEXT,
     occurred_at TEXT NOT NULL,
     payload     TEXT NOT NULL
@@ -151,3 +157,5 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
     migrations.apply(conn)
     return conn
+
+

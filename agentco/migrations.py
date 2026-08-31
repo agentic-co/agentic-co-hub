@@ -217,9 +217,34 @@ _0002 = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0003 — `events.agent_label`, the unverified harness name.
+#
+# The first migration that is not a new table, which is the case the ledger was
+# built for: `CREATE TABLE IF NOT EXISTS events` in migration 1 is frozen, so a
+# column added there would change what "version 1" means and still never reach
+# a file already in use.
+#
+# Nullable on purpose. A label is self-reported and optional, and every read
+# path treats absent and empty as the same thing — an actor that reported no
+# harness name. It is never promoted to an authenticated fact (see
+# `docs/decisions/0002-participation-ladder.md`), so nothing joins on it and no
+# index is warranted.
+#
+# The one file this cannot be applied to is a pre-ledger file that ALREADY has
+# the column, which no released build produces — only an interim working tree
+# that added it as a startup side effect. Such a file needs its ledger stamped
+# by hand; the alternative, an ALTER whose failure is swallowed, would make
+# every genuine migration failure silent to buy that.
+# --------------------------------------------------------------------------- #
+
+_0003 = ("ALTER TABLE events ADD COLUMN agent_label TEXT",)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001),
     Migration(2, "durable-work-and-sops", _0002),
+    Migration(3, "events-agent-label", _0003),
 )
 
 

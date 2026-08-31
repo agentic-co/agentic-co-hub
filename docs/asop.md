@@ -47,6 +47,13 @@ control.
 
 ### 3. Self-revising — divergence is input, not embarrassment
 
+*Naming, because one word was doing two jobs:* **divergence** is the
+phenomenon — execution departed from the procedure. **Adjudication** is the
+record that judges it, and it is what implementations carry as a field. The
+coordination plane already uses `divergence` for something unrelated (a
+snapshot's pointer moving), so the ASOP concept is `adjudication` everywhere it
+becomes code.
+
 When execution departs from the procedure, the divergence is captured and tagged:
 
 - **good divergence** — the procedure was wrong; the deviation feeds the next version.
@@ -102,7 +109,7 @@ Every Part-I property has a concrete home:
 |---|---|
 | Versioned | `metadata.sop` pins `(asop_id, version)`; the plane's `outcomes_by_version` aggregates results per version |
 | Verified | `metadata.verify` — validated at the **write boundary** (malformed gates are rejected, never silently no-op'd); enforced at the store's DONE flip, so no executor path can self-grade |
-| Self-revising | goal-close auto-writes a plan-vs-actual review; fix-beads carry `metadata.divergence: good\|bad`; good feeds template revision, bad feeds RCA |
+| Self-revising | goal-close auto-writes a plan-vs-actual review; fix-beads carry `metadata.adjudication: good\|bad`; good feeds template revision, bad feeds RCA |
 
 ### The lifecycle around the bead (PPEV)
 

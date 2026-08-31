@@ -91,6 +91,7 @@ def claim(
     holder: Optional[str] = None,
     ttl_seconds: int = DEFAULT_TTL_S,
     now: Optional[datetime] = None,
+    agent_label: Optional[str] = None,
 ) -> dict:
     """Open a `ScopeLease`. Returns the lease plus any conflicts it revealed.
 
@@ -154,6 +155,7 @@ def claim(
     events.append(
         conn,
         kind="ScopeClaimed",
+        agent_label=agent_label,
         actor=actor,
         repo=scope.repo,
         occurred_at=_iso(at),
@@ -171,6 +173,7 @@ def claim(
         events.append(
             conn,
             kind="ScopeConflict",
+            agent_label=agent_label,
             actor=actor,
             repo=scope.repo,
             occurred_at=_iso(at),
@@ -212,6 +215,7 @@ def release(
     lease_uid: str,
     action: str = "released",
     now: Optional[datetime] = None,
+    agent_label: Optional[str] = None,
 ) -> dict:
     """Close a lease, and record whether a reported conflict changed behaviour.
 
@@ -256,6 +260,7 @@ def release(
     events.append(
         conn,
         kind="ScopeReleased",
+        agent_label=agent_label,
         actor=actor,
         repo=row["repo"],
         occurred_at=_iso(at),

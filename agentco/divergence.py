@@ -1,5 +1,11 @@
 """The divergence digest — delivered at the cadence boundary, deliberately.
 
+**Not ASOP divergence.** This module is about a *snapshot pointer* moving: you
+recorded a baseline, the document behind it changed. ASOP's plan-vs-actual
+concept is a different thing entirely and is called **adjudication** (see
+`docs/asop.md` § 3) precisely so these two never share a field name, a table,
+or a reader's attention.
+
 The delivery rule, and the emphasis is the feature:
 
     **Real-time divergence pings are exactly what the people who need this
