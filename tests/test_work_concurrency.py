@@ -50,6 +50,7 @@ from pathlib import Path
 
 import pytest
 
+from agentco.errors import Refusal
 from agentco.work import CapabilityError, LeaseError, Queue, WorkStatus
 
 # Every wait in this file is sized to absorb a slow, oversubscribed CI runner
@@ -392,3 +393,309 @@ def test_concurrent_create_with_the_same_natural_key_yields_exactly_one_item(tmp
     matching = [item for item in final_items if item.natural_key == "shared-natural-key"]
     assert len(matching) == 1, f"expected exactly one row for the shared key, found {len(matching)}"
     assert matching[0].id == returned_ids.pop()
+
+
+# --------------------------------------------------------------------------- #
+# Proofs 5-7 — the gate, under the same real-process conditions
+#
+# Phase 1 added two statuses that interact with four mechanisms this file
+# already proves: the CAS, the fence, the reaper and derived blockedness. Those
+# interactions were single-process tested only, which is the gap the roadmap
+# names in as many words — "the protocol has grown since and the proof has
+# not". Extending the proof here rather than starting a file beside it is the
+# point: the claim is about the protocol, and a protocol proven in two places
+# under two sets of assumptions is proven in neither.
+# --------------------------------------------------------------------------- #
+
+DETERMINISTIC_GATE = {
+    "kind": "deterministic",
+    "check": "pytest -q",
+    "max_park_seconds": 900,
+    "on_timeout": "fail",
+}
+JUDGED_GATE = {
+    "kind": "judged",
+    "check": "a reviewer confirms the rollback was exercised",
+    "max_park_seconds": 3600,
+    "on_timeout": "escalate",
+    "escalate_to": "release-owner",
+}
+
+
+def _attestation(check: str, exit_status: int = 0) -> dict:
+    return {
+        "check": check,
+        "exit_status": exit_status,
+        "environment": "spawned-worker",
+        "at": "2026-09-01T12:00:00+00:00",
+    }
+
+
+def _gated_completion_worker(
+    work_path: str, item_id: str, agent_name: str, result_path: str, barrier
+) -> None:
+    """Claim a gated item and report it complete, with no attestation.
+
+    A deterministic gate refuses this. What is being watched is not the refusal
+    — that is proven single-process — but whether a refusal raised from inside
+    the lock, in a real process, leaves the row intact for the next claimant.
+    """
+    queue = Queue(work_path)
+    result = {"agent": agent_name, "claimed": False, "refusedWith": None, "errors": []}
+    try:
+        barrier.wait(timeout=BARRIER_TIMEOUT_S)
+        claimed = queue.claim(item_id, agent_name)
+        result["claimed"] = claimed is not None
+        if claimed is not None:
+            try:
+                queue.report_result(item_id, claimed.lease_attempt, WorkStatus.DONE)
+            except Refusal as exc:
+                result["refusedWith"] = exc.code
+    except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+        result["errors"].append(f"{type(exc).__name__}: {exc}")
+    finally:
+        Path(result_path).write_text(json.dumps(result))
+
+
+def _downstream_watcher(work_path: str, downstream_id: str, result_path: str, barrier) -> None:
+    """Poll `ready()` throughout, recording whether the dependent ever appears.
+
+    This is the momentarily-done race observed from the outside, by a real
+    poller in its own interpreter — which is how it would actually bite. A
+    single-process assertion after the fact cannot see a window that opens and
+    closes between two writes.
+    """
+    queue = Queue(work_path)
+    sightings: list[str] = []
+    barrier.wait(timeout=BARRIER_TIMEOUT_S)
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if any(item.id == downstream_id for item in queue.ready()):
+            sightings.append(time.strftime("%H:%M:%S"))
+        time.sleep(0.002)
+    Path(result_path).write_text(json.dumps({"sightings": sightings}))
+
+
+def test_a_dependent_never_becomes_claimable_while_a_gate_is_open(tmp_path):
+    """**The momentarily-done race, watched by a real poller in another process.**
+
+    Eight workers race to complete a judged upstream item while a ninth process
+    does nothing but ask the queue what is claimable, thousands of times, for
+    the whole duration. If any write ever leaves the dependent momentarily
+    unblocked — the exact window a single-process test cannot observe — the
+    watcher records it.
+    """
+    ctx = mp.get_context("spawn")
+    work_path = tmp_path / "work.jsonl"
+    queue = Queue(str(work_path))
+    upstream = queue.create("migrate the schema", verify=JUDGED_GATE)
+    downstream = queue.create("backfill", blocked_by=[upstream.id])
+
+    workers = 8
+    barrier = ctx.Barrier(workers + 1)
+    completion_paths = [tmp_path / f"gated-{i}.json" for i in range(workers)]
+    watch_path = tmp_path / "watch.json"
+
+    procs = [
+        ctx.Process(
+            target=_gated_completion_worker,
+            args=(str(work_path), upstream.id, f"worker-{i}", str(completion_paths[i]), barrier),
+        )
+        for i in range(workers)
+    ]
+    procs.append(
+        ctx.Process(target=_downstream_watcher, args=(str(work_path), downstream.id, str(watch_path), barrier))
+    )
+    for p in procs:
+        p.start()
+    _join_all(procs, JOIN_TIMEOUT_S)
+
+    sightings = json.loads(watch_path.read_text())["sightings"]
+    assert sightings == [], (
+        f"the dependent became claimable {len(sightings)} time(s) while its "
+        f"upstream gate was open — downstream work would have started on an "
+        f"unverified completion"
+    )
+
+    final = Queue(str(work_path))
+    assert final.quarantined == []
+    assert final.get(upstream.id).status == WorkStatus.AWAITING_VERIFY
+    assert downstream.id not in {i.id for i in final.ready()}
+
+
+def test_a_refused_gated_report_leaves_the_row_claimable_by_the_next_worker(tmp_path):
+    """A refusal raised inside the lock must write nothing.
+
+    Eight processes contend; one wins the claim and is refused for reporting a
+    deterministic gate with no attestation. The row must come back intact —
+    same status, same lease, no evidence — because a refusal that half-writes is
+    how an item ends up unclaimable and unfinished with nobody holding it.
+    """
+    ctx = mp.get_context("spawn")
+    work_path = tmp_path / "work.jsonl"
+    queue = Queue(str(work_path))
+    item = queue.create("ship it", verify=DETERMINISTIC_GATE)
+
+    workers = 8
+    barrier = ctx.Barrier(workers)
+    paths = [tmp_path / f"refused-{i}.json" for i in range(workers)]
+    procs = [
+        ctx.Process(
+            target=_gated_completion_worker,
+            args=(str(work_path), item.id, f"worker-{i}", str(paths[i]), barrier),
+        )
+        for i in range(workers)
+    ]
+    for p in procs:
+        p.start()
+    _join_all(procs, JOIN_TIMEOUT_S)
+
+    results = [json.loads(p.read_text()) for p in paths]
+    for r in results:
+        assert not r["errors"], r["errors"]
+    winners = [r for r in results if r["claimed"]]
+    assert len(winners) == 1, f"expected one claimant, got {[w['agent'] for w in winners]}"
+    assert winners[0]["refusedWith"] == "attestation_required"
+
+    final = Queue(str(work_path))
+    assert final.quarantined == []
+    stored = final.get(item.id)
+    assert stored.status == WorkStatus.IN_PROGRESS, "a refusal must not move the item"
+    assert stored.attestation is None
+    assert stored.verify_failures == 0
+
+
+def _late_gated_reporter(work_path: str, item_id: str, result_path: str, ready_evt, go_evt) -> None:
+    """Claim on a short lease, wait to be told the reaper has run, then report.
+
+    The gated equivalent of proof 3. A worker that lost its lease may still be
+    running and may still come back — now with an ATTESTATION, which is the new
+    part: passing evidence must not buy a fenced-out report its way past the
+    fence, or the gate becomes a route around the lease protocol.
+    """
+    queue = Queue(work_path)
+    result = {"claimed": False, "attempt": None, "fenced": False, "errors": []}
+    try:
+        claimed = queue.claim(item_id, "slow-worker", ttl_seconds=1)
+        result["claimed"] = claimed is not None
+        result["attempt"] = claimed.lease_attempt if claimed else None
+        ready_evt.set()
+        if not go_evt.wait(timeout=EVENT_TIMEOUT_S):
+            result["errors"].append("never told to proceed")
+            return
+        try:
+            queue.report_result(
+                item_id,
+                result["attempt"],
+                WorkStatus.DONE,
+                attestation=_attestation("pytest -q"),
+                submitted_by="slow-worker",
+            )
+        except LeaseError:
+            result["fenced"] = True
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"{type(exc).__name__}: {exc}")
+    finally:
+        Path(result_path).write_text(json.dumps(result))
+
+
+def test_a_passing_attestation_does_not_get_a_stale_holder_past_the_fence(tmp_path):
+    """Evidence is not authority. The fence is checked first, and stays first.
+
+    The failure this closes is subtle and would look like correct behaviour in a
+    log: a reaped worker comes back with a green check, and because the check
+    genuinely passed, accepting it feels harmless. It is not — the item may have
+    been handed to somebody else and finished since, and this report is derived
+    from an execution the queue already abandoned.
+    """
+    ctx = mp.get_context("spawn")
+    work_path = tmp_path / "work.jsonl"
+    queue = Queue(str(work_path))
+    item = queue.create("ship it", verify=DETERMINISTIC_GATE)
+
+    ready_evt, go_evt = ctx.Event(), ctx.Event()
+    result_path = tmp_path / "late.json"
+    proc = ctx.Process(target=_late_gated_reporter, args=(str(work_path), item.id, str(result_path), ready_evt, go_evt))
+    proc.start()
+    assert ready_evt.wait(timeout=EVENT_TIMEOUT_S), "the worker never claimed"
+
+    time.sleep(1.2)  # outlive the 1s lease
+    parent = Queue(str(work_path))
+    reaped = parent.reap_expired_leases()
+    assert [r.id for r in reaped] == [item.id]
+    go_evt.set()
+    _join_all([proc], JOIN_TIMEOUT_S)
+
+    result = json.loads(result_path.read_text())
+    assert not result["errors"], result["errors"]
+    assert result["claimed"] and result["fenced"], (
+        "the reaped worker's report was accepted — a passing attestation must "
+        "not substitute for a live lease"
+    )
+
+    final = Queue(str(work_path))
+    stored = final.get(item.id)
+    assert stored.status == WorkStatus.PENDING, "expiry returns work; it does not complete it"
+    assert stored.attestation is None, "no evidence from an abandoned execution was stored"
+
+
+def _attester(work_path: str, item_id: str, who: str, exit_status: int, result_path: str, barrier) -> None:
+    queue = Queue(work_path)
+    result = {"who": who, "moved": None, "refused": None, "errors": []}
+    try:
+        barrier.wait(timeout=BARRIER_TIMEOUT_S)
+        item = queue.attest(item_id, _attestation(JUDGED_GATE["check"], exit_status), who)
+        result["moved"] = item.status.value if item else None
+    except Refusal as exc:
+        result["refused"] = exc.code
+    except Exception as exc:  # noqa: BLE001
+        result["errors"].append(f"{type(exc).__name__}: {exc}")
+    finally:
+        Path(result_path).write_text(json.dumps(result))
+
+
+def test_only_one_of_many_concurrent_verifiers_can_close_a_gate(tmp_path):
+    """Six verifiers, one open gate, and the item may only be closed once.
+
+    `attest` is a read-modify-write like every other mutation here, so it has
+    the same window — and the consequence of losing it is worse than a lost
+    claim: two verdicts on one unit of work, with the second silently replacing
+    the first's evidence on a unit already recorded as done.
+    """
+    ctx = mp.get_context("spawn")
+    work_path = tmp_path / "work.jsonl"
+    queue = Queue(str(work_path))
+    item = queue.create("ship it", verify=JUDGED_GATE)
+    claimed = queue.claim(item.id, "executor")
+    queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE)
+    assert queue.get(item.id).status == WorkStatus.AWAITING_VERIFY
+
+    verifiers = 6
+    barrier = ctx.Barrier(verifiers)
+    paths = [tmp_path / f"attest-{i}.json" for i in range(verifiers)]
+    procs = [
+        ctx.Process(
+            target=_attester,
+            args=(str(work_path), item.id, f"reviewer-{i}", 0, str(paths[i]), barrier),
+        )
+        for i in range(verifiers)
+    ]
+    for p in procs:
+        p.start()
+    _join_all(procs, JOIN_TIMEOUT_S)
+
+    results = [json.loads(p.read_text()) for p in paths]
+    for r in results:
+        assert not r["errors"], r["errors"]
+    closed = [r for r in results if r["moved"] == "done"]
+    refused = [r for r in results if r["refused"]]
+    assert len(closed) == 1, f"{len(closed)} verifiers closed the same gate"
+    assert len(refused) == verifiers - 1, "every loser must be told why, not silently no-op'd"
+
+    final = Queue(str(work_path))
+    assert final.quarantined == []
+    stored = final.get(item.id)
+    assert stored.status == WorkStatus.DONE
+    assert stored.attestation["submitted_by"] == closed[0]["who"], (
+        "the stored evidence must belong to the verifier that actually closed it"
+    )
