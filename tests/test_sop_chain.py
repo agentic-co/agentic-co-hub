@@ -27,11 +27,6 @@ import pytest
 from agentco.sop import SopContractError, SopLibrary
 
 
-@pytest.fixture()
-def library(tmp_path):
-    return SopLibrary(tmp_path / "sops.jsonl")
-
-
 def active(library, title, **body):
     sop = library.create(title, **body)
     library.activate(sop.sop_id, sop.version)

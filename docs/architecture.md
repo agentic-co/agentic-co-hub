@@ -103,6 +103,26 @@ A queue with a **fenced lease protocol**: compare-and-swap claim plus a fencing 
 a worker whose lease expired cannot report results over the work that replaced it. One
 uniqueness rule on the ingest path, so no source can invent its own idempotency mechanism.
 
+## Storage
+
+Two backends, one set of interfaces. JSONL under an advisory file lock is the default;
+`AGENTCO_DB` selects SQLite instead ([roadmap](roadmap.md#where-the-stores-live) has the
+resolution table and the reasoning).
+
+The protocol does not change between them, and that is enforced rather than intended: the
+lease logic has exactly one implementation, and the SQLite store inherits it, overriding
+only how a row is read and written. Under SQLite the compare-and-swap is `BEGIN IMMEDIATE`
+— the write lock is taken *before* the read the write is conditioned on — followed by an
+update conditioned on the attempt it was decided against. A read, then a write, with the
+transaction opened around only the second half, is the shape that passes every
+single-process test and fails the moment a second machine pulls the same queue.
+
+Schema changes go through numbered migrations recorded in the database file itself, applied
+once and one transaction each, so every file is at version N or at N-1 and never halfway
+through. Migration 1 is the schema that already exists in deployed registries, written to be
+safe to apply to them — a migration system that only works on empty files is one nobody can
+adopt.
+
 ### `SOP` — a procedure with a version history
 
 A standard operating procedure is an object, not a block of text pasted into

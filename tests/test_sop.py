@@ -25,16 +25,6 @@ from agentco.sop import (
 from agentco.work import Queue, WorkStatus
 
 
-@pytest.fixture()
-def library(tmp_path):
-    return SopLibrary(tmp_path / "sops.jsonl")
-
-
-@pytest.fixture()
-def queue(tmp_path):
-    return Queue(tmp_path / "work.jsonl")
-
-
 def a_sop(library, **over):
     body = {
         "purpose": "restore a service after an alert",

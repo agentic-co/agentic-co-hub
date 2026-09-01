@@ -23,6 +23,7 @@ from agentco import ado, app as app_module, routing
 from agentco import db, divergence, hook, inject, leases, metrics
 from agentco.publish import Registry
 from agentco.sop import SopLibrary, resolve_sop_store
+from agentco.stores import open_queue, open_sop_library
 from agentco.work import Queue, resolve_work_store
 
 
@@ -281,8 +282,8 @@ def cmd_ado_pull(args) -> int:
                 item = registry.work_create(title, **common)["item"]
             return item["id"], item.get("assigned_agent") or "-", row["sop_key"] or "-"
     else:
-        queue = Queue(resolve_work_store(args.work_store))
-        library = SopLibrary(resolve_sop_store(args.sop_store))
+        queue = open_queue(args.work_store)
+        library = open_sop_library(args.sop_store)
 
         def file_one(row: dict) -> tuple[str, str, str]:
             p = row["payload"]
