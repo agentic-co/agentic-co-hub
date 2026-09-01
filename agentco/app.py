@@ -420,6 +420,10 @@ def create_app(
                     subject=payload.get("subject"),
                     period=payload.get("period"),
                     metadata=payload.get("metadata"),
+                    # Validated in `work.build_item`, which refuses before the
+                    # store is touched. Absent means ungated, which is what
+                    # every item filed before gates existed is.
+                    verify=payload.get("verify"),
                 )
             except (WorkError, NaturalKeyError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
@@ -512,6 +516,12 @@ def create_app(
                     parsed,
                     result=payload.get("result"),
                     idempotency_key=payload.get("idempotencyKey"),
+                    attestation=payload.get("attestation"),
+                    # From the signature, never the body. `auth.reject_actor_in_body`
+                    # already refuses a payload that tries to name an actor; this
+                    # is the same rule reaching the one field whose whole value is
+                    # who submitted it.
+                    submitted_by=actor,
                 )
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
@@ -529,6 +539,53 @@ def create_app(
             return {"state": "accepted", "item": json.loads(updated.to_json())}
 
         return await _handle(request, "work_report", work)
+
+    @app.post("/work/{item_id}/attest")
+    async def post_work_attest(item_id: str, request: Request) -> JSONResponse:
+        """Answer a gate. The only transition out of a verify state.
+
+        Separate from the report verb rather than folded into it, per
+        `docs/decisions/0002-participation-ladder.md`: the atomicity that
+        bundling would buy is recovered as a refusal — a report on a gated item
+        without an attestation is already refused — so a first-class verb costs
+        nothing in integrity and gains the case that matters, a judged gate
+        answered by somebody who is not the executor.
+
+        No fence. The lease was released when the item parked, and the verifier
+        is deliberately not the party that held it.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            attestation = payload.get("attestation")
+            if not isinstance(attestation, dict):
+                raise Refusal(
+                    code="attestation_required",
+                    message="attest needs an `attestation` object",
+                    remediation=(
+                        "Send the evidence: the check that ran, its exit status, "
+                        "the environment it ran in, and when. The plane verifies "
+                        "the record's shape and stores the claim; it never runs "
+                        "the command."
+                    ),
+                    http_status=400,
+                )
+            try:
+                updated = queue.attest(item_id, attestation, submitted_by=actor)
+            except (WorkError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+            if updated is None:
+                raise Refusal(
+                    code="work_item_unknown",
+                    message=f"no work item {item_id!r} on this queue",
+                    remediation=(
+                        "Check the id came from the same registry. There is "
+                        "nothing here to attest against."
+                    ),
+                    http_status=404,
+                )
+            return {"state": "accepted", "item": json.loads(updated.to_json())}
+
+        return await _handle(request, "attest", work)
 
     @app.get("/work")
     async def get_work(request: Request) -> JSONResponse:

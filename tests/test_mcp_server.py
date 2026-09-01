@@ -65,13 +65,16 @@ def test_tool_count_is_capped_at_twelve(mcp):
     assert len(names) <= 12, f"{len(names)} tools registered: {names}"
 
 
-def test_the_nine_implemented_tools_are_the_ones_the_design_names(mcp):
-    """Twelve is the budget, not the roster — three of the twelve are names
-    reserved by the ADR with no tool behind them. This asserts the nine that
-    are actually registered today, and separately that the three reserved
-    names are absent, so the day one of them lands, this test forces whoever
-    lands it to move the name across deliberately rather than the roster
-    drifting out of sync with the ADR on its own."""
+def test_the_implemented_tools_are_the_ones_the_design_names(mcp):
+    """Twelve is the budget, not the roster. This asserts the tools actually
+    registered today, and separately that the still-reserved names are absent,
+    so the day one of them lands this test forces whoever lands it to move the
+    name across deliberately rather than the roster drifting out of sync with
+    the ADR on its own.
+
+    It has already done that job once: `attest` shipped with the Phase 1
+    transports and this test is what made moving it a decision rather than an
+    accident."""
     expected = {
         "claim_scope",
         "release_scope",
@@ -82,11 +85,15 @@ def test_the_nine_implemented_tools_are_the_ones_the_design_names(mcp):
         "work_create",
         "sop_get",
         "whoami",
+        # Landed with the Phase 1 transports. Before it, a gate could be
+        # neither created nor satisfied over any transport — the property the
+        # whole contract rests on was reachable in-process only.
+        "attest",
     }
     names = {t.name for t in mcp._tool_manager.list_tools()}
     assert names == expected
 
-    reserved = {"attest", "sop_revise", "sop_activate"}
+    reserved = {"sop_revise", "sop_activate"}
     already_registered = reserved & names
     assert not already_registered, (
         f"{already_registered} has shipped: add it to `expected` above AND "
@@ -96,16 +103,20 @@ def test_the_nine_implemented_tools_are_the_ones_the_design_names(mcp):
     )
 
 
-# The measured total at the time this test was written: 8,314 bytes across
-# the nine tools above (name + description + JSON input schema, each
-# serialised with a stable separator so formatting can't move the number).
-# 10,000 leaves ~20% headroom for the kind of change that should NOT fail a
-# build — a tightened type, a clarified field description — while still
-# catching the thing the ADR's second revisit condition names: "the ceiling
-# is wrong if schema bytes outgrow the count." Re-measure and update this
-# comment with the new number before raising the budget; never raise it to
-# make a failing test pass without writing down why.
-TOOL_SCHEMA_BYTE_BUDGET = 10_000
+# Measured 8,314 bytes across nine tools when this test was written; 10,615
+# across ten once `attest` landed with the Phase 1 transports. The budget was
+# republished from 10,000 to 12,500 for that reason and no other — the tenth
+# tool is a tool, not schema bloat, and it cost 2,301 bytes of description for
+# a verb that carries the contract's central property.
+#
+# That is the only kind of raise allowed here. The ADR's second revisit
+# condition is that the COUNT stops measuring context cost if the bytes grow
+# underneath it, so a raise has to name what was added; a raise to make a red
+# test green would be the exact failure the budget exists to catch. 12,500
+# leaves room for the two reserved verbs at roughly the observed per-tool cost
+# and nothing more: at twelve tools this budget is close to binding, which is
+# the intent.
+TOOL_SCHEMA_BYTE_BUDGET = 12_500
 
 
 def test_tool_schema_byte_budget_is_published_and_enforced(mcp, capsys):

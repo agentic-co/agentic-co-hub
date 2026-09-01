@@ -324,3 +324,129 @@ def test_attesting_an_ungated_item_is_refused(queue):
     claim_and_finish(queue, item)
     with pytest.raises(Refusal):
         queue.attest(item.id, attestation(), "reviewer-b")
+
+
+# --------------------------------------------------------------------------- #
+# The gate belongs to whoever planned the work, not to whoever executes it
+# --------------------------------------------------------------------------- #
+
+
+def test_no_transport_offers_the_executor_a_way_to_change_its_own_gate():
+    """A party that can rewrite its own check can write a tautology.
+
+    The ASOP contract requires gates to be authored at plan time and immutable
+    to the executor, and today that holds for a weak reason: no write path
+    accepts a `verify` field on anything except `create`. Weak because it is
+    true by ABSENCE — nobody decided it, and the next person to add a convenient
+    `work_update` would undo it without noticing there was a rule.
+
+    Asserted on signatures and behaviour, never on source text: a first draft of
+    this test grepped the handlers for the string "verify" and failed on a
+    docstring that merely says `awaiting_verify`, which is the same coarse proxy
+    this repository has been bitten by before.
+    """
+    import inspect
+
+    from agentco.mcp_server import create_server
+    from agentco.publish import Registry
+    from agentco.work import Queue
+
+    for name in ("report_result", "attest", "claim", "reap_expired_leases"):
+        params = set(inspect.signature(getattr(Queue, name)).parameters)
+        assert "verify" not in params, (
+            f"Queue.{name} accepts `verify` — an executor could rewrite the check "
+            f"it is about to be judged by. A gate is authored once, at create."
+        )
+
+    for name in ("work_report", "attest"):
+        assert "verify" not in set(inspect.signature(getattr(Registry, name)).parameters)
+
+
+def test_the_mcp_mutation_tools_expose_no_gate_parameter(tmp_path):
+    from agentco.mcp_server import create_server
+
+    mcp = create_server(
+        db_path=str(tmp_path / "r.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        actor="tester",
+    )
+    import inspect
+
+    for name in ("work_report", "attest"):
+        found = mcp._tool_manager.get_tool(name)
+        params = set(inspect.signature(found.fn).parameters)
+        assert "verify" not in params, f"the {name} tool accepts a gate"
+    assert "verify" in set(inspect.signature(mcp._tool_manager.get_tool("work_create").fn).parameters), (
+        "create is where a gate is authored — if this fails, gates are unreachable again"
+    )
+
+
+def test_the_http_report_and_attest_verbs_ignore_a_gate_in_the_body(tmp_path):
+    """The behavioural half, and the one that would catch a handler quietly
+    passing an unexpected field through to the store."""
+    from fastapi.testclient import TestClient
+
+    from agentco.app import create_app
+
+    keys = {"bigmac": "s3cret"}
+    app = create_app(db_path=str(tmp_path / "r.sqlite3"), keys=keys)
+    registry = _loopback(TestClient(app), "bigmac", keys)
+
+    original = dict(DETERMINISTIC)
+    filed = registry.work_create("ship it", verify=original)["item"]
+    leased = registry.work_pull()
+
+    tampered = {"kind": "deterministic", "check": "true", "max_park_seconds": 1, "on_timeout": "pass"}
+    registry.call_raw(
+        "POST",
+        f"/work/{filed['id']}/report",
+        {
+            "attempt": leased["attempt"],
+            "status": "done",
+            "verify": tampered,
+            "attestation": attestation(),
+        },
+    )
+    stored = registry.work_get(filed["id"])["item"] if hasattr(registry, "work_get") else None
+    del stored
+
+    rows = registry.call_raw("GET", "/work", None)["items"]
+    [item] = [i for i in rows if i["id"] == filed["id"]]
+    assert item["verify"]["check"] == original["check"], (
+        "the report handler let the executor swap its own gate for `true`"
+    )
+
+
+def _loopback(client, actor: str, keys: dict):
+    """A signed client whose transport is the app in-process, plus a raw escape
+    hatch for sending fields the typed client deliberately will not send."""
+    import json as _json
+    import time as _time
+
+    from agentco import auth as _auth
+    from agentco.publish import Registry as _Registry, RegistryError as _RegistryError
+
+    class _Loopback(_Registry):
+        def _call(self, method, path, body=None, query=""):
+            raw = _json.dumps(body).encode() if body is not None else b""
+            ts = str(int(_time.time()))
+            response = client.request(
+                method,
+                f"{path}{query}",
+                content=raw if raw else None,
+                headers={
+                    "X-AgentCo-Actor": self.actor,
+                    "X-AgentCo-Timestamp": ts,
+                    "X-AgentCo-Signature": _auth.sign(self.secret, method, path, ts, raw),
+                    "Content-Type": "application/json",
+                },
+            )
+            if response.status_code >= 400:
+                raise _RegistryError(response.status_code, response.json())
+            return response.json()
+
+        def call_raw(self, method, path, body):
+            return self._call(method, path, body)
+
+    return _Loopback(actor, keys[actor], "http://registry.test")

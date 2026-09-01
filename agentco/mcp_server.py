@@ -203,6 +203,10 @@ class _LocalBackend:
     def work_create(self, title: str, **kw) -> dict:
         return json.loads(self.queue.create(title, **kw).to_json())
 
+    def attest(self, item_id: str, attestation: dict, submitted_by: str) -> Optional[dict]:
+        updated = self.queue.attest(item_id, attestation, submitted_by=submitted_by)
+        return json.loads(updated.to_json()) if updated is not None else None
+
     def sop_get(self, sop_id: str, version: Optional[int]) -> Optional[dict]:
         sop = self.library.get(sop_id, version=version)
         return json.loads(sop.to_json()) if sop is not None else None
@@ -256,19 +260,28 @@ class _RemoteBackend:
         return pulled.get("item") if pulled.get("state") == "leased" else None
 
     def work_report(self, item_id: str, attempt: int, status: WorkStatus, result=None,
-                    idempotency_key=None) -> Optional[dict]:
+                    idempotency_key=None, attestation=None, submitted_by=None) -> Optional[dict]:
+        # `submitted_by` is deliberately NOT forwarded. Over HTTP the actor comes
+        # from the signature and the server derives it; sending it would be a
+        # body claiming an identity, which is the one thing every transport here
+        # refuses.
         return self.registry.work_report(
-            item_id, attempt, status.value, result=result, idempotency_key=idempotency_key
+            item_id, attempt, status.value, result=result,
+            idempotency_key=idempotency_key, attestation=attestation,
         ).get("item")
+
+    def attest(self, item_id: str, attestation: dict, submitted_by: str) -> Optional[dict]:
+        return self.registry.attest(item_id, attestation).get("item")
 
     def work_create(self, title: str, requires=(), blocked_by=(), assigned_agent=None,
                     natural_key=None, source=None, source_id=None, kind=None,
-                    subject=None, period=None, metadata=None) -> dict:
+                    subject=None, period=None, metadata=None, verify=None) -> dict:
         payload = {
             "requires": list(requires), "blockedBy": list(blocked_by),
             "assignedAgent": assigned_agent, "naturalKey": natural_key,
             "source": source, "sourceId": source_id, "kind": kind,
             "subject": subject, "period": period, "metadata": metadata,
+            "verify": verify,
         }
         return self.registry.work_create(
             title, **{k: v for k, v in payload.items() if v not in (None, [], ())}
@@ -454,6 +467,7 @@ def create_server(
         status: str,
         result: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        attestation: Optional[dict] = None,
     ) -> dict:
         """Report a terminal outcome (done/failed), fenced on the lease attempt it was issued under.
 
@@ -462,6 +476,13 @@ def create_server(
         SUPERSEDED, not lost, and accepting it would overwrite whoever holds
         the item now. A missing item is refused too, rather than answered
         with a bare success a caller could read as "recorded, nothing to say".
+
+        On a GATED item, `done` is a request rather than an outcome. A
+        deterministic gate requires `attestation` in the same call — the check
+        you re-ran, its exit status, the environment, and when — and the report
+        is refused without it. A judged or human gate takes no attestation here
+        at all and parks the item as `awaiting_verify` for somebody else to
+        answer with `attest`.
         """
         try:
             parsed_status = WorkStatus(status)
@@ -473,7 +494,9 @@ def create_server(
             )
         try:
             updated = backend.work_report(
-                item_id, attempt, parsed_status, result=result, idempotency_key=idempotency_key
+                item_id, attempt, parsed_status, result=result,
+                idempotency_key=idempotency_key, attestation=attestation,
+                submitted_by=who,
             )
         except (WorkError, ValueError, Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
@@ -498,6 +521,7 @@ def create_server(
         subject: Optional[str] = None,
         period: Optional[str] = None,
         metadata: Optional[dict] = None,
+        verify: Optional[dict] = None,
     ) -> dict:
         """File a new work item. A duplicate natural key returns the EXISTING item, not an error.
 
@@ -506,6 +530,13 @@ def create_server(
         recurring generated work, or `source`+`source_id` to mirror an
         external record. A partial key is refused before anything is written,
         because a repaired key would be a silent duplicate or a silent merge.
+
+        `verify` attaches a gate: `{kind, check, max_park_seconds, on_timeout}`,
+        kind being `deterministic` (the completing process re-runs the check and
+        reports an attestation), `judged` (routed to somebody who is not the
+        executor) or `human`. A malformed gate is refused here rather than
+        stored, because a gate that silently does nothing still reports green.
+        Omit it and the item behaves exactly as items did before gates existed.
         """
         try:
             item = backend.work_create(
@@ -520,6 +551,7 @@ def create_server(
                 subject=subject,
                 period=period,
                 metadata=metadata,
+                verify=verify,
             )
         except (WorkError, NaturalKeyError, Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
@@ -538,6 +570,36 @@ def create_server(
             return backend.sop_get(sop_id, version)
         except (Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
+
+    @mcp.tool(name="attest")
+    def attest(item_id: str, attestation: dict) -> dict:
+        """Answer a gate on an item parked in `awaiting_verify` (or re-run a failed one).
+
+        The verifier's verb, as distinct from the executor's `work_report`: a
+        judged gate exists precisely because the party that did the work may not
+        be the party that says it is correct, and that separation is enforced
+        rather than documented.
+
+        `attestation` is `{check, exit_status, environment, at}` — the check
+        that ran, what it returned, where, and when. Exit 0 closes the item;
+        anything else lands `verify_failed`, which keeps blocking everything
+        downstream until THIS item's own gate passes. A fix filed beside it
+        never substitutes for it.
+
+        The plane verifies the record's shape and stores the claim. It never
+        runs the command, which makes this a trust floor rather than a proof.
+        """
+        try:
+            updated = backend.attest(item_id, attestation, submitted_by=who)
+        except (WorkError, ValueError, Refusal, RegistryError) as exc:
+            raise _refuse(exc) from exc
+        if updated is None:
+            raise ToolError(
+                f"no work item {item_id!r} on this queue — there is nothing here "
+                f"to attest against. Check the id came from work_pull or "
+                f"work_create against this same store."
+            )
+        return updated
 
     @mcp.tool(name="whoami")
     def whoami() -> dict:
