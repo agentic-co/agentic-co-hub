@@ -235,11 +235,20 @@ single-process, and much of it is still written by the same author as the code.
 One boundary worth stating precisely, because the honest version is narrower than
 the flattering one: the lease protocol's twelve-process proof still holds — both
 mutations were re-run against current code and both still fail the right tests —
-but **the protocol has grown since and the proof has not**. Attempt-advance on
-report, attempt-advance on reap, the reaper's in-lock liveness re-check,
-`assigned_agent` enforcement and derived blockedness are single-process tested
-only. The proof covers a smaller fraction of the protocol than it did when
-written.
+but **the protocol has grown faster than the proof**. Attempt-advance on report,
+attempt-advance on reap, the reaper's in-lock liveness re-check and
+`assigned_agent` enforcement are single-process tested only.
+
+The gate closed part of that gap rather than widening it. Derived blockedness is
+now proven across processes: eight workers race to complete a gated item while a
+ninth does nothing but poll `ready()` thousands of times, and the dependent never
+once appears — the momentarily-done race observed from outside, by a real poller,
+which is the only place a window that opens and closes between two writes can be
+seen at all. Alongside it: a refusal raised inside the lock leaves the row
+claimable and unchanged; a reaped worker's report is fenced out even when it
+carries a PASSING attestation, because evidence is not authority; and of six
+concurrent verifiers exactly one can close a gate, with the stored evidence
+belonging to the one that did.
 
 ## Known issues
 
