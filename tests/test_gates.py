@@ -1,0 +1,326 @@
+"""Verification gates — Phase 1 of the connection harness.
+
+The property under test is the one every other ASOP claim rests on: an item
+whose gate has not passed is **not done**, and nothing downstream may start on
+the strength of its completion claim.
+
+Two of these tests are written to be provable by mutation rather than merely
+present, and the docstring of each says which mechanism it dies without. That
+distinction is the repository's own hard-won lesson: six earlier tests asserted
+the exact property their code lacked by testing the half that held, and a test
+that cannot fail when its mechanism is removed looks identical in the summary
+line to one that can.
+
+The `queue` fixture is the parametrised one from `conftest.py`, so every test
+here runs against BOTH backends. That is not incidental coverage: `verify` and
+`attestation` are nullable JSON columns on the SQLite side, and "absent means
+ungated" is the kind of property a storage layer breaks by normalising a NULL
+into an empty object — which would gate every item ever filed.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from agentco import gates
+from agentco.errors import Refusal
+from agentco.work import WorkStatus
+
+DETERMINISTIC = {
+    "kind": "deterministic",
+    "check": "pytest -q",
+    "max_park_seconds": 900,
+    "on_timeout": "fail",
+}
+JUDGED = {
+    "kind": "judged",
+    "check": "the migration is reversible and the rollback was exercised",
+    "max_park_seconds": 3600,
+    "on_timeout": "escalate",
+    "escalate_to": "release-owner",
+}
+
+
+def attestation(check: str = "pytest -q", exit_status: int = 0) -> dict:
+    return {
+        "check": check,
+        "exit_status": exit_status,
+        "environment": "ci/ubuntu-24.04/py3.12",
+        "at": "2026-09-01T12:00:00+00:00",
+    }
+
+
+def claim_and_finish(queue, item, agent="worker-a", **kw):
+    """Claim, then report DONE — the ordinary path a worker takes."""
+    claimed = queue.claim(item.id, agent)
+    return queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE, **kw)
+
+
+# --------------------------------------------------------------------------- #
+# The write boundary — a malformed gate never reaches storage
+# --------------------------------------------------------------------------- #
+
+
+def test_a_malformed_gate_is_refused_and_nothing_is_written(queue):
+    """A gate that cannot run must fail at `create`, not at execution.
+
+    The failure this prevents is not an exception later — it is a gate that
+    quietly does nothing while the item it guards reports green.
+    """
+    with pytest.raises(Refusal) as caught:
+        queue.create("ship it", verify={"kind": "deterministic", "check": "pytest -q"})
+    assert caught.value.code == gates.GATE_INVALID
+    assert caught.value.remediation
+    assert queue.list() == []
+
+
+def test_a_misspelled_gate_field_is_refused_rather_than_ignored(queue):
+    """The typo case, which is the realistic one.
+
+    `max_park_second` would otherwise be an unread key and the gate would be
+    stored missing its clock — the exact shape of a check nobody notices is
+    absent.
+    """
+    with pytest.raises(Refusal) as caught:
+        queue.create("ship it", verify=dict(DETERMINISTIC, max_park_second=900))
+    assert "unknown gate field(s) ['max_park_second']" in caught.value.message
+
+
+def test_an_escalation_with_no_destination_is_refused(queue):
+    with pytest.raises(Refusal):
+        queue.create("ship it", verify=dict(JUDGED, escalate_to=None))
+
+
+def test_a_stored_gate_is_normalised(queue):
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    assert item.verify == dict(DETERMINISTIC, escalate_to=None)
+    assert queue.get(item.id).verify == item.verify
+    assert item.is_gated
+
+
+# --------------------------------------------------------------------------- #
+# The momentarily-done race
+# --------------------------------------------------------------------------- #
+
+
+def test_neither_verify_state_releases_a_dependent_item(queue):
+    """**The momentarily-done race.** Dies if `releases_blockers` admits either
+    verify state — which is the one-line "simplification" a future editor is
+    most likely to make, since both statuses mean the worker has finished.
+
+    The assertion is deliberately on `ready()`, the queue's own answer to "what
+    may be worked on", rather than on the status field: it is the downstream
+    item starting early that does the damage, not the label on the upstream one.
+    """
+    upstream = queue.create("migrate the schema", verify=JUDGED)
+    downstream = queue.create("backfill from the new column", blocked_by=[upstream.id])
+
+    assert claim_and_finish(queue, upstream).status == WorkStatus.AWAITING_VERIFY
+    assert downstream.id not in {i.id for i in queue.ready()}
+    assert queue.get(downstream.id).unmet_blockers(
+        {i.id for i in queue.list() if i.status == WorkStatus.DONE}
+    ) == [upstream.id]
+
+    # And once the gate says no, it is still not released.
+    queue.attest(upstream.id, attestation(check=JUDGED["check"], exit_status=1), "reviewer-b")
+    assert queue.get(upstream.id).status == WorkStatus.VERIFY_FAILED
+    assert downstream.id not in {i.id for i in queue.ready()}
+
+    # Only the gate passing releases it.
+    queue.attest(upstream.id, attestation(check=JUDGED["check"]), "reviewer-b")
+    assert queue.get(upstream.id).status == WorkStatus.DONE
+    assert downstream.id in {i.id for i in queue.ready()}
+
+
+def test_a_gated_item_awaiting_verification_is_not_claimable(queue):
+    """Not offered by `ready()`, and refused to a caller holding the id anyway.
+
+    `claim` returns None on a refused claim, as it does for a lost race — the
+    two are the same non-event from a poller's point of view. What matters here
+    is that no second worker is handed an item whose gate is still open.
+    """
+    item = queue.create("ship it", verify=JUDGED)
+    claim_and_finish(queue, item)
+    assert item.id not in {i.id for i in queue.ready()}
+    assert queue.claim(item.id, "worker-b") is None
+    assert queue.get(item.id).status == WorkStatus.AWAITING_VERIFY
+
+
+# --------------------------------------------------------------------------- #
+# The refusal rule — what buys back the atomicity of a bundled attest
+# --------------------------------------------------------------------------- #
+
+
+def test_a_gated_report_without_an_attestation_is_refused(queue):
+    """Dies if the refusal is softened into a warning or a park.
+
+    This refusal is the whole reason `attest` can be a first-class verb without
+    costing integrity: a completion claim on a deterministic gate cannot be
+    made without evidence, so nothing is gained by folding the two calls.
+    """
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    claimed = queue.claim(item.id, "worker-a")
+    with pytest.raises(Refusal) as caught:
+        queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE)
+    assert caught.value.code == gates.ATTESTATION_REQUIRED
+    # Refused means unmoved: still claimed, still in progress, no evidence.
+    stored = queue.get(item.id)
+    assert stored.status == WorkStatus.IN_PROGRESS
+    assert stored.attestation is None
+    assert stored.leased_by == "worker-a"
+
+
+def test_an_attestation_for_a_different_check_is_refused(queue):
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    claimed = queue.claim(item.id, "worker-a")
+    with pytest.raises(Refusal) as caught:
+        queue.report_result(
+            item.id,
+            claimed.lease_attempt,
+            WorkStatus.DONE,
+            attestation=attestation(check="pytest -k the_one_that_passes"),
+        )
+    assert caught.value.code == gates.ATTESTATION_INVALID
+
+
+def test_a_passing_attestation_completes_the_item(queue):
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    done = claim_and_finish(queue, item, attestation=attestation())
+    assert done.status == WorkStatus.DONE
+    assert done.attestation["submitted_by"] == "worker-a"
+    assert done.verify_failures == 0
+
+
+def test_a_failing_attestation_lands_verify_failed_and_records_the_policy(queue):
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    failed = claim_and_finish(queue, item, attestation=attestation(exit_status=1))
+    assert failed.status == WorkStatus.VERIFY_FAILED
+    assert failed.verify_failures == 1
+    assert failed.metadata["verify_retry"]["decision"] == "fix"
+
+
+def test_the_body_cannot_name_the_submitter(queue):
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    claimed = queue.claim(item.id, "worker-a")
+    with pytest.raises(Refusal):
+        queue.report_result(
+            item.id,
+            claimed.lease_attempt,
+            WorkStatus.DONE,
+            attestation=dict(attestation(), submitted_by="somebody-trusted"),
+            submitted_by="worker-a",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Who may satisfy which gate
+# --------------------------------------------------------------------------- #
+
+
+def test_the_executor_may_not_attest_its_own_judged_gate(queue):
+    """The separation IS the judged gate. Dies if the check is dropped, at which
+    point a judged gate is a deterministic one with extra ceremony."""
+    item = queue.create("ship it", verify=JUDGED)
+    claim_and_finish(queue, item, agent="worker-a")
+    with pytest.raises(Refusal) as caught:
+        queue.attest(item.id, attestation(check=JUDGED["check"]), "worker-a")
+    assert "cannot also verify" in caught.value.message
+    assert queue.get(item.id).status == WorkStatus.AWAITING_VERIFY
+
+
+def test_an_attestation_offered_on_a_judged_report_is_refused(queue):
+    item = queue.create("ship it", verify=JUDGED)
+    claimed = queue.claim(item.id, "worker-a")
+    with pytest.raises(Refusal):
+        queue.report_result(
+            item.id,
+            claimed.lease_attempt,
+            WorkStatus.DONE,
+            attestation=attestation(check=JUDGED["check"]),
+        )
+
+
+def test_an_ungated_item_accepts_no_evidence(queue):
+    item = queue.create("tidy the readme")
+    claimed = queue.claim(item.id, "worker-a")
+    with pytest.raises(Refusal):
+        queue.report_result(
+            item.id, claimed.lease_attempt, WorkStatus.DONE, attestation=attestation()
+        )
+
+
+# --------------------------------------------------------------------------- #
+# The legacy scope guard
+# --------------------------------------------------------------------------- #
+
+
+def test_an_item_with_no_gate_keeps_the_old_semantics_exactly(queue):
+    """No backfill, no flood. An item filed before gates existed has none, and
+    reporting DONE means done — the same call, the same outcome, on the same day
+    gates shipped."""
+    upstream = queue.create("the way it always was")
+    downstream = queue.create("depends on it", blocked_by=[upstream.id])
+    assert claim_and_finish(queue, upstream).status == WorkStatus.DONE
+    assert downstream.id in {i.id for i in queue.ready()}
+
+
+# --------------------------------------------------------------------------- #
+# Re-verify, and the retry policy
+# --------------------------------------------------------------------------- #
+
+
+def test_a_failed_gate_cannot_be_cleared_by_reporting_again(queue):
+    """The re-verify invariant. A worker must not be able to walk its own item
+    out of a failed gate; only the gate answering again may."""
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    failed = claim_and_finish(queue, item, attestation=attestation(exit_status=1))
+    with pytest.raises(Exception):
+        queue.report_result(item.id, failed.lease_attempt, WorkStatus.DONE,
+                            attestation=attestation())
+    assert queue.get(item.id).status == WorkStatus.VERIFY_FAILED
+
+
+def test_re_verifying_the_same_item_is_what_clears_it(queue):
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    claim_and_finish(queue, item, attestation=attestation(exit_status=1))
+    cleared = queue.attest(item.id, attestation(), "worker-a")
+    assert cleared.status == WorkStatus.DONE
+    assert cleared.metadata["verify_verdict"]["re_verify"] is True
+    assert "verify_retry" not in cleared.metadata
+
+
+def test_the_retry_policy_stops_at_two(queue):
+    """One fix item, then a human, then never again autonomously."""
+    assert gates.retry_decision(1) == "fix"
+    assert gates.retry_decision(2) == "escalate"
+    assert gates.retry_decision(3) == "stop"
+    assert gates.retry_decision(17) == "stop"
+    with pytest.raises(ValueError):
+        gates.retry_decision(0)
+
+
+def test_the_failure_count_accumulates_across_re_verifications(queue):
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    claim_and_finish(queue, item, attestation=attestation(exit_status=1))
+    second = queue.attest(item.id, attestation(exit_status=2), "worker-a")
+    assert second.verify_failures == 2
+    assert second.metadata["verify_retry"]["decision"] == "escalate"
+    third = queue.attest(item.id, attestation(exit_status=2), "worker-a")
+    assert third.verify_failures == 3
+    assert third.metadata["verify_retry"]["decision"] == "stop"
+
+
+def test_attesting_an_item_that_never_claimed_completion_is_refused(queue):
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    with pytest.raises(Refusal):
+        queue.attest(item.id, attestation(), "reviewer-b")
+    queue.claim(item.id, "worker-a")
+    with pytest.raises(Refusal):
+        queue.attest(item.id, attestation(), "reviewer-b")
+
+
+def test_attesting_an_ungated_item_is_refused(queue):
+    item = queue.create("tidy the readme")
+    claim_and_finish(queue, item)
+    with pytest.raises(Refusal):
+        queue.attest(item.id, attestation(), "reviewer-b")

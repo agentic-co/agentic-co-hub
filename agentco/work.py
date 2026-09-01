@@ -29,11 +29,25 @@ JSONL is elegant, but because it is greppable when something goes wrong at
 taking the store with it. A database is the right answer at a scale this is
 not designed for.
 
-WHAT IS DELIBERATELY NOT HERE: approval workflows, verification gates,
-hierarchical goals, retry policy, notification. Those are opinions about how an
-organisation works, and they belong above this layer. What is here is the
-narrow thing everything else needs — hand a unit of work to exactly one worker,
-and be certain whose answer you are looking at.
+**Verification gates ARE here now, and that is a reversal.** This docstring
+used to name them as deliberately excluded, alongside approval workflows and
+retry policy, on the grounds that they are opinions about how an organisation
+works. The exclusion was right about workflow and wrong about the gate: the
+ASOP contract's `verified` property is not an opinion about process, it is the
+answer to "may the next unit start", and that answer has to live where
+blockedness is derived. Put it above this layer and every consumer computes its
+own version of done — which is the momentarily-done race, arrived at by
+architecture instead of by bug. See `agentco/gates.py` and
+`docs/connection-harness.md`.
+
+What is still deliberately NOT here: approval workflows, hierarchical goals,
+notification, and the ACTING part of retry policy. The queue records what the
+policy decided (`gates.retry_decision`) and spawns nothing — creating work as a
+side effect of a report is how a queue starts having opinions.
+
+What is here is the narrow thing everything else needs — hand a unit of work to
+exactly one worker, be certain whose answer you are looking at, and do not call
+it finished until its gate says so.
 """
 
 from __future__ import annotations
@@ -50,6 +64,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
+from agentco import gates
+from agentco.errors import Refusal
 from agentco.filelock import lock_exclusive, unlock
 from agentco.keys import derive_natural_key, natural_key_of
 
@@ -135,11 +151,45 @@ class WorkStatus(str, Enum):
     # filed — `create()` wrote BLOCKED and no code anywhere wrote it back.
     # Reported by `blocked_items()`; never written to disk.
     BLOCKED = "blocked"
+    # Gated completion. The worker says it is finished and the gate has not
+    # answered yet — a judged or human check is routed elsewhere and has not
+    # come back. STORED, unlike BLOCKED, because it is a fact about this item
+    # rather than a derivation from other items.
+    AWAITING_VERIFY = "awaiting_verify"
+    # The gate answered no. Not FAILED: the work may well be right and the
+    # check disagreed, and the two prompt different responses. What they share
+    # is that neither is DONE.
+    VERIFY_FAILED = "verify_failed"
     DONE = "done"
     FAILED = "failed"
 
 
 TERMINAL = (WorkStatus.DONE, WorkStatus.FAILED)
+
+# Outcomes already recorded. Reporting over any of these would replace a
+# recorded outcome with a later opinion of it — and for the two verify states
+# specifically, it would also let a worker walk its own item out of a failed
+# gate by re-reporting success. The only way out of those two is the gate
+# answering again (`Queue.attest`).
+SETTLED = TERMINAL + (WorkStatus.AWAITING_VERIFY, WorkStatus.VERIFY_FAILED)
+
+
+def releases_blockers(status: "WorkStatus | str") -> bool:
+    """DONE, and nothing else, unblocks what depends on it.
+
+    **This is the momentarily-done race, and this function is the whole of the
+    fix.** A gated item that reported success is `AWAITING_VERIFY`: its worker
+    is finished, its check has not answered, and the entire value of the gate
+    is that downstream work does not start on the strength of an unverified
+    claim. `VERIFY_FAILED` is the same argument with the answer already in.
+
+    One function, called from every site that computes a done set, because the
+    rule has to be impossible to relax in one place and not another — a queue
+    where `ready()` and `claim()` disagree about what counts as finished hands
+    out work that is blocked and then refuses the report.
+    """
+    value = status.value if isinstance(status, WorkStatus) else status
+    return value == WorkStatus.DONE.value
 
 
 def _now() -> datetime:
@@ -187,6 +237,25 @@ class WorkItem:
     natural_key: Optional[str] = None
     metadata: dict = field(default_factory=dict)
 
+    # The gate, validated at the write boundary and normalised (`agentco/gates.py`).
+    # First-class rather than a corner of `metadata` for one reason: a malformed
+    # gate has to be refusable, and `metadata` is precisely where a payload
+    # nobody validates goes to be silently ignored.
+    #
+    # Absent means ungated, which is what every item created before gates
+    # existed is. That is the legacy scope guard, and it is a property of the
+    # data rather than a flag: there is no backfill, and no flood of suddenly
+    # unverified work.
+    verify: Optional[dict] = None
+    # The accepted evidence, if any. One record, not a log — the history of
+    # attempts is the failure count plus the fix items it spawned, and a list
+    # here would duplicate that badly.
+    attestation: Optional[dict] = None
+    # How many times this item's own gate has answered no. Drives the retry
+    # policy (`gates.retry_decision`) and never resets: a fix item is a
+    # different item, and this counter is about this one.
+    verify_failures: int = 0
+
     created_at: str = field(default_factory=lambda: _iso(_now()))
     updated_at: str = field(default_factory=lambda: _iso(_now()))
 
@@ -203,8 +272,17 @@ class WorkItem:
         expires = _parse(self.lease_expires_at)
         return expires is not None and expires > now
 
+    @property
+    def is_gated(self) -> bool:
+        """True iff this item declares a gate. See `verify`."""
+        return bool(self.verify)
+
     def unmet_blockers(self, done_ids: set[str]) -> list[str]:
         """Dependencies not yet done. Empty means nothing is holding this back.
+
+        The set is built by `releases_blockers`, which admits DONE only — an
+        item awaiting or failing verification is finished from its worker's
+        point of view and still holds everything downstream.
 
         This is the single source of truth for blockedness. `WorkStatus.BLOCKED`
         exists for REPORTING and is computed from this — it is never written to
@@ -228,6 +306,50 @@ class WorkItem:
         data = {k: v for k, v in raw.items() if k in known}
         data["status"] = WorkStatus(data.get("status", "pending"))
         return cls(**data)
+
+
+
+def build_item(
+    title: str,
+    *,
+    requires: Sequence[str] = (),
+    blocked_by: Sequence[str] = (),
+    assigned_agent: Optional[str] = None,
+    natural_key: Optional[str] = None,
+    source: Optional[str] = None,
+    source_id: Optional[str] = None,
+    kind: Optional[str] = None,
+    subject: Optional[str] = None,
+    period: Optional[str] = None,
+    metadata: Optional[dict] = None,
+    verify: Optional[dict] = None,
+) -> WorkItem:
+    """Derive the natural key, validate the gate, and return the new item.
+
+    Shared by both `create` implementations on purpose. There are two write
+    paths for storage reasons and there is exactly one rule for what a new item
+    IS — and a validation that lives in each of them separately is a validation
+    that will hold in one and not the other, silently, on whichever backend the
+    next deployment happens to use. Everything here refuses BEFORE any store is
+    touched, so a refused create leaves the store byte-identical.
+    """
+    return WorkItem(
+        id=f"w-{uuid.uuid4().hex[:8]}",
+        title=title,
+        requires=list(requires),
+        blocked_by=list(blocked_by),
+        assigned_agent=assigned_agent,
+        natural_key=derive_natural_key(
+            explicit=natural_key,
+            source=source,
+            source_id=source_id,
+            kind=kind,
+            subject=subject,
+            period=period,
+        ),
+        metadata=dict(metadata or {}),
+        verify=gates.validate_gate(verify) if verify is not None else None,
+    )
 
 
 class Queue:
@@ -400,6 +522,7 @@ class Queue:
         subject: Optional[str] = None,
         period: Optional[str] = None,
         metadata: Optional[dict] = None,
+        verify: Optional[dict] = None,
     ) -> WorkItem:
         """Create one item. A duplicate natural key is a LOUD no-op.
 
@@ -411,24 +534,29 @@ class Queue:
 
         Returning rather than raising is deliberate — every ingest path already
         wanted exactly this and hand-rolled it before there was one rule.
+
+        `verify` is the gate, and it is validated HERE — before the lock, before
+        the duplicate check, before anything is written. A malformed gate must
+        never reach storage: the failure mode of a gate that cannot be executed
+        is not an error at execution time, it is a check that silently does
+        nothing while the item reports green. `agentco/gates.py` holds the rules
+        and the refusals.
         """
-        key = derive_natural_key(
-            explicit=natural_key,
+        item = build_item(
+            title,
+            requires=requires,
+            blocked_by=blocked_by,
+            assigned_agent=assigned_agent,
+            natural_key=natural_key,
             source=source,
             source_id=source_id,
             kind=kind,
             subject=subject,
             period=period,
+            metadata=metadata,
+            verify=verify,
         )
-        item = WorkItem(
-            id=f"w-{uuid.uuid4().hex[:8]}",
-            title=title,
-            requires=list(requires),
-            blocked_by=list(blocked_by),
-            assigned_agent=assigned_agent,
-            natural_key=key,
-            metadata=dict(metadata or {}),
-        )
+        key = item.natural_key
 
         with self._locked():
             raw_rows, quarantined = self._read_raw()
@@ -492,7 +620,7 @@ class Queue:
         """
         at = now or _now()
         items = self._read_all()
-        done = {i.id for i in items if i.status == WorkStatus.DONE}
+        done = {i.id for i in items if releases_blockers(i.status)}
         out = []
         for item in items:
             # PENDING, or IN_PROGRESS whose lease has lapsed — the same set
@@ -597,7 +725,7 @@ class Queue:
         # a different field in the same row does not, so this needs no
         # modelling at all.
         raw_rows, _ = self._read_raw()
-        done_ids = {r["id"] for r in raw_rows if r.get("status") == WorkStatus.DONE.value}
+        done_ids = {r["id"] for r in raw_rows if releases_blockers(r.get("status", ""))}
 
         def cas(item: WorkItem) -> dict:
             # Capability BEFORE the CAS checks, on purpose: given a permanent
@@ -658,9 +786,21 @@ class Queue:
             # optimisation, not a correctness requirement.
             claimable = (WorkStatus.PENDING, WorkStatus.IN_PROGRESS)
             if item.status not in claimable:
+                # The two verify states are not terminal, and saying so would
+                # send the reader looking for a finished item. They are settled
+                # against a gate: the work is claimed complete and only the
+                # gate's answer moves it, so a worker cannot pick it back up.
+                because = (
+                    "which is awaiting its verification gate"
+                    if item.status is WorkStatus.AWAITING_VERIFY
+                    else "whose verification gate said no — its own gate has to "
+                    "pass, and a fix belongs in a separate item"
+                    if item.status is WorkStatus.VERIFY_FAILED
+                    else "which is terminal"
+                )
                 raise LeaseError(
                     f"cannot claim {item_id} for {agent!r}: status is "
-                    f"{item.status.value}, which is terminal"
+                    f"{item.status.value}, {because}"
                 )
             return {
                 "status": WorkStatus.IN_PROGRESS,
@@ -687,6 +827,210 @@ class Queue:
             print(f"[work] claim refused: {exc}", file=sys.stderr)
             return None
 
+    # -- gates -----------------------------------------------------------
+
+    def _gate_outcome(
+        self,
+        item: WorkItem,
+        reported: WorkStatus,
+        *,
+        attestation: Optional[dict],
+        submitted_by: Optional[str],
+        metadata: dict,
+    ) -> tuple[WorkStatus, Optional[dict], int]:
+        """Where a reported outcome meets the gate. Mutates `metadata` in place.
+
+        Returns the status the report actually lands as, the evidence to store,
+        and the failure count. Called from inside `fence`, so every refusal here
+        aborts the write with the store byte-identical — a gate that rejects a
+        report must not have moved the item first.
+        """
+        failures = item.verify_failures
+
+        if reported is WorkStatus.FAILED:
+            if attestation is not None:
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=(
+                        f"an attestation was offered while reporting {item.id} "
+                        f"FAILED"
+                    ),
+                    remediation=(
+                        "Report the failure on its own. An attestation is "
+                        "evidence that the work is correct; it has nothing to "
+                        "say about a worker reporting that it is not."
+                    ),
+                )
+            return WorkStatus.FAILED, item.attestation, failures
+
+        if not item.is_gated:
+            if attestation is not None:
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=f"{item.id} declares no gate, so there is nothing to attest to",
+                    remediation=(
+                        "File the item with a `verify` gate if its completion "
+                        "needs evidence. Accepting evidence against no gate "
+                        "would let an item look verified when nothing was ever "
+                        "required of it."
+                    ),
+                )
+            return WorkStatus.DONE, None, failures
+
+        gate = item.verify or {}
+        if gate.get("kind") != "deterministic":
+            if attestation is not None:
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=(
+                        f"{item.id} has a {gate.get('kind')!r} gate, which the "
+                        f"executor may not satisfy itself"
+                    ),
+                    remediation=(
+                        "Report completion without an attestation; the item "
+                        "parks as awaiting_verify and the check is routed to a "
+                        "party other than the executor. That separation is the "
+                        "entire difference between a judged gate and a "
+                        "deterministic one."
+                    ),
+                )
+            metadata["verify_parked_at"] = _iso(_now())
+            return WorkStatus.AWAITING_VERIFY, item.attestation, failures
+
+        if attestation is None:
+            raise Refusal(
+                code=gates.ATTESTATION_REQUIRED,
+                message=(
+                    f"{item.id} has a deterministic gate ({gate.get('check')!r}) "
+                    f"and the report carries no attestation"
+                ),
+                remediation=(
+                    f"Re-run {gate.get('check')!r}, then report again with an "
+                    f"attestation naming the check, its exit status, the "
+                    f"environment it ran in and when. A completion claim on a "
+                    f"gated item is refused without one — silently accepting it "
+                    f"would make the gate report green having checked nothing."
+                ),
+            )
+
+        record = gates.validate_attestation(
+            attestation,
+            gate=gate,
+            submitted_by=submitted_by or "unknown",
+        )
+        if gates.attestation_passes(record):
+            return WorkStatus.DONE, record, failures
+
+        failures += 1
+        metadata["verify_retry"] = {
+            "failures": failures,
+            # The policy, recorded rather than acted on. Spawning a fix item as
+            # a side effect of a report would create work nobody asked this call
+            # to create; the caller reads the decision and does it.
+            "decision": gates.retry_decision(failures),
+            "decided_at": _iso(_now()),
+        }
+        return WorkStatus.VERIFY_FAILED, record, failures
+
+    def attest(
+        self,
+        item_id: str,
+        attestation: dict,
+        submitted_by: str,
+    ) -> Optional[WorkItem]:
+        """Answer a gate. The only transition out of a verify state.
+
+        **A fix item never substitutes for the work it repairs.** A failed unit
+        keeps `VERIFY_FAILED`, and keeps blocking everything downstream, until
+        ITS OWN gate runs again and passes — which is this call. Anything else
+        lets a green sibling stand in for a red original, and the dependency
+        that was waiting on correctness gets released by a different item's
+        success.
+
+        For a `judged` or `human` gate the submitter must not be the party that
+        executed the work. That is not a policy preference: a judged gate exists
+        precisely because the executor is not entitled to mark its own work
+        verified, and a gate that accepts the executor's verdict is a
+        deterministic gate with extra ceremony.
+        """
+        current = self.get(item_id)
+        if current is None:
+            return None
+
+        def verdict(item: WorkItem) -> dict:
+            if not item.is_gated:
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=f"{item.id} declares no gate, so there is nothing to verify",
+                    remediation=(
+                        "Attest only against an item filed with a `verify` "
+                        "gate. Its absence means nobody ever required evidence "
+                        "of this item, and inventing the requirement after the "
+                        "fact would change what its completion meant."
+                    ),
+                )
+            if item.status not in (WorkStatus.AWAITING_VERIFY, WorkStatus.VERIFY_FAILED):
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=(
+                        f"{item.id} is {item.status.value}, not awaiting or "
+                        f"failing verification"
+                    ),
+                    remediation=(
+                        "A gate answers a completion claim. Wait for the item "
+                        "to be reported complete; verifying work that has not "
+                        "claimed to be finished would record a verdict about an "
+                        "execution still in progress."
+                    ),
+                )
+
+            gate = item.verify or {}
+            executor = (item.metadata or {}).get("lease_report", {}).get("reported_by")
+            if gate.get("kind") != "deterministic" and submitted_by and submitted_by == executor:
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=(
+                        f"{submitted_by!r} executed {item.id} and cannot also "
+                        f"verify its {gate.get('kind')!r} gate"
+                    ),
+                    remediation=(
+                        "Route this gate to a worker declaring the `verify` "
+                        "capability, or to a person. The separation is the "
+                        "whole property being bought."
+                    ),
+                )
+
+            record = gates.validate_attestation(attestation, gate=gate, submitted_by=submitted_by)
+            metadata = dict(item.metadata or {})
+            metadata["verify_verdict"] = {
+                "verified_by": submitted_by,
+                "verified_at": _iso(_now()),
+                "passed": gates.attestation_passes(record),
+                "re_verify": item.status == WorkStatus.VERIFY_FAILED,
+            }
+            if gates.attestation_passes(record):
+                metadata.pop("verify_retry", None)
+                return {
+                    "status": WorkStatus.DONE,
+                    "attestation": record,
+                    "metadata": metadata,
+                }
+
+            failures = item.verify_failures + 1
+            metadata["verify_retry"] = {
+                "failures": failures,
+                "decision": gates.retry_decision(failures),
+                "decided_at": _iso(_now()),
+            }
+            return {
+                "status": WorkStatus.VERIFY_FAILED,
+                "attestation": record,
+                "verify_failures": failures,
+                "metadata": metadata,
+            }
+
+        return self._mutate(item_id, verdict)
+
     def report_result(
         self,
         item_id: str,
@@ -694,6 +1038,8 @@ class Queue:
         status: WorkStatus,
         result: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        attestation: Optional[dict] = None,
+        submitted_by: Optional[str] = None,
     ) -> Optional[WorkItem]:
         """Apply a worker's outcome, fenced on `attempt`.
 
@@ -709,6 +1055,28 @@ class Queue:
         The lease is released either way — `leased_by` and `lease_expires_at`
         cleared — while `lease_attempt` is **kept**. The count is the history of
         how many times this item was handed out, and nothing should erase it.
+
+        **On a gated item, DONE is a request, not an outcome.** What it lands as
+        is the gate's to decide (`agentco/gates.py`):
+
+          * `deterministic` — the completing process re-ran the check, so an
+            attestation must arrive WITH the report. Missing, it is refused:
+            that refusal is what buys back the atomicity that folding `attest`
+            into this verb would have given, and it is the reason first-class
+            verbs cost nothing in integrity
+            (`docs/decisions/0002-participation-ladder.md`). Exit 0 lands DONE;
+            anything else lands `VERIFY_FAILED`.
+          * `judged` / `human` — verification is deliberately not the
+            executor's, so the report lands `AWAITING_VERIFY` and an
+            attestation offered here is refused rather than accepted from the
+            wrong party.
+
+        FAILED needs no gate. A gate answers "is this work correct", and a
+        worker reporting its own failure is not making that claim.
+
+        `submitted_by` is the authenticated actor as the transport knows it. It
+        falls back to the lease holder, which was authenticated at claim time —
+        never to anything the body says.
         """
         if status not in TERMINAL:
             raise ValueError(
@@ -745,11 +1113,17 @@ class Queue:
                     f"lease this result came from is no longer current — the "
                     f"work was superseded, not lost."
                 )
-            if item.status in TERMINAL:
+            if item.status in SETTLED:
+                extra = (
+                    " The only way out of a verify state is the gate answering "
+                    "again — see Queue.attest."
+                    if item.status in (WorkStatus.AWAITING_VERIFY, WorkStatus.VERIFY_FAILED)
+                    else ""
+                )
                 raise LeaseError(
                     f"refusing result for {item_id}: it is already "
                     f"{item.status.value}. Reporting over a finished item would "
-                    f"replace a recorded outcome with a later opinion of it."
+                    f"replace a recorded outcome with a later opinion of it.{extra}"
                 )
             metadata = dict(item.metadata or {})
             metadata["lease_report"] = {
@@ -759,8 +1133,17 @@ class Queue:
                 "status": status.value,
                 "idempotency_key": idempotency_key,
             }
+            landed, record, failures = self._gate_outcome(
+                item,
+                status,
+                attestation=attestation,
+                submitted_by=submitted_by or item.leased_by,
+                metadata=metadata,
+            )
             return {
-                "status": status,
+                "status": landed,
+                "attestation": record,
+                "verify_failures": failures,
                 "result": result,
                 "metadata": metadata,
                 "leased_by": None,

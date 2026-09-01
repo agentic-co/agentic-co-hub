@@ -47,9 +47,8 @@ from typing import Callable, Iterator, Optional, Sequence
 
 from agentco import migrations
 from agentco.db import BUSY_TIMEOUT_MS
-from agentco.keys import derive_natural_key
 from agentco.sop import SOP, SopLibrary, SopStatus
-from agentco.work import Queue, WorkError, WorkItem, WorkStatus, _iso, _now
+from agentco.work import Queue, WorkError, WorkItem, WorkStatus, _iso, _now, build_item
 
 # Every WorkItem field is a column of the same name. Asserted at import rather
 # than trusted: adding a field to the dataclass and forgetting the migration
@@ -69,8 +68,16 @@ WORK_COLUMNS: tuple[str, ...] = (
     "metadata",
     "created_at",
     "updated_at",
+    "verify",
+    "attestation",
+    "verify_failures",
 )
 _WORK_JSON_COLUMNS = frozenset({"requires", "blocked_by", "metadata"})
+# JSON columns whose NULL means something. `verify IS NULL` is "ungated", and
+# collapsing it to `{}` on the way in would gate every item ever filed; the
+# same round trip must also give back None rather than an empty dict, or
+# `WorkItem.is_gated` becomes true for everything.
+_WORK_NULLABLE_JSON_COLUMNS = frozenset({"verify", "attestation"})
 # Everything except the primary key: what an update is allowed to touch.
 # `unknown` is not in here on purpose — see migration 0002.
 _WORK_MUTABLE = tuple(c for c in WORK_COLUMNS if c != "id")
@@ -219,6 +226,8 @@ def _item_to_row(item: WorkItem) -> dict:
         value = getattr(item, column)
         if column == "status":
             value = item.status.value
+        elif column in _WORK_NULLABLE_JSON_COLUMNS:
+            value = None if value is None else json.dumps(value)
         elif column in _WORK_JSON_COLUMNS:
             value = json.dumps(value if value is not None else ([] if column != "metadata" else {}))
         row[column] = value
@@ -235,7 +244,12 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     out = dict(json.loads(row["unknown"] or "{}"))
     for column in WORK_COLUMNS:
         value = row[column]
-        out[column] = json.loads(value) if column in _WORK_JSON_COLUMNS else value
+        if column in _WORK_NULLABLE_JSON_COLUMNS:
+            out[column] = None if value is None else json.loads(value)
+        elif column in _WORK_JSON_COLUMNS:
+            out[column] = json.loads(value)
+        else:
+            out[column] = value
     return out
 
 
@@ -297,6 +311,7 @@ class SqlQueue(_SqlBacked, Queue):
         subject: Optional[str] = None,
         period: Optional[str] = None,
         metadata: Optional[dict] = None,
+        verify: Optional[dict] = None,
     ) -> WorkItem:
         """One item, with the same loud duplicate suppression as the JSONL store.
 
@@ -304,24 +319,28 @@ class SqlQueue(_SqlBacked, Queue):
         the unique partial index on `natural_key` is the rule underneath —
         so a concurrent create with the same key converges on one row whether
         or not the check saw it.
+
+        Construction — the natural key and the gate validation — is
+        `work.build_item`, shared with the JSONL path. A second copy of those
+        rules here is the drift this backend is most likely to introduce, and
+        it would show up as a gate refused on one backend and stored on the
+        other.
         """
-        key = derive_natural_key(
-            explicit=natural_key,
+        item = build_item(
+            title,
+            requires=requires,
+            blocked_by=blocked_by,
+            assigned_agent=assigned_agent,
+            natural_key=natural_key,
             source=source,
             source_id=source_id,
             kind=kind,
             subject=subject,
             period=period,
+            metadata=metadata,
+            verify=verify,
         )
-        item = WorkItem(
-            id=f"w-{uuid.uuid4().hex[:8]}",
-            title=title,
-            requires=list(requires),
-            blocked_by=list(blocked_by),
-            assigned_agent=assigned_agent,
-            natural_key=key,
-            metadata=dict(metadata or {}),
-        )
+        key = item.natural_key
 
         with self._write_tx() as conn:
             if key:
