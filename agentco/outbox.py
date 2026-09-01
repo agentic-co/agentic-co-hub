@@ -716,14 +716,27 @@ def drain(outbox: Outbox, publish: Callable[[dict], dict]) -> dict:
 
 
 def _thin(result: Any) -> Any:
-    """Keep the identifiers, drop the bodies.
+    """Keep the identifiers and the outcome, drop the bodies.
 
     A receipt is read in a spliced context block, where every byte is paid for
     by every conversation in the repo. The lease uid or item id is what a caller
     correlates on; the rest of a response is the plane talking to itself.
+
+    **The nested item's status is lifted out, and that is not tidiness.** A
+    gated completion whose gate FAILED is a successful push — the line was
+    delivered, the registry accepted it, and the work is now `verify_failed`.
+    Without the status, that receipt reads `published` and the agent that wrote
+    the line learns nothing: it pushed, something happened, and the thing that
+    happened was its work being rejected. That is the same silence receipts
+    exist to end, arriving through the one path nobody was watching.
     """
     if not isinstance(result, dict):
         return None
     keep = ("leaseUid", "uid", "id", "itemId", "seq", "status", "state")
     thinned = {k: result[k] for k in keep if k in result}
+    item = result.get("item")
+    if isinstance(item, dict):
+        for field in ("id", "status", "verify_failures"):
+            if item.get(field) is not None:
+                thinned.setdefault(field, item[field])
     return thinned or None

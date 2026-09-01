@@ -29,7 +29,7 @@ in exactly the place it should have, the connectors.
 | Scheduling with reservations + silent-schedule audit | ✅ | ⏳ | Catches "this has not run in ten days" |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
-| MCP surface | ✅ | ✅ | 9 tools, stdio, thin wrappers over the same core |
+| MCP surface | ✅ | ✅ | 10 tools of a stated 12, stdio, thin wrappers over the same core |
 | Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
 | Session-hook injection (tier 3) | ✅ | ✅ | Fail-open per dependency; byte-identical uninstall |
 | Outbox + drainer + receipts (L1) | 🆕 | ✅ | `.agentco/outbox.jsonl` plus `agentco drain`; appending a line needs no package on the writer's side. The tier-1 splice carries the instructions, the tier-3 session block carries the receipts — see [`docs/outbox.md`](outbox.md) |
@@ -127,11 +127,11 @@ fixtures, so every work-queue and SOP test is a conformance test. A contract
 proven against one implementation is a description of that implementation.
 
 Twelve tools, and twelve is a ceiling enforced by a test rather than
-remembered. Nine are built: `claim_scope`, `release_scope`, `snapshot`,
-`events`, `work_pull`, `work_report`, `work_create`, `sop_get`, `whoami`.
-Three more are reserved names, not yet tools —
-`attest`, `sop_revise`, `sop_activate`, added to the count by
-`docs/decisions/0002-participation-ladder.md` before any of the three ships.
+remembered. Ten are built: `claim_scope`, `release_scope`, `snapshot`,
+`events`, `work_pull`, `work_report`, `work_create`, `sop_get`, `whoami`,
+`attest`. Two more are reserved names, not yet tools — `sop_revise` and
+`sop_activate`, added to the count by
+`docs/decisions/0002-participation-ladder.md` before either ships.
 A large tool surface costs every calling harness context on every
 tool-choice decision it makes — that is paid by every conversation, not just
 the one using it. A thirteenth tool means deleting one. The count is a proxy

@@ -57,7 +57,7 @@ would only reject later, at a point where the caller has no chance to react.
 ## The push set — and what is deliberately not in it
 
 ```python
-PUSH_VERBS = ("claim_scope", "release_scope", "snapshot", "work_report")
+PUSH_VERBS = ("claim_scope", "release_scope", "snapshot", "work_report", "attest")
 ```
 
 **Any tool may push. No tool may file.** `work_create` is not in the push
@@ -68,11 +68,21 @@ attempt's outcome. Filing work into somebody else's queue is different in
 kind: it has a consequence for a person who did not ask for it, and the
 cheapest write path on the plane should only ever carry the cheap acts.
 
-`attest` is named as reserved but is not in the push set. It is not blocked on
-a decision — it belongs in the push set — it is blocked on there being
-anywhere for the drainer to send it; the transport for `attest` has not
-shipped yet. A line using it gets a refusal that says "not yet", distinct from
-the refusal an unrecognized verb gets, which says "never through this path".
+`attest` joined the set the day its transport shipped. It was the first name on
+the reserved list, and the list works exactly that way: a verb waits for
+somewhere to send it, never for a decision about whether it belongs. A line
+using a still-reserved verb — `sop_revise` and `sop_activate`, which land with
+Phase 4 — gets a refusal that says "not yet", distinct from the refusal an
+unrecognised verb gets, which says "never through this path".
+
+**One deployment constraint follows from `attest` being here, and it is the
+separation rule rather than a limitation of the floor.** The drainer signs with
+the machine credential, so an attestation relayed from the machine that ran the
+work is indistinguishable from the executor grading itself — and a `judged` gate
+refuses it, naming the executor. Answering a judged gate through the outbox
+therefore means the reviewer is somewhere else, which is what a judged gate
+means. A `deterministic` gate is unaffected: there the executor IS the intended
+attester, and its own drainer relaying the evidence is the intended path.
 
 ## Identity: the signature decides the actor
 

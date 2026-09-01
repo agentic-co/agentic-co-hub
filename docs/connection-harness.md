@@ -20,11 +20,11 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | Tier-1 splice (`inject`), session hook | built | L0 |
 | MCP surface, HTTP surface, HMAC | built | L2 |
 | Versioned SOPs, `outcomes_by_version`, drift | built | — |
-| **`verify` payload, gate statuses, attestation** | **absent** | L2/L3 |
+| `verify` payload, gate statuses, attestation | built — on all three transports | L2/L3 |
 | **Outbox + drainer + receipts** | built ([`docs/outbox.md`](outbox.md)) | **L1** |
 | **`verify` capability, judged routing, park clocks** | **absent** | **L3** |
 | **Adjudication tagging, plan-vs-actual, revision proposals** | **absent** | — |
-| **`sop_revise` / `sop_activate` on MCP** | HTTP only | L2 |
+| **`sop_revise` / `sop_activate` on MCP** | HTTP only; reserved in the outbox push set | L2 |
 | Conformance suite | absent | all |
 
 Two of those absences are worth naming plainly. **Nothing in `agentco/`

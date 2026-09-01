@@ -602,3 +602,43 @@ def test_a_deterministic_gate_is_answered_by_its_own_executor_through_the_floor(
         },
     })
     assert drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))["published"] == 1
+
+
+def test_a_failed_gate_is_visible_in_the_receipt_not_hidden_behind_published(tmp_path):
+    """A push that succeeded and work that was rejected are both true at once.
+
+    This is the silence receipts exist to end, arriving through the one path
+    nobody was watching: the line WAS delivered and the registry DID accept it,
+    so the state is `published` and always will be. What the agent needs to know
+    is that its gate said no — and before the item's status was lifted into the
+    receipt, that reached nobody at all.
+    """
+    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    client = TestClient(app)
+    executor = LoopbackRegistry("bigmac", client)
+
+    gate = {"kind": "deterministic", "check": "pytest -q",
+            "max_park_seconds": 900, "on_timeout": "fail"}
+    filed = executor.work_create("ship it", verify=gate)["item"]
+    leased = executor.work_pull()
+
+    box = Outbox(tmp_path / ".agentco")
+    box.push("work_report", {
+        "itemId": filed["id"],
+        "attempt": leased["attempt"],
+        "status": "done",
+        "attestation": {
+            "check": "pytest -q", "exit_status": 1,
+            "environment": "ci/ubuntu-24.04", "at": "2026-09-01T15:00:00+00:00",
+        },
+    }, agent_label="cursor")
+
+    result = drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))
+    assert result["published"] == 1, "the push itself worked — this is not a refusal"
+
+    receipt = box.read_receipts()[-1]
+    assert receipt["state"] == "published"
+    assert receipt["result"]["status"] == "verify_failed", (
+        "the agent that wrote the line has no other way to learn its gate said no"
+    )
+    assert receipt["result"]["verify_failures"] == 1
