@@ -241,10 +241,38 @@ _0002 = (
 _0003 = ("ALTER TABLE events ADD COLUMN agent_label TEXT",)
 
 
+# --------------------------------------------------------------------------- #
+# 0004 — the gate: `verify`, its evidence, and its failure count.
+#
+# `verify` and `attestation` are nullable JSON text, and the NULL is load
+# bearing rather than merely permitted: absent means UNGATED, which is what
+# every item filed before gates existed is. That is the whole of the legacy
+# scope guard — no backfill, no flood of suddenly-unverified work — so a
+# DEFAULT '{}' here would quietly gate the entire existing backlog.
+#
+# `verify_failures` is NOT NULL DEFAULT 0 because "how many times has this
+# item's gate said no" has a correct answer for an ungated item, and it is
+# zero. A nullable counter would make every reader handle a None that cannot
+# happen.
+# --------------------------------------------------------------------------- #
+
+_0004 = (
+    "ALTER TABLE work_items ADD COLUMN verify TEXT",
+    "ALTER TABLE work_items ADD COLUMN attestation TEXT",
+    "ALTER TABLE work_items ADD COLUMN verify_failures INTEGER NOT NULL DEFAULT 0",
+    # The queue's questions about gates are all of the form "what is waiting on
+    # a verdict" — a partial index, because gated items are the minority and an
+    # index over the ungated majority's NULLs pays for nothing.
+    "CREATE INDEX IF NOT EXISTS idx_work_gated ON work_items(status) "
+    "WHERE verify IS NOT NULL",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001),
     Migration(2, "durable-work-and-sops", _0002),
     Migration(3, "events-agent-label", _0003),
+    Migration(4, "work-item-gates", _0004),
 )
 
 
