@@ -292,6 +292,109 @@ def test_in_flight_work_counts_as_neither_outcome(library, queue):
     assert row["successRate"] == 1.0
 
 
+DETERMINISTIC_GATE = {
+    "kind": "deterministic",
+    "check": "pytest -q",
+    "max_park_seconds": 900,
+    "on_timeout": "fail",
+}
+JUDGED_GATE = {
+    "kind": "judged",
+    "check": "a reviewer confirms the runbook step was actually followed",
+    "max_park_seconds": 3600,
+    "on_timeout": "escalate",
+    "escalate_to": "release-owner",
+}
+
+
+def attestation(check: str, exit_status: int = 0) -> dict:
+    return {
+        "check": check,
+        "exit_status": exit_status,
+        "environment": "ci/ubuntu-24.04",
+        "at": "2026-09-01T12:00:00+00:00",
+    }
+
+
+def test_a_gated_instance_awaiting_its_verdict_is_its_own_column(library, queue):
+    """Not a success, not a failure, and not the same as untouched work.
+
+    Before the gate states existed this landed in `inFlight`, where it was
+    indistinguishable from an instance nobody had started — which is the
+    difference between "this procedure is slow to verify" and "nobody is running
+    it", two findings that prompt opposite responses.
+    """
+    sop = a_sop(library)
+    library.activate(sop.sop_id, 1)
+    item = queue.create("gated instance", metadata={"sop_ref": library.get(sop.sop_id).ref},
+                        verify=JUDGED_GATE)
+    finish(queue, item, WorkStatus.DONE)
+
+    row = library.outcomes_by_version(sop.sop_id, queue)[0]
+    assert (row["awaitingVerify"], row["inFlight"]) == (1, 0)
+    assert (row["done"], row["failed"]) == (0, 0)
+    assert row["successRate"] is None, "an open gate is not a settled outcome"
+    assert row["unresolved"] == 1
+
+
+def test_a_failed_gate_is_reported_and_kept_out_of_the_rate(library, queue):
+    """The most informative number here, and the one most easily buried.
+
+    `verify_failed` says the work claimed the procedure's own definition of done
+    and the gate disagreed — a statement about the PROCEDURE. It still stays out
+    of `successRate`, for the same reason a fractional credit was rejected: a
+    re-verify can overturn it, and a denominator that moves later means today's
+    report and next week's disagree with no run to blame.
+    """
+    sop = a_sop(library)
+    library.activate(sop.sop_id, 1)
+    ref = library.get(sop.sop_id).ref
+    finish(queue, queue.create("clean", metadata={"sop_ref": ref}), WorkStatus.DONE)
+
+    gated = queue.create("gated", metadata={"sop_ref": ref}, verify=DETERMINISTIC_GATE)
+    claimed = queue.claim(gated.id, "worker")
+    queue.report_result(
+        gated.id, claimed.lease_attempt, WorkStatus.DONE,
+        attestation=attestation("pytest -q", exit_status=1),
+    )
+
+    row = library.outcomes_by_version(sop.sop_id, queue)[0]
+    assert row["verifyFailed"] == 1
+    assert (row["done"], row["failed"]) == (1, 0)
+    assert row["successRate"] == 1.0, "the rate covers settled outcomes only"
+    assert row["unresolved"] == 1, "and the row says how much is not settled"
+
+
+def test_a_passing_gate_lands_in_done_like_any_other_completion(library, queue):
+    sop = a_sop(library)
+    library.activate(sop.sop_id, 1)
+    gated = queue.create("gated", metadata={"sop_ref": library.get(sop.sop_id).ref},
+                         verify=DETERMINISTIC_GATE)
+    claimed = queue.claim(gated.id, "worker")
+    queue.report_result(
+        gated.id, claimed.lease_attempt, WorkStatus.DONE, attestation=attestation("pytest -q")
+    )
+    row = library.outcomes_by_version(sop.sop_id, queue)[0]
+    assert (row["done"], row["awaitingVerify"], row["verifyFailed"]) == (1, 0, 0)
+    assert row["successRate"] == 1.0
+
+
+def test_an_instance_behind_an_open_gate_is_still_reported_as_drifted(library, queue):
+    """A parked instance is live work, so a newer active version still strands
+    it. Excluding it would hide exactly the items most likely to be stuck."""
+    sop = a_sop(library)
+    library.activate(sop.sop_id, 1)
+    item = queue.create("gated", metadata={"sop_ref": library.get(sop.sop_id).ref},
+                        verify=JUDGED_GATE)
+    finish(queue, item, WorkStatus.DONE)
+    library.revise(sop.sop_id, inputs="a changed input")
+    library.activate(sop.sop_id, 2)
+
+    [drift] = library.drifted(sop.sop_id, queue)
+    assert drift["itemId"] == item.id
+    assert drift["status"] == "awaiting_verify"
+
+
 def test_every_version_appears_even_with_no_instances(library, queue):
     """A version that produced nothing is a fact worth seeing — it usually means
     it was activated and then immediately replaced."""
