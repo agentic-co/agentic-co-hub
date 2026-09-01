@@ -20,7 +20,7 @@ in exactly the place it should have, the connectors.
 | Snapshots + divergence digest | ✅ | ✅ | No body ever stored; cadence-boundary delivery; pluggable resolvers |
 | Change feed (opaque resumable cursor) | ✅ | ✅ | |
 | HMAC authentication | ✅ | ✅ | Actor from token, never payload |
-| Adoption metrics | ✅ | ✅ | Weekly publishers, time-to-first-event, per-verb latency |
+| Adoption metrics | ✅ | ✅ | Weekly publishers, time-to-first-event, per-verb latency, L1→L2 conversion (null until there is an L1 publisher, never 0) |
 | Work queue + fenced leases | ✅ | ✅ | CAS + fencing token, **proven across 12 real processes** |
 | Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression |
 | SOPs as versioned templates | 🆕 | ✅ | Pinned per instance; outcomes grouped by version |

@@ -268,11 +268,40 @@ _0004 = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0005 — how a call reached us, and which harness said it made it.
+#
+# The adoption question the participation-ladder ADR makes a revisit condition
+# — "the ladder is wrong if L1 does not convert" — is not answerable from the
+# columns `calls` had. The drainer signs as the MACHINE, so an outbox publish
+# and a direct one were the same row shape, and the harness behind the outbox
+# appeared nowhere in this table at all.
+#
+# Both columns are SELF-REPORTED and neither is covered by the signature.
+# That is acceptable here and worth stating rather than discovering later: the
+# threat model for an adoption metric is "am I fooling myself", not "is an
+# attacker lying" — nobody has an incentive to forge their own adoption data.
+# They get the same treatment `events.agent_label` gets, which is to be
+# recorded, reported, and never promoted to an authenticated fact.
+#
+# Nullable, because every row written before this migration reached us somehow
+# and this build cannot say how. A DEFAULT 'direct' would invent history:
+# millions of rows asserting a fact nobody observed.
+# --------------------------------------------------------------------------- #
+
+_0005 = (
+    "ALTER TABLE calls ADD COLUMN agent_label TEXT",
+    "ALTER TABLE calls ADD COLUMN via TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_calls_via ON calls(via, at)",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001),
     Migration(2, "durable-work-and-sops", _0002),
     Migration(3, "events-agent-label", _0003),
     Migration(4, "work-item-gates", _0004),
+    Migration(5, "calls-transport-and-label", _0005),
 )
 
 

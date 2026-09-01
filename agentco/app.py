@@ -146,6 +146,51 @@ def resolve_db_path(path: Optional[str] = None) -> str:
     return resolve_registry_db(path, DB_ENV_VAR, DEFAULT_DB)
 
 
+VIA_HEADER = "x-agentco-via"
+VIA_OUTBOX = "outbox"
+VIA_DIRECT = "direct"
+
+
+def _observed_via(request: Request) -> str:
+    """How this call reached us: `outbox` if the drainer said so, else `direct`.
+
+    Not a guess. Anything arriving here IS a direct call from whatever signed
+    it, unless the caller is the drainer relaying somebody else's line — and the
+    drainer is the only thing that ever sets this header. An unrecognised value
+    is treated as direct rather than stored, because a free-text transport
+    column would be a dimension nobody can group by.
+
+    The header is NOT covered by the signature and is therefore self-reported,
+    exactly as `agentLabel` is. See migration 5 for why that is the right trade
+    for this particular number.
+    """
+    claimed = (request.headers.get(VIA_HEADER) or "").strip().lower()
+    return VIA_OUTBOX if claimed == VIA_OUTBOX else VIA_DIRECT
+
+
+def _observed_label(request: Request, body: bytes) -> Optional[str]:
+    """The caller's self-reported harness name, read defensively.
+
+    Read from the body when it parses and from a header when it does not, so
+    that the rows most worth attributing — the malformed ones, from somebody
+    whose first attempt is going wrong — are not the only rows with no
+    attribution. Never raises: this feeds a metric, and a metric that can fail a
+    request is a liability rather than an instrument.
+    """
+    try:
+        if body:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict) and isinstance(parsed.get("agentLabel"), str):
+                return auth.normalise_agent_label(parsed["agentLabel"])
+    except Exception:  # noqa: BLE001 - see docstring
+        pass
+    header = request.headers.get("x-agentco-agent-label")
+    try:
+        return auth.normalise_agent_label(header) if header else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def create_app(
     db_path: Optional[str] = None,
     keys: Optional[dict[str, str]] = None,
@@ -193,6 +238,14 @@ def create_app(
         started = time.perf_counter()
         body = await request.body()
         actor = "-"
+        # Read BEFORE the try, so a refused call is recorded with the same
+        # transport and label as an accepted one. A refusal is the most
+        # important row in this table — a colleague whose first three POSTs are
+        # refused and who then stops is the adoption failure the gate exists to
+        # detect — and it is worth nothing if the refusals cannot be attributed
+        # to the path they arrived on.
+        via = _observed_via(request)
+        label = _observed_label(request, body)
         try:
             actor = auth.authenticate(
                 dict(request.headers),
@@ -235,6 +288,8 @@ def create_app(
                 actor=actor,
                 status=str(result.get("state", "accepted")) if isinstance(result, dict) else "accepted",
                 latency_ms=elapsed,
+                agent_label=payload.get("agentLabel") or label,
+                via=via,
             )
             return JSONResponse(result)
 
@@ -247,6 +302,8 @@ def create_app(
                 status="refused",
                 code=refusal.code,
                 latency_ms=elapsed,
+                agent_label=label,
+                via=via,
             )
             return JSONResponse(refusal.to_dict(), status_code=refusal.http_status)
 
@@ -259,6 +316,8 @@ def create_app(
                 status="error",
                 code=type(exc).__name__,
                 latency_ms=elapsed,
+                agent_label=label,
+                via=via,
             )
             # Named, never swallowed. A 500 that says nothing teaches the
             # caller the tool lies.
