@@ -116,12 +116,18 @@ tests against both — `tests/conftest.py` parametrises the queue and library
 fixtures, so every work-queue and SOP test is a conformance test. A contract
 proven against one implementation is a description of that implementation.
 
-Nine tools, and nine is a ceiling enforced by a test rather than remembered:
-`claim_scope`, `release_scope`, `snapshot`, `events`, `work_pull`,
-`work_report`, `work_create`, `sop_get`, `whoami`. A large tool surface costs
-every calling harness context on every tool-choice decision it makes — that is
-paid by every conversation, not just the one using it. A tenth tool means
-deleting one.
+Twelve tools, and twelve is a ceiling enforced by a test rather than
+remembered. Nine are built: `claim_scope`, `release_scope`, `snapshot`,
+`events`, `work_pull`, `work_report`, `work_create`, `sop_get`, `whoami`.
+Three more are reserved names, not yet tools —
+`attest`, `sop_revise`, `sop_activate`, added to the count by
+`docs/decisions/0002-participation-ladder.md` before any of the three ships.
+A large tool surface costs every calling harness context on every
+tool-choice decision it makes — that is paid by every conversation, not just
+the one using it. A thirteenth tool means deleting one. The count is a proxy
+for that cost, and the cost is bytes, not names, so a byte budget over the
+registered tools' schemas is published alongside the count
+(`tests/test_mcp_server.py`) and fails if it grows while the count holds.
 
 Over stdio there is no request to sign, so the actor is whatever `AGENTCO_ACTOR`
 asserts at process start — exactly as trustworthy as the process that launched
