@@ -577,6 +577,21 @@ class SopLibrary:
         `successRate` is present but is `None` until at least one instance has
         finished, and never treats in-flight work as either outcome. An
         unreported number must never read as a measured zero.
+
+        **The two verify states get their own columns rather than a share of an
+        outcome.** A gated instance that reported completion is not a success,
+        not a failure, and not the same thing as one nobody has started — and
+        `verify_failed` in particular is the single most informative number here,
+        because it says the work claimed the procedure's own definition of done
+        and the gate disagreed. Folded into `inFlight` it was indistinguishable
+        from untouched work; folded into `failed` it would be a verdict that a
+        later re-verify can overturn.
+
+        Which is why neither enters `successRate`. The denominator is settled
+        outcomes only, for the same reason a fractional credit was rejected: a
+        number that silently moves when a gate answers later means the report you
+        read today does not match the one you read next week, and nobody can
+        tell which run changed.
         """
         by_version: dict[int, dict] = {}
         for sop in self.history(sop_id):
@@ -586,6 +601,8 @@ class SopLibrary:
                 "instances": 0,
                 "done": 0,
                 "failed": 0,
+                "awaitingVerify": 0,
+                "verifyFailed": 0,
                 "inFlight": 0,
                 "successRate": None,
             }
@@ -602,6 +619,10 @@ class SopLibrary:
                 row["done"] += 1
             elif item.status == WorkStatus.FAILED:
                 row["failed"] += 1
+            elif item.status == WorkStatus.AWAITING_VERIFY:
+                row["awaitingVerify"] += 1
+            elif item.status == WorkStatus.VERIFY_FAILED:
+                row["verifyFailed"] += 1
             else:
                 row["inFlight"] += 1
 
@@ -609,6 +630,11 @@ class SopLibrary:
             finished = row["done"] + row["failed"]
             if finished:
                 row["successRate"] = round(row["done"] / finished, 3)
+            # A rate computed over a handful of settled instances while a dozen
+            # sit behind open gates is technically true and reads as the whole
+            # picture. Say how much of the version is still unresolved, in the
+            # same row, rather than leaving the reader to add three columns.
+            row["unresolved"] = row["awaitingVerify"] + row["verifyFailed"] + row["inFlight"]
         return [by_version[v] for v in sorted(by_version)]
 
     def drifted(self, sop_id: str, queue: Queue) -> list[dict]:
