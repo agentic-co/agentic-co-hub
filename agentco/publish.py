@@ -245,6 +245,7 @@ class Registry:
         status: str,
         result: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        attestation: Optional[dict] = None,
     ) -> dict:
         """Report `done` or `failed`, fenced on the attempt the lease was issued under.
 
@@ -257,6 +258,12 @@ class Registry:
             body["result"] = result
         if idempotency_key is not None:
             body["idempotencyKey"] = idempotency_key
+        if attestation is not None:
+            # A gated item refuses a completion claim without this. Sending it
+            # WITH the report is what makes the refusal affordable: the evidence
+            # and the claim arrive together, so there is no window in which an
+            # item is reported done and not yet verified.
+            body["attestation"] = attestation
         return self._call("POST", f"/work/{item_id}/report", body)
 
     def work_list(self, status: Optional[str] = None, ready: bool = False) -> dict:
@@ -282,6 +289,23 @@ class Registry:
     def sop_activate(self, sop_id: str, version: int) -> dict:
         """Make one version the one every reader gets by default."""
         return self._call("POST", f"/sops/{sop_id}/activate", {"version": version})
+
+    def attest(
+        self,
+        item_id: str,
+        attestation: dict,
+        agent_label: Optional[str] = None,
+    ) -> dict:
+        """Answer a gate on a parked item. The submitter comes from the signature.
+
+        The verb a verifier uses, as distinct from the executor's `work_report`:
+        a judged gate exists precisely because the party that did the work may
+        not be the party that says it is correct.
+        """
+        body: dict[str, Any] = {"attestation": attestation}
+        if agent_label:
+            body["agentLabel"] = agent_label
+        return self._call("POST", f"/work/{item_id}/attest", body)
 
     def sop_get(self, sop_id: str, version: Optional[int] = None) -> dict:
         """One version, or the active one. A miss is `sop: null`, not an error."""

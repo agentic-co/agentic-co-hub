@@ -74,14 +74,24 @@ def test_the_push_set_carries_reports_and_not_filings():
     write path — a file anybody with repo access can append to — is not where
     that belongs."""
     assert "work_create" not in PUSH_VERBS
-    assert set(PUSH_VERBS) == {"claim_scope", "release_scope", "snapshot", "work_report"}
+    assert set(PUSH_VERBS) == {
+        "claim_scope",
+        "release_scope",
+        "snapshot",
+        "work_report",
+        "attest",
+    }
 
 
 def test_a_reserved_verb_is_refused_as_not_yet_rather_than_never(box):
-    """`attest` belongs in the push set and has no transport. The refusal has to
-    say which, because "not yet" and "never" are different instructions."""
+    """A verb that belongs in the push set but has no transport yet. The refusal
+    has to say which, because "not yet" and "never" are different instructions.
+
+    `attest` was the first name here and graduated the day its endpoint shipped,
+    which is the behaviour this pair of lists is for: the wait is on the
+    transport, never on the verb."""
     with pytest.raises(Refusal) as caught:
-        box.push(PENDING_VERBS[0], {"itemId": "w-1"})
+        box.push(PENDING_VERBS[0], {"sopId": "sop-1"})
     assert "no transport yet" in caught.value.message
     assert "Hold this line" in caught.value.remediation
 
@@ -303,7 +313,8 @@ def test_work_report_carries_the_line_id_as_its_idempotency_key(box):
     sent: list[dict] = []
 
     class FakeRegistry:
-        def work_report(self, item_id, attempt, status, result=None, idempotency_key=None):
+        def work_report(self, item_id, attempt, status, result=None,
+                        idempotency_key=None, attestation=None):
             sent.append({"itemId": item_id, "idempotencyKey": idempotency_key})
             return {"id": item_id, "status": status}
 
@@ -342,7 +353,7 @@ def test_an_unreadable_watermark_does_not_stop_a_drain(box):
 # --------------------------------------------------------------------------- #
 
 
-KEYS = {"bigmac": "bigmac-secret"}
+KEYS = {"bigmac": "bigmac-secret", "reviewer-box": "reviewer-secret"}
 
 
 class LoopbackRegistry(Registry):
@@ -454,3 +465,140 @@ def test_a_drained_line_is_recorded_as_having_arrived_via_the_outbox(tmp_path):
     # assertion. A metric that counted the current week would report a
     # conversion that a Sunday could take back.
     assert report["conversionCount"] is None
+
+
+def test_a_gate_can_be_answered_through_the_zero_config_floor(tmp_path):
+    """L1 all the way to a closed gate — filed, parked, and verified over the wire.
+
+    This is the proof that Phase 1 and Phase 2 actually meet. Before the
+    transports landed, a gate could be neither created nor satisfied over any
+    path: the property the whole contract rests on worked in-process only, so an
+    outbox publisher could report ordinary work and nothing else.
+
+    The verifier's drainer signs as a DIFFERENT machine, and that is the
+    deployment rather than a detail of the fixture — see the test below.
+    """
+    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    client = TestClient(app)
+    executor = LoopbackRegistry("bigmac", client)
+
+    gate = {
+        "kind": "judged",
+        "check": "a reviewer confirms the rollback was exercised",
+        "max_park_seconds": 3600,
+        "on_timeout": "escalate",
+        "escalate_to": "release-owner",
+    }
+    filed = executor.work_create("migrate the schema", verify=gate)["item"]
+    leased = executor.work_pull()
+    assert leased["state"] == "leased"
+    parked = executor.work_report(filed["id"], leased["attempt"], "done")["item"]
+    assert parked["status"] == "awaiting_verify", "a judged gate parks rather than completes"
+
+    # The reviewer's harness has configured nothing: it appends a line, and the
+    # drainer on THAT machine signs it.
+    box = Outbox(tmp_path / ".agentco")
+    box.push(
+        "attest",
+        {
+            "itemId": filed["id"],
+            "attestation": {
+                "check": gate["check"],
+                "exit_status": 0,
+                "environment": "reviewer laptop",
+                "at": "2026-09-01T15:00:00+00:00",
+            },
+        },
+        agent_label="aider",
+    )
+    result = drain(box, registry_publisher(LoopbackRegistry("reviewer-box", client, via="outbox")))
+    assert result["published"] == 1, result
+
+    closed = executor.work_get(filed["id"])["item"] if hasattr(executor, "work_get") else None
+    rows = list(app.state.conn.execute("SELECT verb, via, agent_label FROM calls WHERE verb='attest'"))
+    assert [(r["verb"], r["via"], r["agent_label"]) for r in rows] == [("attest", "outbox", "aider")]
+    del closed
+
+
+def test_a_judged_gate_cannot_be_closed_from_the_machine_that_executed_it(tmp_path):
+    """The separation rule reaching L1, and the constraint it puts on deployment.
+
+    The drainer signs with the MACHINE credential, so an attestation relayed
+    from the same machine that ran the work is indistinguishable from the
+    executor grading itself — and the plane refuses a verdict it cannot tell
+    apart from self-grading rather than accepting it and hoping.
+
+    That is the rule working, not a hole in L1: answering a judged gate through
+    the zero-config floor requires the reviewer to be somewhere else, which is
+    what a judged gate means. The deterministic case is unaffected, because
+    there the executor IS the intended attester.
+    """
+    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    client = TestClient(app)
+    executor = LoopbackRegistry("bigmac", client)
+
+    gate = {
+        "kind": "judged",
+        "check": "a reviewer confirms the rollback was exercised",
+        "max_park_seconds": 3600,
+        "on_timeout": "escalate",
+        "escalate_to": "release-owner",
+    }
+    filed = executor.work_create("migrate the schema", verify=gate)["item"]
+    leased = executor.work_pull()
+    executor.work_report(filed["id"], leased["attempt"], "done")
+
+    box = Outbox(tmp_path / ".agentco")
+    box.push("attest", {
+        "itemId": filed["id"],
+        "attestation": {
+            "check": gate["check"], "exit_status": 0,
+            "environment": "same laptop", "at": "2026-09-01T15:00:00+00:00",
+        },
+    })
+    result = drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))
+
+    assert result["refused"] == 1 and result["published"] == 0
+    receipt = box.read_receipts()[-1]
+    assert receipt["code"] == "attestation_invalid"
+    assert "cannot also verify" in receipt["message"]
+    assert box.pending() == [], "a refusal is terminal — the registry will say the same thing forever"
+
+
+def test_a_deterministic_gate_is_answered_by_its_own_executor_through_the_floor(tmp_path):
+    """The other half: a deterministic gate is MEANT to be attested by whoever
+    completed it, so the same machine relaying it is the intended path."""
+    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    client = TestClient(app)
+    executor = LoopbackRegistry("bigmac", client)
+
+    gate = {
+        "kind": "deterministic",
+        "check": "pytest -q",
+        "max_park_seconds": 900,
+        "on_timeout": "fail",
+    }
+    filed = executor.work_create("ship it", verify=gate)["item"]
+    leased = executor.work_pull()
+
+    box = Outbox(tmp_path / ".agentco")
+    box.push("work_report", {
+        "itemId": filed["id"],
+        "attempt": leased["attempt"],
+        "status": "done",
+    })
+    # Without the evidence the report is refused, and the receipt says so.
+    refused = drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))
+    assert refused["refused"] == 1
+    assert box.read_receipts()[-1]["code"] == "attestation_required"
+
+    box.push("work_report", {
+        "itemId": filed["id"],
+        "attempt": leased["attempt"],
+        "status": "done",
+        "attestation": {
+            "check": "pytest -q", "exit_status": 0,
+            "environment": "ci/ubuntu-24.04", "at": "2026-09-01T15:00:00+00:00",
+        },
+    })
+    assert drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))["published"] == 1

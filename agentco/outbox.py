@@ -42,10 +42,11 @@ row; the alternative ordering — truncate first, then publish — loses the wri
 outright on the same crash. A silently dropped claim is the failure the registry
 exists to prevent, and a duplicate one is visible and harmless.
 
-`attest` is NOT in the push set yet, and not because it does not belong: it has
-no endpoint on the wire (the Phase 1 transports are still outstanding), and a
-push set naming a verb the drainer cannot deliver would be a queue that fills
-with lines nobody can send.
+`attest` joined the push set when its endpoint shipped. The rule it had to pass
+was never about the verb: a push set naming something the drainer cannot deliver
+is a queue that fills with lines nobody can send, so a verb waits for its
+transport and is refused with "not yet" until then. `sop_revise` and
+`sop_activate` are where `attest` was, and land with Phase 4.
 """
 
 from __future__ import annotations
@@ -78,12 +79,19 @@ PUSH_VERBS: tuple[str, ...] = (
     "release_scope",
     "snapshot",
     "work_report",
+    # Joined the set when its transport shipped. It belongs here on the same
+    # test as the rest: attesting is a statement about work you did, not an act
+    # with a consequence for somebody who did not ask for it. A verifier
+    # answering a judged gate through the zero-config floor is exactly the
+    # participant L1 exists for.
+    "attest",
 )
 
 # Reserved for the push set, blocked on their transport rather than on a
 # decision. Named here so that a line using one gets a refusal that says
 # "not yet" instead of "never", which are different instructions to the caller.
-PENDING_VERBS: tuple[str, ...] = ("attest",)
+# `attest` was the first entry and graduated; these two land with Phase 4.
+PENDING_VERBS: tuple[str, ...] = ("sop_revise", "sop_activate")
 
 LINE_FIELDS = ("line_id", "at", "verb", "payload", "agent_label")
 
@@ -585,12 +593,23 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
                 payload["purpose"],
                 agent_label=label,
             )
+        if verb == "attest":
+            return registry.attest(
+                payload["itemId"], payload["attestation"], agent_label=label
+            )
         if verb == "work_report":
             return registry.work_report(
                 payload["itemId"],
                 payload["attempt"],
                 payload["status"],
                 result=payload.get("result"),
+                # A gated item refuses a completion claim without this, and the
+                # first version of this mapping dropped it on the floor — the
+                # line carried the evidence, the wire did not, and the receipt
+                # said "no attestation" about a push that had one. Every field
+                # the push set accepts has to be forwarded here or the outbox
+                # is a lossy copy of the API it fronts.
+                attestation=payload.get("attestation"),
                 # The line id IS the idempotency key. This is what makes the
                 # at-least-once choice cheap: a drainer that died after the
                 # HTTP call and before settling republishes, and the registry
