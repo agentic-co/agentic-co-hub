@@ -78,7 +78,9 @@ PULL_INSTRUCTION = (
 
 
 def resolve_db_path(path: Optional[str] = None) -> str:
-    return path or os.environ.get(DB_ENV_VAR) or DEFAULT_DB
+    from agentco.stores import resolve_registry_db
+
+    return resolve_registry_db(path, DB_ENV_VAR, DEFAULT_DB)
 
 
 def resolve_work_store(path: Optional[str] = None) -> str:
@@ -119,11 +121,12 @@ def _registry_section(actor: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _work_section(actor: str) -> tuple[Optional[str], Optional[str]]:
-    """Same contract as `_registry_section`, for the work queue file."""
+    """Same contract as `_registry_section`, for the work queue store."""
     try:
-        from agentco.work import Queue, WorkStatus
+        from agentco.stores import open_queue
+        from agentco.work import WorkStatus
 
-        queue = Queue(resolve_work_store())
+        queue = open_queue()
         ready = queue.ready(agent=actor)
         held = [item for item in queue.list() if item.leased_by == actor and item.status == WorkStatus.IN_PROGRESS]
         lines = []
@@ -137,11 +140,11 @@ def _work_section(actor: str) -> tuple[Optional[str], Optional[str]]:
 
 
 def _sop_section() -> tuple[Optional[str], Optional[str]]:
-    """Same contract again, for the SOP library file."""
+    """Same contract again, for the SOP library store."""
     try:
-        from agentco.sop import SopLibrary
+        from agentco.stores import open_sop_library
 
-        library = SopLibrary(resolve_sop_store())
+        library = open_sop_library()
         active = library.list_active()
         return (f"Active SOPs in this library: {len(active)}" if active else None), None
     except Exception as exc:  # noqa: BLE001 - one of the named independent dependencies

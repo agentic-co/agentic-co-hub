@@ -58,6 +58,7 @@ from agentco import auth, db, divergence, events, leases, metrics, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
 from agentco.sop import LINK_FIELD, TEXT_FIELDS, SopError, SopLibrary, resolve_sop_store
+from agentco.stores import open_queue, open_sop_library, resolve_registry_db
 from agentco.work import (
     DEFAULT_LEASE_TTL_S,
     CapabilityError,
@@ -138,7 +139,7 @@ DEFAULT_OPERATOR = "operator"
 
 
 def resolve_db_path(path: Optional[str] = None) -> str:
-    return path or os.environ.get(DB_ENV_VAR) or DEFAULT_DB
+    return resolve_registry_db(path, DB_ENV_VAR, DEFAULT_DB)
 
 
 def create_app(
@@ -155,12 +156,14 @@ def create_app(
     single-node stage-1 service is machinery in search of a problem.
     """
     conn = db.connect(resolve_db_path(db_path))
-    # The queue and the library are files, not tables. One process holds the
-    # lock, which is the same single-writer posture the container documents for
-    # the registry DB — and the reason the MCP server must not be pointed at
-    # these same paths while this app is serving them.
-    queue = Queue(resolve_work_store(work_store))
-    library = SopLibrary(resolve_sop_store(sop_store))
+    # On the default backend the queue and the library are FILES, and one
+    # process holds the lock — the same single-writer posture the container
+    # documents for the registry DB, and the reason the MCP server must not be
+    # pointed at these same paths while this app is serving them. With
+    # `AGENTCO_DB` set they are tables in the registry's own database and that
+    # restriction lifts, which is most of why the backend exists.
+    queue = open_queue(work_store)
+    library = open_sop_library(sop_store)
     app = FastAPI(
         title="AgentCo scope + snapshot registry (stage 1b)",
         description=(

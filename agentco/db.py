@@ -31,8 +31,24 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+from agentco import migrations
 
+# The live schema is now the migration list (`agentco/migrations.py`), because
+# `CREATE TABLE IF NOT EXISTS` on every open has nowhere to put a change that
+# is not a new table. `SCHEMA_VERSION` is the highest migration this build
+# knows; the authority for what a given FILE is at is its own
+# `schema_migrations` table, not this constant.
+SCHEMA_VERSION = migrations.MIGRATIONS[-1].version
+
+# Wait for a held write lock rather than raising at the second writer. Thirty
+# seconds is longer than any transaction in this codebase by three orders of
+# magnitude — if it is ever hit, something is wedged and the timeout is the
+# signal, not the problem.
+BUSY_TIMEOUT_MS = 30_000
+
+# Kept as documentation of the registry core, and read by nothing. The
+# executable copy is migration 1, frozen there so that "version 1" names one
+# schema forever rather than whatever this constant said on the day.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -120,6 +136,11 @@ def connect(path: str | Path) -> sqlite3.Connection:
     transaction, and SQLite's own locking is the serialisation. Row factory is
     set so callers read columns by name — a positional read is how a schema
     addition silently shifts a field.
+
+    `busy_timeout` is set because this file is no longer opened only by the
+    one server process: `SqlQueue` and `SqlSopLibrary` open it too, and a
+    writer that finds the lock held should wait rather than raise
+    `database is locked` at whoever happened to be second.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -127,10 +148,6 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(SCHEMA)
-    conn.execute(
-        "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
-    )
-    conn.commit()
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    migrations.apply(conn)
     return conn

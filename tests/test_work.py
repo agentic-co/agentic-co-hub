@@ -34,11 +34,6 @@ from agentco.work import (
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
 
 
-@pytest.fixture()
-def queue(tmp_path):
-    return Queue(tmp_path / "work.jsonl")
-
-
 # --------------------------------------------------------------------------- #
 # The CAS — one worker, not two
 # --------------------------------------------------------------------------- #
@@ -221,12 +216,12 @@ def test_capability_is_reported_ahead_of_contention(queue):
         queue.claim(item.id, "worker-b", capabilities=["cpu"], now=NOW)
 
 
-def test_a_refused_claim_leaves_the_store_byte_identical(queue):
-    item = queue.create("build", requires=["gpu"])
-    before = queue.path.read_bytes()
+def test_a_refused_claim_leaves_the_store_byte_identical(jsonl_queue):
+    item = jsonl_queue.create("build", requires=["gpu"])
+    before = jsonl_queue.path.read_bytes()
     with pytest.raises(CapabilityError):
-        queue.claim(item.id, "worker-a", capabilities=["cpu"], now=NOW)
-    assert queue.path.read_bytes() == before
+        jsonl_queue.claim(item.id, "worker-a", capabilities=["cpu"], now=NOW)
+    assert jsonl_queue.path.read_bytes() == before
 
 
 # --------------------------------------------------------------------------- #
@@ -422,54 +417,54 @@ def test_ready_does_not_hide_work_a_worker_lacks_capability_for(queue):
     assert item.id in {i.id for i in queue.ready(now=NOW)}
 
 
-def test_an_unknown_column_survives_an_update(queue):
+def test_an_unknown_column_survives_an_update(jsonl_queue):
     """A newer writer's field must not be deleted by an older reader doing a
     routine round trip — that is silent data loss which only shows up as 'the
     field I added keeps disappearing'."""
-    item = queue.create("x")
-    rows = [json.loads(l) for l in queue.path.read_text().splitlines() if l.strip()]
+    item = jsonl_queue.create("x")
+    rows = [json.loads(l) for l in jsonl_queue.path.read_text().splitlines() if l.strip()]
     rows[0]["future_column"] = {"added_by": "a newer version"}
-    queue._write_all(rows)
+    jsonl_queue._write_all(rows)
 
-    queue.claim(item.id, "worker-a", now=NOW)
+    jsonl_queue.claim(item.id, "worker-a", now=NOW)
 
-    after = [json.loads(l) for l in queue.path.read_text().splitlines() if l.strip()]
+    after = [json.loads(l) for l in jsonl_queue.path.read_text().splitlines() if l.strip()]
     assert after[0]["future_column"] == {"added_by": "a newer version"}
     assert after[0]["leased_by"] == "worker-a"
 
 
-def test_a_corrupt_line_is_quarantined_not_fatal_and_not_dropped(queue):
+def test_a_corrupt_line_is_quarantined_not_fatal_and_not_dropped(jsonl_queue):
     """One bad line must not take the store down, and it must not vanish
     either — silently skipping bad data is how a queue loses work and nobody
     finds out for a fortnight."""
-    good = queue.create("good")
-    with queue.path.open("a") as handle:
+    good = jsonl_queue.create("good")
+    with jsonl_queue.path.open("a") as handle:
         handle.write("{not json at all\n")
 
-    items = queue.list()
+    items = jsonl_queue.list()
     assert [i.id for i in items] == [good.id]
-    assert queue.quarantined == [b"{not json at all"]
+    assert jsonl_queue.quarantined == [b"{not json at all"]
 
     # This assertion is the one the test's own name always claimed and never
     # made. "Not dropped" can only be checked against DISK, because disk is the
     # only place it could be dropped from — an in-memory list immediately after
     # a read cannot tell you what the next write will do to the file.
-    queue.create("an unrelated later write")
-    assert b"{not json at all" in queue.path.read_bytes(), (
+    jsonl_queue.create("an unrelated later write")
+    assert b"{not json at all" in jsonl_queue.path.read_bytes(), (
         "an unrelated write erased the quarantined line; quarantine must preserve"
     )
 
 
-def test_the_store_survives_a_write_that_raises(queue, monkeypatch):
+def test_the_store_survives_a_write_that_raises(jsonl_queue, monkeypatch):
     """Atomic replace: a failed write leaves the previous file intact rather
     than a truncated one."""
-    queue.create("x")
-    before = queue.path.read_bytes()
+    jsonl_queue.create("x")
+    before = jsonl_queue.path.read_bytes()
 
     def boom(*args, **kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr("os.replace", boom)
     with pytest.raises(OSError):
-        queue.create("y")
-    assert queue.path.read_bytes() == before
+        jsonl_queue.create("y")
+    assert jsonl_queue.path.read_bytes() == before

@@ -60,6 +60,7 @@ from agentco.keys import NaturalKeyError
 # extra nothing — unlike `app`, which would drag FastAPI in (see above).
 from agentco.publish import Registry, RegistryError
 from agentco.sop import DEFAULT_SOP_STORE, SOP_STORE_ENV_VAR, SopLibrary, resolve_sop_store
+from agentco.stores import open_queue, open_sop_library, resolve_registry_db
 from agentco.work import (
     DEFAULT_LEASE_TTL_S,
     DEFAULT_WORK_STORE,
@@ -88,7 +89,7 @@ CAPABILITIES_ENV_VAR = "AGENTCO_CAPABILITIES"
 
 
 def resolve_db_path(path: Optional[str] = None) -> str:
-    return path or os.environ.get(DB_ENV_VAR) or DEFAULT_DB
+    return resolve_registry_db(path, DB_ENV_VAR, DEFAULT_DB)
 
 
 def resolve_actor(actor: Optional[str] = None) -> str:
@@ -297,8 +298,8 @@ def create_server(
     else:
         backend = _LocalBackend(
             db.connect(resolve_db_path(db_path)),
-            Queue(resolve_work_store(work_store)),
-            SopLibrary(resolve_sop_store(sop_store)),
+            open_queue(work_store),
+            open_sop_library(sop_store),
             who,
             resolve_db_path(db_path),
         )

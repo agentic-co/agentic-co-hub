@@ -24,6 +24,8 @@ in exactly the place it should have, the connectors.
 | Work queue + fenced leases | ✅ | ✅ | CAS + fencing token, **proven across 12 real processes** |
 | Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression |
 | SOPs as versioned templates | 🆕 | ✅ | Pinned per instance; outcomes grouped by version |
+| Durable storage backend (SQLite) | 🆕 | ✅ | Opt-in via `AGENTCO_DB`; same interfaces, conformance-tested against the JSONL default |
+| Numbered schema migrations | 🆕 | ✅ | Applied once, one transaction each, recorded in the file |
 | Scheduling with reservations + silent-schedule audit | ✅ | ⏳ | Catches "this has not run in ten days" |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
@@ -86,6 +88,33 @@ changes:
   }
 }
 ```
+
+### Where the stores live
+
+Two backends behind one set of interfaces, chosen by one variable:
+
+| `AGENTCO_DB` | Work queue | SOP library | Registry |
+|---|---|---|---|
+| unset *(default)* | `work.jsonl` | `sops.jsonl` | `AGENTCO_REGISTRY_DB` |
+| `/path/to/agentco.sqlite3` | that file | that file | that file, unless `AGENTCO_REGISTRY_DB` overrides |
+
+Unset is the default deliberately. JSONL under an advisory lock is greppable
+at 02:00, diffs in review, and lets one corrupt line be quarantined instead of
+taking the store with it — worth more than durability to one person running one
+harness, and that person has to be able to use this before anyone else can.
+
+`AGENTCO_DB` is what a team turns on when more than one process opens the same
+store. It buys real transactions (the fenced claim is `BEGIN IMMEDIATE` plus a
+conditional update, not a read followed by a write), a unique index enforcing
+the idempotency rule rather than a scan that assumes a lock, and numbered
+migrations so a schema change has somewhere to go. `AGENTCO_REGISTRY_DB` still
+wins where it is already set, because turning on the durable backend must not
+silently relocate a registry that already exists.
+
+The two backends are held to one contract by running the same behavioural
+tests against both — `tests/conftest.py` parametrises the queue and library
+fixtures, so every work-queue and SOP test is a conformance test. A contract
+proven against one implementation is a description of that implementation.
 
 Nine tools, and nine is a ceiling enforced by a test rather than remembered:
 `claim_scope`, `release_scope`, `snapshot`, `events`, `work_pull`,
