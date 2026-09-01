@@ -21,7 +21,7 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | MCP surface, HTTP surface, HMAC | built | L2 |
 | Versioned SOPs, `outcomes_by_version`, drift | built | — |
 | **`verify` payload, gate statuses, attestation** | **absent** | L2/L3 |
-| **Outbox + drainer + receipts** | **absent** | **L1** |
+| **Outbox + drainer + receipts** | built ([`docs/outbox.md`](outbox.md)) | **L1** |
 | **`verify` capability, judged routing, park clocks** | **absent** | **L3** |
 | **Adjudication tagging, plan-vs-actual, revision proposals** | **absent** | — |
 | **`sop_revise` / `sop_activate` on MCP** | HTTP only | L2 |
