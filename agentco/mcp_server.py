@@ -9,10 +9,16 @@ functions the HTTP handlers call. Reimplementing the lease fence or the scope
 intersection at this layer would mean two protocols that can drift; there is
 exactly one, and this is a second door into it.
 
-**Tool count is capped at nine, and the cap is enforced by a test, not memory.**
+**Tool count is capped at twelve, and the cap is enforced by a test, not memory.**
 A large surface costs every calling harness context on every single tool-choice
 decision it makes — that cost is paid by every conversation, not just this one.
-Adding a tenth tool means deleting one, not extending the budget.
+0002-participation-ladder.md moved the ceiling from nine to twelve to reserve
+room for `attest`, `sop_revise`, and `sop_activate`; none of the three is built
+yet, and only nine tools are registered below. Adding a thirteenth tool means
+deleting one, not extending the budget. A published byte budget
+(`tests/test_mcp_server.py`) sits alongside the count, because the count is a
+proxy for context cost, and a proxy that stops tracking the thing it measures
+is worse than no proxy.
 
 **Config deliberately does NOT import `agentco.app`.** `app.py` pulls in FastAPI,
 which lives in the `server` extra; this module lives in the `mcp` extra, and a

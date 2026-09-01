@@ -16,6 +16,8 @@ the SDK works.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
@@ -54,14 +56,22 @@ def tool(mcp, name):
 # --------------------------------------------------------------------------- #
 
 
-def test_tool_count_is_capped_at_nine(mcp):
-    """The design states nine as a hard ceiling. A tenth tool must fail this,
-    not slip in because nobody counted."""
+def test_tool_count_is_capped_at_twelve(mcp):
+    """0002-participation-ladder.md moved the ceiling from nine to twelve to
+    make room for `attest`, `sop_revise`, and `sop_activate` — reserved names,
+    none built yet. A thirteenth tool must fail this, not slip in because
+    nobody counted."""
     names = sorted(t.name for t in mcp._tool_manager.list_tools())
-    assert len(names) <= 9, f"{len(names)} tools registered: {names}"
+    assert len(names) <= 12, f"{len(names)} tools registered: {names}"
 
 
-def test_the_nine_tools_are_the_ones_the_design_names(mcp):
+def test_the_nine_implemented_tools_are_the_ones_the_design_names(mcp):
+    """Twelve is the budget, not the roster — three of the twelve are names
+    reserved by the ADR with no tool behind them. This asserts the nine that
+    are actually registered today, and separately that the three reserved
+    names are absent, so the day one of them lands, this test forces whoever
+    lands it to move the name across deliberately rather than the roster
+    drifting out of sync with the ADR on its own."""
     expected = {
         "claim_scope",
         "release_scope",
@@ -75,6 +85,48 @@ def test_the_nine_tools_are_the_ones_the_design_names(mcp):
     }
     names = {t.name for t in mcp._tool_manager.list_tools()}
     assert names == expected
+
+    reserved = {"attest", "sop_revise", "sop_activate"}
+    already_registered = reserved & names
+    assert not already_registered, (
+        f"{already_registered} has shipped: add it to `expected` above AND "
+        "drop it from `reserved` here. The two lists are the roster and the "
+        "ADR's reservations, and a name left in both means nobody decided "
+        "which it is."
+    )
+
+
+# The measured total at the time this test was written: 8,314 bytes across
+# the nine tools above (name + description + JSON input schema, each
+# serialised with a stable separator so formatting can't move the number).
+# 10,000 leaves ~20% headroom for the kind of change that should NOT fail a
+# build — a tightened type, a clarified field description — while still
+# catching the thing the ADR's second revisit condition names: "the ceiling
+# is wrong if schema bytes outgrow the count." Re-measure and update this
+# comment with the new number before raising the budget; never raise it to
+# make a failing test pass without writing down why.
+TOOL_SCHEMA_BYTE_BUDGET = 10_000
+
+
+def test_tool_schema_byte_budget_is_published_and_enforced(mcp, capsys):
+    """Twelve is a count; the README justifies the cap by context cost, which
+    is bytes, not tool names. A roster that holds at twelve while every
+    schema quietly grows a paragraph would satisfy the count test above and
+    still cost every calling harness more context on every turn — this is
+    the test that would catch that, and it prints the measured total so the
+    number can be published alongside the count rather than only checked."""
+    total = 0
+    for t in sorted(mcp._tool_manager.list_tools(), key=lambda t: t.name):
+        payload = {"name": t.name, "description": t.description, "parameters": t.parameters}
+        total += len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+
+    print(f"tool schema bytes: {total} (budget {TOOL_SCHEMA_BYTE_BUDGET})")
+    assert total <= TOOL_SCHEMA_BYTE_BUDGET, (
+        f"tool schemas measure {total} bytes, over the published budget of "
+        f"{TOOL_SCHEMA_BYTE_BUDGET} — the count held at nine but the bytes "
+        "did not; re-measure and either shrink a schema or republish the "
+        "budget with a stated reason"
+    )
 
 
 # --------------------------------------------------------------------------- #
