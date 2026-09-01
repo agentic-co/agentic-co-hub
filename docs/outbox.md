@@ -86,6 +86,30 @@ claimed lease holder. This is the same rule the HTTP and MCP transports
 enforce; the outbox does not get a softer version of it because the write is
 cheaper.
 
+## Discovery: how an agent learns any of this exists
+
+A floor nobody can find is not a floor. The whole premise of L1 is reaching a
+harness that configured nothing — and a harness that configured nothing has, by
+definition, never read this document. So the tier-1 managed block that
+`agentco inject` splices into `CLAUDE.md` / `AGENTS.md` ends with four lines
+that carry the format itself:
+
+```
+To publish from a harness with no AgentCo configuration, append one JSON
+object per line to `.agentco/outbox.jsonl` — a local drainer signs and sends it:
+  {"line_id":"<unique>","at":"<iso8601>","verb":"claim_scope","payload":{"repo":"...","prefixes":["dir/sub"],"intent":"implement"},"agent_label":"<harness name>"}
+Verbs: claim_scope, release_scope, snapshot, work_report. Never set `actor` — the drainer signs. See docs/outbox.md.
+```
+
+That is enough to write a valid line without reading anything else, which is
+the bar it has to clear: the agent reading it is mid-task, in a repo it may
+have opened a minute ago, and will not go and fetch a reference first.
+
+The block is deliberately **static**. It carries no state, so a scheduled
+re-render against unchanged claims stays byte-identical and produces no diff in
+anybody's review — the same property the rest of the repo block already holds.
+It is also identical in every repository, which is what makes it safe to commit.
+
 ## Receipts are not optional polish
 
 An outbox write is fire-and-forget from the writer's side — `push()` returns
