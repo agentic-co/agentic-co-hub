@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import fields
@@ -133,10 +134,39 @@ def connect(path: str | Path) -> sqlite3.Connection:
 
 
 class _SqlBacked:
-    """Connection ownership and the one write-transaction primitive."""
+    """Connection ownership and the one write-transaction primitive.
+
+    **One connection per store, serialised by one lock.** The connection is
+    opened `check_same_thread=False` — the HTTP app is a threaded server
+    holding one store object — and a connection has exactly one transaction.
+    Two threads issuing `BEGIN IMMEDIATE` on it are therefore not two writers
+    contending for the database (which SQLite handles, and which the
+    twelve-process race in `tests/test_sqlstore.py` proves); they are two
+    callers contending for the same session, and the second gets `cannot start
+    a transaction within a transaction` — with the first one's transaction
+    still open and now carrying the second's half-written intent.
+
+    The lock is the simplest correct answer for this design, and the
+    alternative was considered and rejected: a connection per thread would
+    make `BEGIN IMMEDIATE` genuinely concurrent, but it also fragments the CAS
+    story — the fenced compare-and-swap is documented and tested as one
+    transaction on one connection, and thread-local connections turn "the
+    write lock is held across the read" into a claim about whichever
+    connection this thread happened to get. Contention here is per-process and
+    already bounded by SQLite's single-writer rule; the lock costs nothing the
+    database was not going to charge anyway.
+
+    It is an `RLock` because the SOP library nests: `_locked()` opens the
+    transaction and the read and write inside it take the same lock. A plain
+    `Lock` would turn that into a silent hang, which is the one failure mode
+    worse than the error it replaces.
+    """
 
     def _open(self, path: str | Path) -> None:
         self.path = Path(path)
+        # Before the connection: a caller that raced `_open` must never find
+        # the attribute missing.
+        self._tx_lock = threading.RLock()
         self._conn = connect(self.path)
 
     @contextmanager
@@ -148,14 +178,31 @@ class _SqlBacked:
         which is what makes the CAS and the fence safe to express as ordinary
         exceptions — the same property the JSONL store gets from doing its
         read-modify-write inside one flock.
+
+        Held for the whole transaction, `BEGIN` through `COMMIT`: the lock is
+        what makes "one transaction" true of the connection and not merely of
+        the SQL text.
         """
-        self._conn.execute("BEGIN IMMEDIATE")
-        try:
+        with self._tx_lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._conn
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+
+    @contextmanager
+    def _read_tx(self) -> Iterator[sqlite3.Connection]:
+        """A read that must not observe another thread's open transaction.
+
+        The connection is shared, so a SELECT issued while another thread is
+        mid-`_write_tx` reads that thread's UNCOMMITTED rows — it is the same
+        session, not a second reader. Reads therefore queue behind writes on
+        the same lock rather than being merely "atomic enough".
+        """
+        with self._tx_lock:
             yield self._conn
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
 
     def close(self) -> None:
         self._conn.close()
@@ -197,9 +244,14 @@ class SqlQueue(_SqlBacked, Queue):
 
     def __init__(self, path: Path | str = "agentco.sqlite3"):
         self._open(path)
-        # The JSONL store's quarantine has no analogue here: a row either
-        # satisfies the schema or was never inserted. Kept as an empty list so
-        # callers that read it — the health check does — need no backend test.
+        # Empty for the same reason it is empty on the JSONL side after a
+        # read: a row this version cannot MODEL is not a quarantined line.
+        # `Queue._read_all` says so at length — such a row is dropped from the
+        # modelled set and left in place, and counting it here would report it
+        # twice. `_read_raw` therefore returns no quarantine, and the write
+        # paths refuse the row by name instead. What genuinely cannot happen
+        # here is the JSONL case this list exists for: a byte sequence that is
+        # not a record at all.
         self.quarantined: list[bytes] = []
 
     # -- storage ---------------------------------------------------------
@@ -219,12 +271,14 @@ class SqlQueue(_SqlBacked, Queue):
         )
 
     def _row(self, item_id: str) -> Optional[sqlite3.Row]:
-        return self._conn.execute(
-            "SELECT * FROM work_items WHERE id = ?", (item_id,)
-        ).fetchone()
+        with self._read_tx() as conn:
+            return conn.execute(
+                "SELECT * FROM work_items WHERE id = ?", (item_id,)
+            ).fetchone()
 
     def _read_raw(self) -> tuple[list[dict], list[bytes]]:
-        rows = self._conn.execute("SELECT * FROM work_items ORDER BY rowid").fetchall()
+        with self._read_tx() as conn:
+            rows = conn.execute("SELECT * FROM work_items ORDER BY rowid").fetchall()
         return [_row_to_dict(r) for r in rows], []
 
     # -- creation --------------------------------------------------------
@@ -275,7 +329,26 @@ class SqlQueue(_SqlBacked, Queue):
                     "SELECT * FROM work_items WHERE natural_key = ?", (key,)
                 ).fetchone()
                 if existing_row is not None:
-                    existing = WorkItem.from_json(json.dumps(_row_to_dict(existing_row)))
+                    try:
+                        existing = WorkItem.from_json(json.dumps(_row_to_dict(existing_row)))
+                    except (ValueError, TypeError) as exc:
+                        # The same boundary `work.py` holds on the JSONL side,
+                        # in the same words. `status` is a TEXT column, so a
+                        # newer writer's value is stored happily and only fails
+                        # when this version tries to model it — and it fails
+                        # here, on the duplicate scan, which means filing ANY
+                        # item whose natural key matches would otherwise die
+                        # with a bare enum error and duplicate suppression
+                        # would stop working. It is the one thing the key
+                        # exists to do.
+                        raise WorkError(
+                            f"cannot suppress a duplicate of {key!r}: the "
+                            f"existing row is not readable by this version "
+                            f"({type(exc).__name__}: {exc}). The row is "
+                            f"preserved in the database. Creating a second item "
+                            f"under the same key would be worse than refusing "
+                            f"— upgrade, or repair the row."
+                        ) from exc
                     print(
                         f"[work] DUPLICATE-SUPPRESSED key={key!r} "
                         f"title={title!r} held-by={existing.id}",
@@ -307,7 +380,20 @@ class SqlQueue(_SqlBacked, Queue):
             ).fetchone()
             if row is None:
                 return None
-            target = WorkItem.from_json(json.dumps(_row_to_dict(row)))
+            try:
+                target = WorkItem.from_json(json.dumps(_row_to_dict(row)))
+            except (ValueError, TypeError) as exc:
+                # `_read_all` tolerates this row and every write path must
+                # refuse it — a row this version cannot model is not a row it
+                # may act on. Raising inside the transaction rolls it back, so
+                # the refusal writes nothing.
+                raise WorkError(
+                    f"cannot act on {item_id}: its stored row is not readable "
+                    f"by this version ({type(exc).__name__}: {exc}). The row is "
+                    f"preserved in the database. Upgrade, or repair the row — "
+                    f"this version must not overwrite a record it cannot "
+                    f"understand."
+                ) from exc
             # What the row looked like when the decision was made. The UPDATE
             # is conditioned on both, so if the row moved between the SELECT
             # and the UPDATE the write does not land — and the mismatch is
@@ -393,7 +479,13 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
 
     def __init__(self, path: Path | str = "agentco.sqlite3"):
         self._open(path)
-        self.quarantined: list[bytes] = []
+        # Rows this version cannot model, as raw `sqlite3.Row`s. The JSONL
+        # library keeps raw BYTES here for the same reason: the point is to
+        # carry the record through untouched, and anything parsed enough to
+        # be a `SOP` is by definition not what is in this list. `revise()`
+        # only asks whether it is empty and how long it is, so the two shapes
+        # satisfy the same contract.
+        self.quarantined: list[sqlite3.Row] = []
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -401,13 +493,34 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
             yield
 
     def _read_all(self) -> list[SOP]:
-        rows = self._conn.execute(
-            "SELECT * FROM sops ORDER BY sop_id, version"
-        ).fetchall()
-        self.quarantined = []
-        return [_row_to_sop(r) for r in rows]
+        """Every readable version. An unreadable row is quarantined, not fatal.
 
-    def _write_all(self, sops: Sequence[SOP], quarantined: Sequence[bytes] = ()) -> None:
+        The parity that matters is with `SopLibrary._read_all`, which catches
+        per LINE. Letting `_row_to_sop` raise out of here instead made ONE row
+        written by a newer version — a `status` value this build has no name
+        for, in a TEXT column that stores it happily — brick every SOP
+        operation on the backend: `get`, `history`, `list_active`, `create`,
+        `revise`, `activate`, all of which read through here.
+
+        Populating `self.quarantined` is the other half, and it is not
+        cosmetic: `revise()` refuses when it is non-empty, because the next
+        version is `max(...) + 1` over what could be PARSED, so an invisible
+        row silently frees its number for reissue to different text. With this
+        list hardcoded empty, that refusal could never fire on this backend.
+        """
+        with self._read_tx() as conn:
+            rows = conn.execute("SELECT * FROM sops ORDER BY sop_id, version").fetchall()
+        out: list[SOP] = []
+        quarantined: list[sqlite3.Row] = []
+        for row in rows:
+            try:
+                out.append(_row_to_sop(row))
+            except (ValueError, TypeError):
+                quarantined.append(row)
+        self.quarantined = quarantined
+        return out
+
+    def _write_all(self, sops: Sequence[SOP], quarantined: Sequence = ()) -> None:
         """Replace the table's contents. Called only inside `_locked`.
 
         The delete-then-insert is safe precisely because it is inside the
@@ -415,12 +528,37 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
         or the whole new one. Doing this outside a transaction would expose an
         instant in which every SOP has been destroyed — and `_write_all`'s own
         docstring in `sop.py` explains what a lost version row costs.
+
+        Two things survive the delete that the `SOP` dataclass cannot carry:
+
+          * **`unknown`**, per version, read back before the DELETE and
+            re-attached to the row it belongs to. It is deliberately absent
+            from `SOP_COLUMNS` — nothing here models those fields — and a
+            rewrite that simply omitted it reset a newer writer's field to
+            `{}` on every create, revise and activate. Migration 0002 promises
+            the opposite in as many words, and the queue keeps that promise;
+            this is the SOP side of it.
+          * **Quarantined rows**, re-inserted verbatim. Same promise the JSONL
+            `_write_all` keeps by writing the raw lines back out: preserving
+            the bytes is what stops the data being lost, and only `revise()`'s
+            refusal stops the NUMBER being reused. Dropping them here would
+            make the refusal moot by deleting the thing it protects.
         """
-        quoted = ", ".join(_quote(c) for c in SOP_COLUMNS)
-        placeholders = ", ".join("?" for _ in SOP_COLUMNS)
-        self._conn.execute("DELETE FROM sops")
-        for sop in sops:
-            self._conn.execute(
-                f"INSERT INTO sops ({quoted}) VALUES ({placeholders})",
-                _sop_to_row(sop),
-            )
+        columns = SOP_COLUMNS + ("unknown",)
+        quoted = ", ".join(_quote(c) for c in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        insert = f"INSERT INTO sops ({quoted}) VALUES ({placeholders})"
+        with self._read_tx() as conn:
+            preserved = {
+                (row["sop_id"], row["version"]): row["unknown"]
+                for row in conn.execute("SELECT sop_id, version, unknown FROM sops")
+            }
+            conn.execute("DELETE FROM sops")
+            for sop in sops:
+                conn.execute(
+                    insert,
+                    _sop_to_row(sop)
+                    + (preserved.get((sop.sop_id, sop.version), "{}"),),
+                )
+            for row in quarantined:
+                conn.execute(insert, tuple(row[c] for c in columns))

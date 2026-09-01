@@ -241,6 +241,19 @@ def apply(conn: sqlite3.Connection, pending: Sequence[Migration] = MIGRATIONS) -
     Python's legacy implicit-transaction handling, an explicit `BEGIN
     IMMEDIATE` inside an already-open implicit transaction raises, and the
     whole point of the per-migration transaction is that it is explicit.
+
+    **The decision to run a migration is taken under the lock, not before it.**
+    The first read of the ledger is an optimisation — it lets a fully migrated
+    file skip straight to returning `[]` without taking a write lock at all —
+    but it is read with no lock held, so it is only ever a hint. Two processes
+    opening the same FRESH file both see an empty ledger; whichever loses the
+    race for `BEGIN IMMEDIATE` would then re-run a migration that has just been
+    applied. The DDL is `IF NOT EXISTS` and survives that, but the ledger INSERT
+    hits the primary key, and the loser's whole open fails with an
+    `IntegrityError` — on the ordinary cold start where two services pointed at
+    the same `AGENTCO_DB` come up together. So the version is re-checked inside
+    the transaction, where the answer cannot change under us, and an
+    already-applied migration is skipped rather than repeated.
     """
     done = applied_versions(conn)
     previous = conn.isolation_level
@@ -252,17 +265,27 @@ def apply(conn: sqlite3.Connection, pending: Sequence[Migration] = MIGRATIONS) -
                 continue
             conn.execute("BEGIN IMMEDIATE")
             try:
-                for statement in migration.statements:
-                    conn.execute(statement)
-                conn.execute(
-                    "INSERT INTO schema_migrations(version, name, applied_at) "
-                    "VALUES (?, ?, ?)",
-                    (
-                        migration.version,
-                        migration.name,
-                        datetime.now(timezone.utc).isoformat(),
-                    ),
+                # The authoritative check: the write lock is held, so no other
+                # process can apply this version between here and the COMMIT.
+                already = (
+                    conn.execute(
+                        "SELECT 1 FROM schema_migrations WHERE version = ?",
+                        (migration.version,),
+                    ).fetchone()
+                    is not None
                 )
+                if not already:
+                    for statement in migration.statements:
+                        conn.execute(statement)
+                    conn.execute(
+                        "INSERT INTO schema_migrations(version, name, applied_at) "
+                        "VALUES (?, ?, ?)",
+                        (
+                            migration.version,
+                            migration.name,
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
             except BaseException:
                 # Loudly, and all the way out. A migration that fails halfway
                 # and is swallowed leaves a file whose ledger disagrees with
@@ -270,7 +293,14 @@ def apply(conn: sqlite3.Connection, pending: Sequence[Migration] = MIGRATIONS) -
                 conn.execute("ROLLBACK")
                 raise
             conn.execute("COMMIT")
-            newly.append(migration.version)
+            done.add(migration.version)
+            if not already:
+                # Only what THIS call applied. The loser of the race must not
+                # report having migrated a file it found already migrated —
+                # the return value is what a caller logs, and two processes
+                # both claiming to have applied version 1 is the same
+                # ambiguity the ledger exists to remove.
+                newly.append(migration.version)
     finally:
         conn.isolation_level = previous
     return newly

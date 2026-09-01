@@ -32,12 +32,17 @@ secret does. It is exactly as trustworthy as the process that launched it.
 `AGENTCO_SECRET`) and every tool proxies to that registry over HTTP instead of
 opening files. Without it, nothing changes and the stores are local.
 
-The remote mode is not a convenience. The stores are a SQLite file and two
-JSONL files under an OS lock — single-host by construction — so a harness that
-is not on the registry's filesystem could previously push a scope claim through
-`publish.py` and never pull a work item at all. It also means a machine running
-this server in remote mode must NOT also be pointed at the same paths locally:
-two writers is the blindness the registry exists to remove.
+The remote mode is not a convenience. On the default backend the stores are a
+SQLite file and two JSONL files under an OS lock — single-host by construction
+— so a harness that is not on the registry's filesystem could previously push
+a scope claim through `publish.py` and never pull a work item at all. It also
+means a machine running this server in remote mode must NOT also be pointed at
+the same paths locally: two writers is the blindness the registry exists to
+remove. With `AGENTCO_DB` set (agentco/stores.py) the work queue and the SOP
+library are tables in the registry database, and the local-write restriction
+lifts — several processes on the one host may hold it at once. What remote
+mode still buys is the machine boundary: a database file is not shared by
+being named from another host.
 
 In remote mode the identity is checked, because now there is a signature: the
 actor is whoever the shared secret authenticates as, and the registry ignores

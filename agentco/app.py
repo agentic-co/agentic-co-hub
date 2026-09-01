@@ -27,10 +27,14 @@ is one for a laptop.
     `POST /sops/{id}/activate`    — make one version the default for every reader
     `GET  /sops`, `GET /sops/{id}?version=`
 
-The queue and the library are FILES under an OS lock, not tables. One process
-holds that lock, which is why the MCP server must not be pointed at the same
-paths while this app is serving them — two writers is the blindness the
-registry exists to remove, in a different store.
+On the default backend the queue and the library are FILES under an OS lock,
+not tables. One process holds that lock, which is why the MCP server must not
+be pointed at the same paths while this app is serving them — two writers is
+the blindness the registry exists to remove, in a different store. With
+`AGENTCO_DB` set (agentco/stores.py) they are tables in the registry database
+instead, and that restriction lifts: concurrent writers are what the database
+is for, and every mutation is a `BEGIN IMMEDIATE` transaction rather than a
+whole-file rewrite.
 
 **No admission chain, no kinds, no RBAC, no resource model.** Those are stage
 2 and stage 2 only happens if the adoption gate passes (docs/roadmap.md). The handlers here are
