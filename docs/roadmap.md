@@ -32,6 +32,7 @@ in exactly the place it should have, the connectors.
 | MCP surface | ✅ | ✅ | 9 tools, stdio, thin wrappers over the same core |
 | Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
 | Session-hook injection (tier 3) | ✅ | ✅ | Fail-open per dependency; byte-identical uninstall |
+| Outbox + drainer + receipts (L1) | 🆕 | ✅ | `.agentco/outbox.jsonl` plus `agentco drain`; appending a line needs no package on the writer's side. The tier-1 splice carries the instructions, the tier-3 session block carries the receipts — see [`docs/outbox.md`](outbox.md) |
 
 ### How AgentCo reaches a harness at all
 
@@ -59,6 +60,15 @@ the same module normalised every `\r\n` in the target file to `\n` and persisted
 it — one render re-encoded a whole file, far outside the managed block. It shipped
 green, because every test fixture was authored with `write_text()`, which cannot
 produce a CRLF file at all.
+
+These four tiers are all the plane reaching the harness. The opposite
+direction — a harness nobody configured reaching the plane — had no floor
+until the outbox: everything a harness could *do*, as opposed to read, sat
+behind tier 2's one config line. The
+[participation-ladder ADR](decisions/0002-participation-ladder.md) names that
+gap **L1** and closes it the same way tier 1 closes the read side — a file the
+harness already has permission to touch, this time written rather than read.
+See [`docs/outbox.md`](outbox.md).
 
 **Tier-1 content is repo-scoped, never per-person.** Live scope claims belong in
 a shared file because they are meant to be public — that is the point of the

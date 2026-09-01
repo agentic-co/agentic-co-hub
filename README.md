@@ -93,6 +93,13 @@ exist, and is dry-run by default.
 Tiers 1 and 3 also carry *the instruction to pull* — which is what stops tier 2 being a
 tool the model has to remember on its own.
 
+That diagram is the read direction. Writing back had the same problem until recently: every
+verb that mattered sat behind tier 2's one config line, so a harness that configured nothing
+could read the splice and do nothing with it — an audience, not a participant. A harness at
+that level is now **L1**: it publishes by appending a line to `.agentco/outbox.jsonl`, no
+config and no credential needed on its side, and a local drainer signs and delivers it. See
+[`docs/outbox.md`](docs/outbox.md) and the [participation-ladder ADR](docs/decisions/0002-participation-ladder.md).
+
 ## What it is not
 
 **It is not your system of record.** Jira, Azure DevOps, Linear and GitHub Issues stay
