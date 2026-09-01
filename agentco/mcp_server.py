@@ -13,8 +13,9 @@ exactly one, and this is a second door into it.
 A large surface costs every calling harness context on every single tool-choice
 decision it makes — that cost is paid by every conversation, not just this one.
 0002-participation-ladder.md moved the ceiling from nine to twelve to reserve
-room for `attest`, `sop_revise`, and `sop_activate`; none of the three is built
-yet, and only nine tools are registered below. Adding a thirteenth tool means
+room for `attest`, `sop_revise` and `sop_activate`. `attest` shipped with the
+Phase 1 transports; the other two land with Phase 4, so ten are registered
+below and two names are held. Adding a thirteenth tool means
 deleting one, not extending the budget. A published byte budget
 (`tests/test_mcp_server.py`) sits alongside the count, because the count is a
 proxy for context cost, and a proxy that stops tracking the thing it measures
