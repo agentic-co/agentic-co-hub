@@ -266,12 +266,34 @@ def test_the_repo_block_names_who_is_working_where(monkeypatch):
 def test_the_repo_block_carries_no_personal_state(monkeypatch):
     """THE test for this split. The target is a file the whole team reads and
     most repos commit. One person's snapshots landing there would publish what
-    they are working on to everybody, permanently, through version control."""
+    they are working on to everybody, permanently, through version control.
+
+    Asserted two ways, because the version that only matched keywords was a
+    proxy that broke the moment the block gained a legitimate mention of a verb
+    NAMED `snapshot` — while a real leak of snapshot DATA would have passed it
+    just as happily under a different wording.
+
+    The load-bearing half is the signature: this function has no parameter
+    through which personal state could arrive, so the split is structural
+    rather than remembered. A future editor adding `digest=` or `receipts=`
+    here fails this test and has to come and argue for it, which is the whole
+    point.
+    """
+    import inspect
+
+    params = set(inspect.signature(render_repo_block).parameters) - {"max_bytes"}
+    assert params == {"live_leases", "repo"}, (
+        f"render_repo_block grew a channel for {sorted(params - {'live_leases', 'repo'})}. "
+        "Personal state goes to render_session_block; this block is committed."
+    )
+
     block = render_repo_block([], repo="acme/web-platform")
     lowered = block.lower()
+    # A leaked snapshot or divergence report looks like a pointer and a purpose,
+    # not like the word "snapshot" — so match what the data would look like.
     assert "divergence" not in lowered
-    assert "snapshot" not in lowered
-    assert "your" not in lowered
+    assert "git:/" not in lowered and "http" not in lowered
+    assert "you " not in lowered and "your " not in lowered
 
 
 def test_the_repo_block_says_so_plainly_when_nobody_holds_a_claim():

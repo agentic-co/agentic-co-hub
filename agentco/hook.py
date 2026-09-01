@@ -115,9 +115,35 @@ def _registry_section(actor: str) -> tuple[Optional[str], Optional[str]]:
         conn = db.connect(resolve_db_path())
         digest = divergence.collect(conn)
         conflicts = leases.conflicts_for(conn, actor)
-        return inject.render_session_block(digest, conflicts, actor=actor), None
+        return (
+            inject.render_session_block(
+                digest, conflicts, actor=actor, receipts=_outbox_receipts()
+            ),
+            None,
+        )
     except Exception as exc:  # noqa: BLE001 - one of the named independent dependencies
         return None, f"divergence/scope-conflict check unavailable ({type(exc).__name__}: {exc})"
+
+
+def _outbox_receipts() -> list[dict]:
+    """What came of this machine's outbox pushes. Never raises, never blocks.
+
+    Folded into the registry section rather than given a section of its own,
+    because it shares that section's audience — one person, at session start —
+    and a fourth independently-failing block would cost a paragraph of hook
+    plumbing to report "no receipts" to someone who has never pushed.
+
+    Its own failure is swallowed to a truthful empty list: a missing or
+    unreadable receipts file means there is nothing to tell this person, and a
+    hook that degrades a whole section over an absent optional file is a hook
+    people uninstall.
+    """
+    try:
+        from agentco import outbox
+
+        return outbox.Outbox(outbox.resolve_node_dir()).read_receipts(limit=10)
+    except Exception:  # noqa: BLE001 - optional content, never load-bearing
+        return []
 
 
 def _work_section(actor: str) -> tuple[Optional[str], Optional[str]]:

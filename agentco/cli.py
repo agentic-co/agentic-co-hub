@@ -348,6 +348,82 @@ def _ado_connector(args) -> "ado.Connector":
     return replace(base, **overrides)
 
 
+def cmd_drain(args) -> int:
+    """Publish everything in the outbox, once, and say what happened.
+
+    This is the other half of L1: an agent appends a line with no credential
+    and no package, and this signs it with the machine's. Run it on a schedule
+    — a drainer nobody scheduled is a file nobody reads, and the agent that
+    wrote the line has already exited by the time anyone notices.
+
+    Exit status is about the RUN, not about the lines. A refused line is a
+    successful drain that carries bad news: the line reached the registry, the
+    registry declined it, and the receipt says why. Non-zero is reserved for
+    "this drain could not do its job" — no credential, or nothing to sign with
+    — because a cron job that exits non-zero on somebody else's malformed
+    payload trains its owner to ignore the alert.
+    """
+    from agentco import outbox as outbox_mod
+    from agentco.publish import Registry
+
+    box = outbox_mod.Outbox(outbox_mod.resolve_node_dir(args.node_dir))
+
+    pending = box.pending()
+    if args.dry_run:
+        report = {
+            "state": "dry-run",
+            "nodeDir": str(box.dir),
+            "pending": [{"lineId": r["line_id"], "verb": r["verb"]} for r in pending],
+        }
+        print(json.dumps(report, indent=2) if args.json else _drain_text(report))
+        return 0
+
+    missing = [v for v in ("AGENTCO_ACTOR", "AGENTCO_SECRET", "AGENTCO_URL") if not os.environ.get(v)]
+    if missing:
+        print(
+            f"cannot drain: {', '.join(missing)} not set. The drainer holds the "
+            f"machine credential — that is the whole reason the agent side needs "
+            f"none. Set these where the SCHEDULER can see them (a launchd "
+            f"EnvironmentVariables block, a systemd EnvironmentFile); a shell "
+            f"profile is not read by either.",
+            file=sys.stderr,
+        )
+        return 2
+
+    registry = Registry(
+        os.environ["AGENTCO_ACTOR"],
+        os.environ["AGENTCO_SECRET"],
+        os.environ["AGENTCO_URL"],
+    )
+    result = outbox_mod.drain(box, outbox_mod.registry_publisher(registry))
+    result["nodeDir"] = str(box.dir)
+    print(json.dumps(result, indent=2) if args.json else _drain_text(result))
+    return 0
+
+
+def _drain_text(result: dict) -> str:
+    lines = [f"outbox: {result['nodeDir']}"]
+    if result["state"] == "dry-run":
+        lines.append(f"  {len(result['pending'])} line(s) pending, nothing sent")
+        for row in result["pending"]:
+            lines.append(f"    {row['lineId']}  {row['verb']}")
+        return "\n".join(lines)
+    if result["state"] == "skipped":
+        lines.append(f"  skipped: {result['detail']}")
+        return "\n".join(lines)
+    lines.append(
+        f"  published {result['published']}, refused {result['refused']}, "
+        f"retryable {result['retryable']}, quarantined {result['quarantined']}"
+    )
+    for receipt in result.get("receipts", []):
+        state = receipt["state"]
+        if state == "published":
+            continue
+        detail = receipt.get("remediation") or receipt.get("detail") or ""
+        lines.append(f"    {state}: {receipt.get('verb') or '?'} — {detail}")
+    return "\n".join(lines)
+
+
 def cmd_keygen(args) -> int:
     """Mint a shared secret for one actor and print the key-file line.
 
@@ -467,6 +543,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="actually file the items; without this, print what would be filed",
     )
     p_ado.set_defaults(func=cmd_ado_pull)
+
+    p_drain = sub.add_parser(
+        "drain",
+        help="publish the outbox and write receipts (L1)",
+    )
+    p_drain.add_argument(
+        "--node-dir",
+        default=None,
+        help="the .agentco directory to drain (default: $AGENTCO_NODE_DIR, then ./.agentco)",
+    )
+    p_drain.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="list what would be published, send nothing, and touch no file",
+    )
+    p_drain.add_argument("--json", action="store_true", help="machine-readable output")
+    p_drain.set_defaults(func=cmd_drain)
 
     p_key = sub.add_parser("keygen", help="mint a shared secret for one actor")
     p_key.add_argument("actor")
