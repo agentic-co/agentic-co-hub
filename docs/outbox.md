@@ -342,3 +342,25 @@ does its job while something is reading it. A `.agentco/outbox.jsonl` that
 grows without a drain job pointed at it is indistinguishable, from the
 writer's side, from one that is delivering — until the receipts never
 arrive.
+
+## Is the floor working?
+
+The ladder is a bet, and the ADR writes down what would falsify it: if the
+harnesses that arrive at L1 never reach L2, the outbox is a terminus rather
+than a floor and the config line was never the obstacle. `agentco metrics`
+reports that as **L1 conversion**, and it has been reported since the day the
+outbox shipped rather than retrofitted once the question came up — the early
+weeks are the ones that answer it, and they are unrecoverable if nothing was
+recording.
+
+Three numbers, because no single one is honest on its own. **L1 harnesses** and
+**L2 publishers** are the population signal: arrivals climbing while direct
+publishers stay flat is the ladder failing, and it needs no identity tracking to
+see. **Authenticated conversions** counts actors observed on both paths, joined
+on the signed actor rather than a self-reported label — a hard lower bound that
+under-counts (a colleague who configures MCP on a *different* machine is
+invisible to it) and never over-counts.
+
+Until an L1 publisher has ever been seen the count reads `—`, not `0`. Those are
+opposite findings and rendering them the same way is how the wrong one gets
+believed.

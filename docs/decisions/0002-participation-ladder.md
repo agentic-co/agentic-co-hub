@@ -92,6 +92,16 @@ do not reach L2 within a trailing window, the outbox is not a floor — it is a
 terminus, and the config line was never the obstacle. The fix would be (a), not
 more outbox features.
 
+*Instrumented 2026-09-01, with L1 itself:* `metrics.l1_conversion`, reported by
+`agentco metrics`. It is deliberately a population measure plus an
+authenticated lower bound rather than a per-person funnel — the drainer signs
+as the machine, so a per-identity join would report zero conversion whether the
+ladder worked or not. The falsification threshold is written into the code
+ahead of any data: three distinct L1 harnesses over eight weeks with no
+authenticated conversion and no L2 growth. Until an L1 publisher is ever seen
+the metric reports `null`, never `0` — "nothing to measure" and "measured, and
+nobody converted" are opposite findings.
+
 **The ceiling is wrong if schema bytes outgrow the count.** Twelve is a count,
 and the README justifies the cap by *context cost*, which is bytes. A byte
 budget is published alongside the count; if it grows while the count holds, the

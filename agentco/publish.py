@@ -80,11 +80,28 @@ class Registry:
     runs until the VM is provisioned; pointing it at the VM is one argument.
     """
 
-    def __init__(self, actor: str, secret: str, base_url: str = DEFAULT_BASE_URL, timeout: int = 15):
+    def __init__(
+        self,
+        actor: str,
+        secret: str,
+        base_url: str = DEFAULT_BASE_URL,
+        timeout: int = 15,
+        via: Optional[str] = None,
+    ):
         self.actor = actor
         self.secret = secret
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # `via="outbox"` marks a call the drainer is relaying on somebody
+        # else's behalf. Left unset by an ordinary caller, because an ordinary
+        # caller IS the direct case and should not have to say so.
+        #
+        # This is what makes the participation ladder's own revisit condition
+        # measurable at all: without it, a line that arrived through the
+        # zero-config floor and a call from a fully configured harness are the
+        # same row, signed by the same machine, and "did L1 convert to L2" has
+        # no data behind it.
+        self.via = via
 
     def _call(self, method: str, path: str, body: Optional[dict] = None, query: str = "") -> dict:
         raw = json.dumps(body).encode() if body is not None else b""
@@ -101,6 +118,7 @@ class Registry:
                 "X-AgentCo-Actor": self.actor,
                 "X-AgentCo-Timestamp": timestamp,
                 "X-AgentCo-Signature": _sign(self.secret, method, path, timestamp, raw),
+                **({"X-AgentCo-Via": self.via} if self.via else {}),
             },
         )
         try:

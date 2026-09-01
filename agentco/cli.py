@@ -173,6 +173,7 @@ def cmd_metrics(args) -> int:
         "latency": metrics.verb_latency(conn),
         "timeToFirstEvent": metrics.time_to_first_event(conn),
         "conflictPrecision": metrics.conflict_precision(conn),
+        "l1Conversion": metrics.l1_conversion(conn),
     }
     if args.json:
         print(json.dumps(report, indent=2))
@@ -193,6 +194,18 @@ def cmd_metrics(args) -> int:
     cp = report["conflictPrecision"]
     print(f"\nConflict precision: {cp['precision']} ({cp['conflictsActedOn']}/{cp['conflictsFired']})")
     print(f"  {cp['verdict']}")
+
+    l1 = report["l1Conversion"]
+    count = l1["conversionCount"]
+    # `—` and `0` are different findings and must not render the same. One says
+    # nobody has arrived at L1 yet; the other says they arrived and stopped.
+    shown = "—" if count is None else str(count)
+    print(f"\nL1 conversion: {shown} authenticated conversion(s)")
+    print(f"  L1 harnesses (last {l1['windowWeeks']}w): {', '.join(l1['l1Labels']) or '—'}")
+    print(f"  L2 publishers (last {l1['windowWeeks']}w): {', '.join(l1['l2Actors']) or '—'}")
+    print(f"  {l1['verdict']}")
+    if l1["ladderFalsified"]:
+        print("  ⚠ LADDER FALSIFIED on its own written criterion — see the ADR's alternative (a)")
     return 0
 
 
@@ -394,6 +407,10 @@ def cmd_drain(args) -> int:
         os.environ["AGENTCO_ACTOR"],
         os.environ["AGENTCO_SECRET"],
         os.environ["AGENTCO_URL"],
+        # Every line this run publishes came from the outbox, which is the one
+        # fact the registry cannot work out for itself: the signature says this
+        # machine, and the machine is the drainer either way.
+        via="outbox",
     )
     result = outbox_mod.drain(box, outbox_mod.registry_publisher(registry))
     result["nodeDir"] = str(box.dir)

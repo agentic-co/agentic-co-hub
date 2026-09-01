@@ -342,6 +342,159 @@ def conflict_precision(
     }
 
 
+
+# The participation ladder's own falsification threshold, written down before
+# any data exists — the same discipline the adoption gate uses, and for the same
+# reason: a threshold chosen after the result is a rationalisation of it.
+LADDER_MIN_L1_LABELS = 3
+LADDER_SPAN_WEEKS = 8
+
+
+def l1_conversion(
+    conn: sqlite3.Connection,
+    *,
+    weeks: int = 4,
+    span_weeks: int = LADDER_SPAN_WEEKS,
+    now: Optional[datetime] = None,
+) -> dict:
+    """Is the outbox a floor people climb from, or a terminus?
+
+    This answers the participation-ladder ADR's first revisit condition — *"the
+    ladder is wrong if L1 does not convert"* — and it is deliberately NOT a
+    per-person funnel, because that framing cannot be computed honestly here.
+    The drainer signs as the MACHINE, so at L1 a harness appears only as an
+    unverified `agent_label`; at L2 the same person configures their own actor,
+    which is a different string and may carry no label at all. "Did label X
+    later appear as actor X" would therefore report zero conversion whether the
+    ladder works or not — a metric that is 0 by construction, which is worse
+    than no metric because somebody will believe it.
+
+    So three numbers, and each says something the others cannot:
+
+      * **l1Labels** — distinct harnesses seen arriving through the outbox.
+      * **l2Actors** — distinct identities publishing directly.
+      * **conversions** — an actor observed BOTH ways. This one joins on the
+        authenticated actor rather than a self-reported string, so it is a hard
+        floor: it under-counts (a colleague who configures MCP on a different
+        machine is invisible to it) and it never over-counts. Read it as a lower
+        bound, and read the first two as the population signal — L1 arrivals
+        climbing while L2 stays flat IS the ladder failing, and needs no join at
+        all.
+
+    **`conversionCount` is None, never 0, until an L1 publisher has ever been
+    seen.** "Nothing to measure yet" and "measured, and nobody converted" are
+    opposite findings, and rendering them identically is how the wrong one gets
+    believed. The same rule the roadmap already states for usage metering.
+
+    The current week is excluded, as it is from the adoption gate: a week in
+    progress always looks like a decline.
+    """
+    at = now or datetime.now(timezone.utc)
+    current = _week_key(at.date())
+    horizon = _week_key(at.date() - timedelta(weeks=span_weeks))
+
+    rows = conn.execute(
+        "SELECT actor, agent_label, via, at FROM calls "
+        "WHERE status = 'accepted' AND verb IN "
+        f"({','.join('?' for _ in PUBLISHING_VERBS)})",
+        PUBLISHING_VERBS,
+    ).fetchall()
+
+    window_weeks = {
+        _week_key(at.date() - timedelta(weeks=i)) for i in range(1, weeks + 1)
+    }
+    span = {_week_key(at.date() - timedelta(weeks=i)) for i in range(1, span_weeks + 1)}
+
+    ever_l1 = False
+    l1_window: set[str] = set()
+    l2_window: set[str] = set()
+    l1_span_labels: set[str] = set()
+    outbox_actors: set[str] = set()
+    direct_actors: set[str] = set()
+    by_week: dict[str, dict[str, int]] = {}
+
+    for row in rows:
+        week = _iso_week(row["at"])
+        if week == current:
+            continue
+        outbox = row["via"] == "outbox"
+        actor = (row["actor"] or "").strip().lower()
+        # A harness that reported no label is still an L1 arrival; it is just an
+        # anonymous one, and bucketing it under the machine keeps it counted
+        # rather than silently dropping the least-configured participants —
+        # exactly the population this metric exists to watch.
+        label = (row["agent_label"] or f"(unlabelled via {actor})").strip().lower()
+        if outbox:
+            ever_l1 = True
+            outbox_actors.add(actor)
+            if week in span:
+                l1_span_labels.add(label)
+            if week in window_weeks:
+                l1_window.add(label)
+        else:
+            direct_actors.add(actor)
+            if week in window_weeks:
+                l2_window.add(actor)
+        if week in span:
+            bucket = by_week.setdefault(week, {"l1": 0, "l2": 0})
+            bucket["l1" if outbox else "l2"] += 1
+
+    conversions = sorted(outbox_actors & direct_actors)
+
+    if not ever_l1:
+        verdict = (
+            "no L1 publishers yet — nothing to measure. This is NOT zero "
+            "conversion; it is an empty numerator and an empty denominator."
+        )
+        falsified = False
+        count: Optional[int] = None
+    else:
+        count = len(conversions)
+        falsified = len(l1_span_labels) >= LADDER_MIN_L1_LABELS and count == 0
+        if falsified:
+            verdict = (
+                f"{len(l1_span_labels)} harnesses arrived through the outbox in "
+                f"{span_weeks} weeks and none has been seen publishing directly. "
+                f"On the ADR's own terms the outbox is a terminus rather than a "
+                f"floor, and the fix is alternative (a) — one config line is the "
+                f"price — not more outbox features. Confirm against the L2 trend "
+                f"before acting: the conversion count is a lower bound."
+            )
+        else:
+            verdict = (
+                f"{count} authenticated conversion(s); {len(l1_window)} L1 and "
+                f"{len(l2_window)} L2 publisher(s) in the trailing {weeks} weeks."
+            )
+
+    return {
+        "metric": "L1-CONVERSION",
+        "question": "is the outbox a floor people climb from, or a terminus?",
+        "windowWeeks": weeks,
+        "weekInProgress": current,
+        "l1Labels": sorted(l1_window),
+        "l2Actors": sorted(l2_window),
+        "conversions": conversions,
+        "conversionCount": count,
+        "everSeenL1": ever_l1,
+        "ladderFalsified": falsified,
+        "falsificationCriterion": (
+            f"≥{LADDER_MIN_L1_LABELS} distinct L1 harnesses over {span_weeks} weeks "
+            f"with zero authenticated conversions, and no growth in L2 publishers"
+        ),
+        "byWeek": {k: by_week[k] for k in sorted(by_week)},
+        "verdict": verdict,
+        "definitions": {
+            "L1": "a call relayed by the outbox drainer (X-AgentCo-Via: outbox)",
+            "L2": "a call made directly by a configured harness",
+            "conversion": "an authenticated actor observed on BOTH paths — a lower "
+            "bound, since a harness configured on another machine is invisible to it",
+            "via/agentLabel": "self-reported, never signed; recorded and never "
+            "promoted to an authenticated fact",
+        },
+        "horizonWeek": horizon,
+    }
+
+
 def record_call(
     conn: sqlite3.Connection,
     *,
@@ -351,6 +504,8 @@ def record_call(
     latency_ms: float,
     code: Optional[str] = None,
     at: Optional[datetime] = None,
+    agent_label: Optional[str] = None,
+    via: Optional[str] = None,
 ) -> None:
     """One row per request, refusals included. The whole of 1d depends on this.
 
@@ -362,8 +517,9 @@ def record_call(
         stamp = (at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         with conn:
             conn.execute(
-                "INSERT INTO calls(verb, actor, status, code, latency_ms, at) VALUES (?,?,?,?,?,?)",
-                (verb, actor, status, code, float(latency_ms), stamp),
+                "INSERT INTO calls(verb, actor, status, code, latency_ms, at, "
+                "agent_label, via) VALUES (?,?,?,?,?,?,?,?)",
+                (verb, actor, status, code, float(latency_ms), stamp, agent_label, via),
             )
     except Exception:  # noqa: BLE001 - see docstring
         pass

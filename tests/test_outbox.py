@@ -355,8 +355,8 @@ class LoopbackRegistry(Registry):
     whole path, so nothing in the middle of it may be a stand-in.
     """
 
-    def __init__(self, actor: str, client: TestClient):
-        super().__init__(actor, KEYS[actor], "http://registry.test")
+    def __init__(self, actor: str, client: TestClient, via: Optional[str] = None):
+        super().__init__(actor, KEYS[actor], "http://registry.test", via=via)
         self.client = client
 
     def _call(self, method: str, path: str, body: Optional[dict] = None, query: str = "") -> dict:
@@ -371,6 +371,10 @@ class LoopbackRegistry(Registry):
                 "X-AgentCo-Timestamp": ts,
                 "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw),
                 "Content-Type": "application/json",
+                # Mirrors `Registry._call`. Without it this stand-in could not
+                # exercise the transport marker at all, and the L1-conversion
+                # metric would be tested only against rows a test wrote by hand.
+                **({"X-AgentCo-Via": self.via} if self.via else {}),
             },
         )
         if response.status_code >= 400:
@@ -415,3 +419,38 @@ def test_a_registry_refusal_comes_back_as_a_refusal_not_a_retry(tmp_path):
     receipt = box.read_receipts()[-1]
     assert receipt["code"] == "scope_too_broad"
     assert "segments" in receipt["remediation"]
+
+
+def test_a_drained_line_is_recorded_as_having_arrived_via_the_outbox(tmp_path):
+    """The join the L1-conversion metric depends on, proven end to end.
+
+    Everything else about that metric could be right and it would still measure
+    nothing if the transport never reached the call ledger — the drainer signs
+    as the machine, so an outbox publish and a direct one are otherwise the same
+    row. This is the test that would fail if the header were dropped anywhere
+    between the drainer and the insert.
+    """
+    from agentco import metrics
+
+    db_path = tmp_path / "registry.sqlite3"
+    app = create_app(db_path=str(db_path), keys=KEYS)
+    client = TestClient(app)
+
+    box = Outbox(tmp_path / ".agentco")
+    box.push("claim_scope", CLAIM, agent_label="cursor")
+    assert drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))["published"] == 1
+
+    # ...and the same machine, later, as a configured harness talking directly.
+    LoopbackRegistry("bigmac", client).claim_scope("acme/app", ["src/web/checkout"], "review")
+
+    rows = list(app.state.conn.execute("SELECT actor, agent_label, via FROM calls ORDER BY id"))
+    assert [r["via"] for r in rows] == ["outbox", "direct"]
+    assert rows[0]["agent_label"] == "cursor"
+    assert {r["actor"] for r in rows} == {"bigmac"}
+
+    report = metrics.l1_conversion(app.state.conn, now=None)
+    # Both calls land in the week in progress, which the metric excludes — so
+    # the honest reading today is still "nothing completed yet", and that is the
+    # assertion. A metric that counted the current week would report a
+    # conversion that a Sunday could take back.
+    assert report["conversionCount"] is None
