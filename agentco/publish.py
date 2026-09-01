@@ -123,6 +123,7 @@ class Registry:
         prefixes: list[str],
         intent: str = "implement",
         ttl_seconds: Optional[int] = None,
+        agent_label: Optional[str] = None,
     ) -> dict:
         """Declare where you are about to work. Advisory — it blocks nothing.
 
@@ -130,27 +131,51 @@ class Registry:
 
         Returns the lease plus `conflicts` — anyone else live in the same
         directories, and under what intent.
+
+        `agent_label` is your harness's own name for itself. It is recorded
+        beside the authenticated actor and rendered explicitly unverified — the
+        signature still decides who acted. It matters most when the caller is
+        the outbox drainer, which signs as the MACHINE: without the label,
+        nothing anywhere records which harness the claim actually came from.
         """
         body: dict[str, Any] = {"repo": repo, "prefixes": prefixes, "intent": intent}
         if ttl_seconds:
             body["ttlSeconds"] = ttl_seconds
+        if agent_label:
+            body["agentLabel"] = agent_label
         return self._call("POST", "/scope-claims", body)
 
-    def release_scope(self, lease_uid: str, action: str = "released") -> dict:
+    def release_scope(
+        self,
+        lease_uid: str,
+        action: str = "released",
+        agent_label: Optional[str] = None,
+    ) -> dict:
         """Close a lease. `action` feeds the scope-model decision's precision metric — pass
         `narrowed` or `released_due_to_conflict` when a reported conflict
         actually changed what you did, because that ratio is what decides
         whether the conflict rule is calibrated."""
-        return self._call("POST", f"/scope-claims/{lease_uid}/release", {"action": action})
+        body: dict[str, Any] = {"action": action}
+        if agent_label:
+            body["agentLabel"] = agent_label
+        return self._call("POST", f"/scope-claims/{lease_uid}/release", body)
 
-    def snapshot(self, artifact_uri: str, purpose: str) -> dict:
+    def snapshot(
+        self,
+        artifact_uri: str,
+        purpose: str,
+        agent_label: Optional[str] = None,
+    ) -> dict:
         """Baseline a document by pointer. The body is never sent or stored.
 
             reg.snapshot("git:/repo#main", "prototype baseline for the redesign")
 
         You get told at the next cadence boundary if it moves.
         """
-        return self._call("POST", "/snapshots", {"artifactUri": artifact_uri, "purpose": purpose})
+        body: dict[str, Any] = {"artifactUri": artifact_uri, "purpose": purpose}
+        if agent_label:
+            body["agentLabel"] = agent_label
+        return self._call("POST", "/snapshots", body)
 
     def events(self, since: Optional[str] = None, limit: int = 200) -> dict:
         """Resume the change feed. Pass the previous `nextCursor` verbatim."""

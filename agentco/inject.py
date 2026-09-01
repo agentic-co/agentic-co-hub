@@ -290,6 +290,29 @@ def render_repo_block(
     else:
         lines.append("  (nobody else is holding a claim here right now)")
 
+    # DISCOVERY, and the reason L1 is reachable at all. An agent that has
+    # configured nothing reads this file and otherwise has no way to learn that
+    # a write path exists — a floor nobody can find is not a floor. Static
+    # text, deliberately: it carries no state, so a scheduled re-render stays
+    # byte-identical, and it is the same four lines in every repo.
+    #
+    # Only the INSTRUCTIONS go here. What came of a push is local to this
+    # checkout and belongs in the per-session block, for the same reason
+    # divergence does — this file is committed, and one machine's receipts are
+    # not the team's business.
+    lines.append("")
+    lines.append("To publish from a harness with no AgentCo configuration, append one JSON")
+    lines.append("object per line to `.agentco/outbox.jsonl` — a local drainer signs and sends it:")
+    lines.append(
+        '  {"line_id":"<unique>","at":"<iso8601>","verb":"claim_scope",'
+        '"payload":{"repo":"...","prefixes":["dir/sub"],"intent":"implement"},'
+        '"agent_label":"<harness name>"}'
+    )
+    lines.append(
+        "Verbs: claim_scope, release_scope, snapshot, work_report. Never set `actor` — "
+        "the drainer signs. See docs/outbox.md."
+    )
+
     return _cap(lines, max_bytes)
 
 
@@ -298,6 +321,7 @@ def render_session_block(
     conflicts: list[dict],
     *,
     actor: str,
+    receipts: Sequence[dict] = (),
     max_bytes: int = DEFAULT_MAX_BLOCK_BYTES,
 ) -> str:
     """One person's state — for a per-session hook, NOT for a shared repo file.
@@ -307,6 +331,17 @@ def render_session_block(
     specifically: the pointers they snapshotted, and the collisions against
     their own claims. Splicing this into a committed file would publish it to
     the whole team.
+
+    `receipts` is what came of this machine's outbox pushes, and it is the
+    answer to the one question an L1 publisher cannot otherwise ask. An outbox
+    write is fire-and-forget: the agent appends a line, exits, and has no way to
+    learn whether it arrived. Without this, the L1 experience is "I pushed and
+    nothing happened", which this project names as the most adoption-lethal
+    outcome available — so a refusal is shown with its remediation, and silence
+    is shown as silence.
+
+    Only the failures are listed. A published line needs no report; the whole
+    reason to spend context here is the line that did NOT land.
     """
     lines = [
         f"AgentCo — for {actor}.",
@@ -330,6 +365,17 @@ def render_session_block(
             lines.append(f"  - {item['purpose']}: {item['artifactUri']}")
     else:
         lines.append("  (no tracked pointer changed since the last check)")
+
+    if receipts:
+        unhappy = [r for r in receipts if r.get("state") != "published"]
+        lines.append("")
+        lines.append(
+            f"Outbox: {len(receipts) - len(unhappy)} published, {len(unhappy)} not"
+        )
+        for receipt in unhappy:
+            detail = receipt.get("remediation") or receipt.get("detail") or ""
+            verb = receipt.get("verb") or "unparseable line"
+            lines.append(f"  - {receipt.get('state')}: {verb} — {detail}")
 
     return _cap(lines, max_bytes)
 
