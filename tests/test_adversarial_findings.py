@@ -66,6 +66,7 @@ from agentco.app import create_app, get_conn
 from agentco.errors import Refusal, Unauthenticated
 from agentco.scope import Scope, prefixes_overlap, scopes_intersect, validate_prefix
 from agentco.sop import SopError, SopLibrary
+from agentco.sqlstore import SqlQueue
 from agentco.work import LeaseError, Queue, WorkError, WorkStatus
 
 NOW = datetime(2026, 8, 28, 12, 0, tzinfo=timezone.utc)
@@ -2188,20 +2189,53 @@ def test_a_render_never_touches_bytes_outside_the_managed_block(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def unmodellable_row_in(queue: Queue, item_id: str = "w-newer") -> dict:
-    """Append a row that is valid JSON and a valid record, but not modellable here.
+def unmodellable_row_in(queue, item_id: str = "w-newer") -> None:
+    """Store a row that is a valid record but not modellable by this version.
 
     A status a NEWER writer knows and this reader does not. Forward
     compatibility is the stated goal of `WorkItem.from_json` dropping unknown
-    columns, so this is the shape that goal implies will exist.
+    columns, so this is the shape that goal implies will exist — and it has to
+    be forged per backend, because neither store's own writer can emit it.
     """
+    if isinstance(queue, SqlQueue):
+        queue._conn.execute(
+            "INSERT INTO work_items (id,title,status,requires,blocked_by,"
+            "lease_attempt,metadata,created_at,updated_at,unknown) "
+            "VALUES (?,?,'cancelled','[]','[]',0,'{}','t','t','{}')",
+            (item_id, "filed by a newer writer"),
+        )
+        return
     row = {"id": item_id, "title": "filed by a newer writer", "status": "cancelled"}
     with queue.path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
-    return row
 
 
-def test_a_row_this_version_cannot_model_never_escapes_as_a_raw_exception(queue):
+def make_unmodellable(queue, item_id: str) -> None:
+    """Same forgery, applied to a row this store already holds."""
+    if isinstance(queue, SqlQueue):
+        queue._conn.execute(
+            "UPDATE work_items SET status = 'cancelled' WHERE id = ?", (item_id,)
+        )
+        return
+    rows = [json.loads(line) for line in queue.path.read_text(encoding="utf-8").splitlines()]
+    for row in rows:
+        if row["id"] == item_id:
+            row["status"] = "cancelled"
+    queue.path.write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+    )
+
+
+def backed_queue(backend: str, tmp_path: Path, name: str = "work"):
+    if backend == "jsonl":
+        return Queue(tmp_path / f"{name}.jsonl")
+    return SqlQueue(tmp_path / f"{name}.sqlite3")
+
+
+@pytest.mark.parametrize("backend", ["jsonl", "sqlite"])
+def test_a_row_this_version_cannot_model_never_escapes_as_a_raw_exception(
+    backend, tmp_path
+):
     """The A1 quarantine boundary does not hold on the paths that WRITE.
 
     `_read_raw`'s docstring: "All three are caught here, at the line, because
@@ -2228,19 +2262,24 @@ def test_a_row_this_version_cannot_model_never_escapes_as_a_raw_exception(queue)
     `_write_all`, which cannot emit a row this reader rejects. The rows that
     trigger this can only come from a newer writer — the exact scenario the
     forward-compatibility design anticipates and no fixture creates.
+
+    **Both backends.** The property is the backend contract's, not JSONL's, and
+    the SQLite store reintroduced exactly this defect: `SqlQueue.create` and
+    `SqlQueue._mutate` both construct a `WorkItem` from a stored row with no
+    guard, so a row the database happily holds — the `status` column is TEXT —
+    comes back out as a bare `ValueError` about an enum. The whole reason to
+    run this body twice is that a fix applied to one implementation says
+    nothing about the other.
     """
-    queue.create("an ordinary item", natural_key="nk-shared")
-    rows = [json.loads(line) for line in queue.path.read_text(encoding="utf-8").splitlines()]
-    rows[0]["status"] = "cancelled"
-    queue.path.write_text(
-        "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
-    )
+    queue = backed_queue(backend, tmp_path)
+    item = queue.create("an ordinary item", natural_key="nk-shared")
+    make_unmodellable(queue, item.id)
 
     with pytest.raises(WorkError):
         queue.create("filed later under the same key", natural_key="nk-shared")
 
-    # The already-fixed half must stay fixed.
-    fresh = Queue(queue.path.parent / "other.jsonl")
+    # The mutation half of the same boundary.
+    fresh = backed_queue(backend, tmp_path, "other")
     fresh.create("an ordinary item")
     unmodellable_row_in(fresh)
     with pytest.raises(WorkError):
