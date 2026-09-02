@@ -14,6 +14,8 @@ and the growth is silent because every step of it looks like correct routing.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from agentco import verifiers
@@ -262,3 +264,130 @@ def test_a_deterministic_gate_asks_no_capability_either(queue):
     assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
     cleared = queue.attest(item.id, attestation("pytest -q"), "executor")
     assert cleared.status is WorkStatus.DONE
+
+
+# --------------------------------------------------------------------------- #
+# The park clock — correctness without liveness is a deadlock with good intentions
+# --------------------------------------------------------------------------- #
+
+SHORT = {"max_park_seconds": 60}
+
+
+def gate(kind="judged", on_timeout="fail", **over):
+    base = {"kind": kind, "check": f"the {kind} criteria", "on_timeout": on_timeout, **SHORT}
+    if on_timeout == "escalate":
+        base["escalate_to"] = "dana"
+    return {**base, **over}
+
+
+def later(seconds=120):
+    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
+def test_a_gate_nobody_answers_resolves_by_its_declared_default(queue):
+    """The ordinary case, not the exception: the reviewer is on holiday, the
+    verifier node is misconfigured, the person left. Without a clock every one of
+    those blocks its dependents forever and the queue's answer to "what is stuck"
+    is silence."""
+    passing = park(queue, gate=gate(on_timeout="pass"), title="defaults to pass")
+    failing = park(queue, gate=gate(on_timeout="fail"), title="defaults to fail")
+
+    assert verifiers.sweep_park_clocks(queue)["resolved"] == [], "not yet due"
+
+    result = verifiers.sweep_park_clocks(queue, now=later())
+    assert {r["item"] for r in result["resolved"]} == {passing.id, failing.id}
+    assert queue.get(passing.id).status is WorkStatus.DONE
+    assert queue.get(failing.id).status is WorkStatus.VERIFY_FAILED
+
+
+def test_a_default_pass_is_never_recorded_as_a_verdict(queue):
+    """**The lie this system must not tell about itself.** An item that completed
+    because nobody looked must stay distinguishable from one that was checked —
+    forever, in the store, to a reader six weeks later. Dies if the clock ever
+    writes an attestation or omits the resolution record."""
+    item = park(queue, gate=gate(on_timeout="pass"))
+    verifiers.sweep_park_clocks(queue, now=later())
+
+    closed = queue.get(item.id)
+    assert closed.status is WorkStatus.DONE
+    assert closed.attestation is None, "no evidence was produced, so none may be stored"
+    resolution = closed.metadata["verify_resolution"]
+    assert resolution["by"] == "park-clock"
+    assert resolution["default"] == "pass"
+    assert "no check was run" in resolution["note"]
+    assert resolution["declared_seconds"] == 60 and resolution["waited_seconds"] >= 60
+
+
+def test_a_default_failure_counts_against_the_retry_policy(queue):
+    """A gate that timed out is a failure of this attempt, so the same policy
+    applies — one fix, then a human, never a third autonomous try."""
+    item = park(queue, gate=gate(on_timeout="fail"))
+    verifiers.sweep_park_clocks(queue, now=later())
+    failed = queue.get(item.id)
+    assert failed.verify_failures == 1
+    assert failed.metadata["verify_retry"]["decision"] == "fix"
+
+
+def test_an_escalating_gate_is_handed_over_and_stays_parked(queue):
+    """Escalation IS the declared outcome there. Closing it would answer a
+    question the gate explicitly said a person should answer."""
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    result = verifiers.sweep_park_clocks(queue, now=later())
+
+    assert result["resolved"] == []
+    assert result["escalated"] == [{"item": item.id, "to": "dana", "waited": 120}]
+    parked = queue.get(item.id)
+    assert parked.status is WorkStatus.AWAITING_VERIFY
+    assert parked.metadata["verify_escalated"]["to"] == "dana"
+
+
+def test_the_sweep_is_idempotent_in_both_directions(queue):
+    """It runs on a cadence. A second pass must resolve nothing and escalate
+    nobody twice — an escalation re-sent every five minutes is how a person
+    learns to filter the channel it arrives on."""
+    park(queue, gate=gate(on_timeout="pass"), title="a")
+    park(queue, gate=gate(kind="human", on_timeout="escalate"), title="b")
+    first = verifiers.sweep_park_clocks(queue, now=later())
+    assert len(first["resolved"]) == 1 and len(first["escalated"]) == 1
+    for _ in range(3):
+        again = verifiers.sweep_park_clocks(queue, now=later())
+        assert again["resolved"] == [] and again["escalated"] == []
+
+
+def test_the_clock_runs_on_parked_gates_only(queue):
+    """A `verify_failed` item waits on a fix, not on a person. A second clock on
+    top of the retry policy would close items whose repair was in progress."""
+    item = park(queue, gate=gate(on_timeout="pass"))
+    queue.attest(item.id, attestation(gate(on_timeout="pass")["check"], exit_status=1),
+                 "reviewer", capabilities=["verify"])
+    assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
+    assert verifiers.sweep_park_clocks(queue, now=later(86400))["resolved"] == []
+    assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
+
+
+def test_a_default_may_not_overwrite_a_real_verdict(queue):
+    """The race: a verifier answers between the sweep listing an item and writing
+    to it. The write is refused inside the lock, so the verdict stands."""
+    item = park(queue, gate=gate(on_timeout="pass"))
+    queue.attest(item.id, attestation(gate(on_timeout="pass")["check"]), "reviewer",
+                 capabilities=["verify"])
+    with pytest.raises(Exception):
+        queue.resolve_by_default(item.id, WorkStatus.VERIFY_FAILED, {"by": "park-clock"})
+    assert queue.get(item.id).attestation is not None
+
+
+def test_a_dry_run_reports_the_deadline_without_moving_anything(queue):
+    item = park(queue, gate=gate(on_timeout="pass"))
+    plan = verifiers.sweep_park_clocks(queue, now=later(), dry_run=True)
+    assert plan["state"] == "dry-run" and len(plan["resolved"]) == 1
+    assert queue.get(item.id).status is WorkStatus.AWAITING_VERIFY
+
+
+def test_an_item_parked_before_the_clock_existed_still_gets_one(queue):
+    """`verify_parked_at` is stamped by this version. An item parked by an earlier
+    one has none, and refusing to start its clock would leave the OLDEST parked
+    gates — the ones most likely to be stuck — as the only ones nothing resolves."""
+    item = park(queue, gate=gate(on_timeout="pass"))
+    queue.annotate(item.id, {"verify_parked_at": None})
+    assert verifiers.due_at(queue.get(item.id)) is not None
+    assert len(verifiers.sweep_park_clocks(queue, now=later())["resolved"]) == 1
