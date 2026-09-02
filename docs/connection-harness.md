@@ -28,17 +28,18 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | **Outbox + drainer + receipts** | built ([`docs/outbox.md`](outbox.md)) | **L1** |
 | `verify` capability, judged routing, park clocks, quarantine digest | built (`agentco verifiers --route --sweep --quarantine`) | L3 |
 | Write-back to an external system of record | built, opt-in ([`docs/writeback.md`](writeback.md)) | — |
-| **Revision policy, adjudication tagging, plan-vs-actual, revision proposals** | **absent** | — |
+| **Revision policy** — three rules an agent revision obeys, on `revise` and `activate` | built ([`agentco/policy.py`](../agentco/policy.py)) | — |
+| **Adjudication tagging, plan-vs-actual, revision proposals** | **absent** | — |
 | **`sop_revise` / `sop_activate` on MCP** | HTTP only; reserved in the outbox push set | L2 |
 | Conformance suite | absent | all |
 
 One of those absences is worth naming plainly. **Shared learning, the headline
 claim, still has no write path on the primary surface**: a harness on MCP can
-read a procedure but cannot contribute a lesson to it. And the one write path
-that does exist, `revise` over HTTP, is unpoliced: any actor with write access
-can revise any procedure to anything. That is Phase 4, and it and Phase 5
-(conformance) are what remains of the phases below — Phases 0 through 3 are
-built.
+read a procedure but cannot contribute a lesson to it. The one write path that
+does exist, `revise` over HTTP, is now policed (P4.0 — the first unit of Phase
+4, built); the loop that would feed it is not. That is the rest of Phase 4, and
+it and Phase 5 (conformance) are what remains of the phases below — Phases 0
+through 3 are built.
 
 ---
 
@@ -151,24 +152,36 @@ it governs already exists over HTTP, and the first real consumer of this phase �
 a harness running defect, feature and data-fix procedures against production
 systems — needs the rails before it needs the loop.
 
-- **Revision policy** — the rules `revise` enforces when the reviser is an
-  agent. Generic to every registry, and each one computable because versions
-  are immutable and the chain records who authored each:
-  1. **Protected tags are immutable to agent revisions.** `money` and
-     `irreversible` ship as the defaults; a registry may add its own. In
-     particular an agent can never remove the human gate a protected step
-     carries.
-  2. **Step class ratchets toward human only.** An agent may turn an AI step
-     into a human one (a deterministic or judged gate into a `human` gate); it
-     may never turn a human step into an AI one.
-  3. **No reintroduction.** A revision may not bring back what a human removed.
-     A human's deletion is final for agents — otherwise humans and agents
-     thrash, each undoing the other.
-  A human reviser is bound by none of these. The policy is about trust domains,
-  not about content, and what it protects — which steps exist, which are human,
-  which carry `money` — is registry content that never lives in the plane. The
-  policy is a refusal at the write boundary, on every transport, with the rule
-  it broke named; a revision the policy refuses leaves the chain byte-identical.
+- **Revision policy** — built. The rules `revise` and `activate` enforce when
+  the reviser is an agent ([`agentco/policy.py`](../agentco/policy.py)). Generic
+  to every registry, and each one computable because versions are immutable and
+  each records its author and whether the operator had declared them human:
+  1. **Protected tags freeze a step against agents.** A version carrying a
+     protected tag — `money` and `irreversible` ship as the defaults; a registry
+     adds its own through `AGENTCO_PROTECTED_TAGS` and can never remove those
+     two — cannot be revised or activated by an agent at all, and no agent
+     revision adds or removes a protected tag on any step. Tags are
+     case-folded, so `Money` is not a way past a rule written for `money`.
+  2. **A step's class ratchets toward human only.** `executor: human | agent`
+     is the class. An agent may make an agent step human; it may never make a
+     human step an agent step, or an unclassified one, which is the same
+     demotion with the label removed.
+  3. **No undoing a human.** An agent revision may not move any field into a
+     state a human moved it away from — bring back what a human removed, remove
+     what a human added, or restore what a human replaced — until a human moves
+     it back. Versions written before authorship was recorded impose nothing.
+  **Who is human is declared, never inferred**: the operator names human actors
+  (`AGENTCO_HUMANS`), everyone else is an agent, and an undeclared registry
+  polices every reviser. The kind comes from the authenticated actor and the
+  declaration, never from the body. A human reviser is bound by none of the
+  rules; what they protect — which steps exist, which are human, which carry
+  `money` — is registry content that never lives in the plane. `activate` is
+  policed against the active version, or the rule an agent cannot break by
+  revising it breaks by re-activating the version from before the human's
+  change. A refusal is HTTP 403 `revision_policy:<rule>`, and it writes
+  nothing. The class and the tags are load-bearing, not labels: `instantiate`
+  refuses an instance of a human or protected step that does not carry a
+  `human` gate, on every transport.
 - **Adjudication tagging** (`good` / `bad`) with the adjudicator's identity and
   pointed evidence. **Adjudicator ≠ executor**, enforced, not documented.
 - **Plan-vs-actual review** generated at the moment of completion, while the
@@ -182,9 +195,9 @@ systems — needs the rails before it needs the loop.
 *Proven by:* the eval harness in [`../evals/`](../evals/README.md), which
 already exists. Phase 4 is the first point at which its `asop_lesson` arm has
 something real to measure — until the loop closes, the lesson channel is
-hand-fed. The policy is proven by mutation, the Phase 1 way: remove any one
-rule and a test that revises a `money`-tagged step, demotes a human gate, or
-resurrects a human's deletion must reach storage.
+hand-fed. The policy was proven by mutation, the Phase 1 way: each rule, the
+lift, the activate path, the instantiate gate and the fail-closed default were
+removed in turn and a test failed each time ([`tests/test_revision_policy.py`](../tests/test_revision_policy.py)).
 
 **Beside this phase, not inside it: decomposition bounds enforced at create.**
 Parent/child on work items; at most six children per parent plus a verify

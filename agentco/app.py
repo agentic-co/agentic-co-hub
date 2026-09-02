@@ -53,15 +53,24 @@ import json
 import os
 import sqlite3
 import time
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, db, divergence, events, leases, metrics, snapshots
+from agentco import auth, db, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
-from agentco.sop import LINK_FIELD, TEXT_FIELDS, SopError, SopLibrary, resolve_sop_store
+from agentco.policy import RevisionPolicyError
+from agentco.sop import (
+    EXECUTOR_FIELD,
+    LINK_FIELD,
+    TAGS_FIELD,
+    TEXT_FIELDS,
+    SopError,
+    SopLibrary,
+    resolve_sop_store,
+)
 from agentco.stores import open_queue, open_sop_library, resolve_registry_db
 from agentco.work import (
     DEFAULT_LEASE_TTL_S,
@@ -76,7 +85,7 @@ from agentco.work import (
 # Derived, never hand-kept: a literal list here would silently drop any field
 # added to sop.py, and the symptom is an SOP that saves without the half the
 # author just wrote.
-SOP_BODY_KEYS = (*TEXT_FIELDS, "common_mistakes", LINK_FIELD)
+SOP_BODY_KEYS = (*TEXT_FIELDS, "common_mistakes", LINK_FIELD, EXECUTOR_FIELD, TAGS_FIELD)
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
@@ -129,6 +138,11 @@ def _work_refusal(exc: Exception) -> Refusal:
         # a conflict, not a malformed body.
         return Refusal(code="work_conflict", message=str(exc),
                        remediation=str(exc), http_status=409)
+    if isinstance(exc, RevisionPolicyError):
+        # 403, not 422: the body was well-formed and the actor authenticated.
+        # What was refused is who asked. `rule` names which of the three.
+        return Refusal(code=f"revision_policy:{exc.rule}", message=str(exc),
+                       remediation=str(exc), http_status=403)
     if isinstance(exc, SopError):
         return Refusal(code="sop_refused", message=str(exc),
                        remediation=str(exc), http_status=422)
@@ -197,8 +211,15 @@ def create_app(
     operator: Optional[str] = None,
     work_store: Optional[str] = None,
     sop_store: Optional[str] = None,
+    humans: Optional[Iterable[str]] = None,
+    protected_tags: Optional[Iterable[str]] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
+
+    `humans` is the set of actors the operator declares human — the revision
+    policy exempts them and polices everyone else. Unset, it is read from
+    `AGENTCO_HUMANS`; unset there too, it is empty and every reviser is an
+    agent. `protected_tags` ADDS to the policy's defaults; it cannot remove them.
 
     One connection for the process, shared across worker threads: SQLite in
     WAL mode with short transactions handles this, and a connection pool for a
@@ -213,6 +234,11 @@ def create_app(
     # restriction lifts, which is most of why the backend exists.
     queue = open_queue(work_store)
     library = open_sop_library(sop_store)
+    declared_humans = frozenset(humans) if humans is not None else policy.humans_from_env()
+    if protected_tags is not None:
+        library.protected_tags = policy.DEFAULT_PROTECTED_TAGS | frozenset(
+            t.lower() for t in protected_tags
+        )
     app = FastAPI(
         title="AgentCo scope + snapshot registry (stage 1b)",
         description=(
@@ -639,7 +665,12 @@ def create_app(
         def work(actor: str, payload: dict) -> dict:
             body = {k: payload[k] for k in SOP_BODY_KEYS if k in payload}
             try:
-                sop = library.create(payload.get("title", ""), **body)
+                sop = library.create(
+                    payload.get("title", ""),
+                    author=actor,
+                    author_kind=policy.kind_of(actor, declared_humans),
+                    **body,
+                )
             except (SopError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             return {"state": "accepted", "sop": json.loads(sop.to_json())}
@@ -653,7 +684,13 @@ def create_app(
         def work(actor: str, payload: dict) -> dict:
             body = {k: payload[k] for k in SOP_BODY_KEYS if k in payload}
             try:
-                sop = library.revise(sop_id, title=payload.get("title"), **body)
+                sop = library.revise(
+                    sop_id,
+                    title=payload.get("title"),
+                    author=actor,
+                    author_kind=policy.kind_of(actor, declared_humans),
+                    **body,
+                )
             except (SopError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             return {"state": "accepted", "sop": json.loads(sop.to_json())}
@@ -674,7 +711,11 @@ def create_app(
                     http_status=400,
                 )
             try:
-                sop = library.activate(sop_id, version)
+                sop = library.activate(
+                    sop_id, version,
+                    author=actor,
+                    author_kind=policy.kind_of(actor, declared_humans),
+                )
             except (SopError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             return {"state": "accepted", "sop": json.loads(sop.to_json())}
@@ -713,6 +754,11 @@ def create_app(
                     subject=payload.get("subject"),
                     period=payload.get("period"),
                     metadata=payload.get("metadata"),
+                    # Forwarded, not assembled: a human step's instance MUST
+                    # carry a human gate, and before this line no gate at all
+                    # could reach an instance filed over HTTP — which would have
+                    # made every human step unreachable from the wire.
+                    verify=payload.get("verify"),
                 )
             except (SopError, WorkError, NaturalKeyError, ValueError) as exc:
                 raise _work_refusal(exc) from exc

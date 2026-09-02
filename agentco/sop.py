@@ -51,6 +51,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
+from agentco import policy
 from agentco.filelock import lock_exclusive, unlock
 from agentco.work import Queue, WorkItem, WorkStatus
 
@@ -79,6 +80,18 @@ TEXT_FIELDS = (
 # moment the link is written. `SopLibrary.chain()` is where a broken link is
 # reported — loudly, by name, rather than by the walk quietly stopping short.
 LINK_FIELD = "next_sop"
+
+# The step's class and its labels. Not TEXT_FIELDS — `executor` is an enum and
+# `tags` a list — and both are what the revision policy (agentco/policy.py)
+# reads. `executor: human` is load-bearing rather than descriptive:
+# `instantiate()` refuses an instance of a human step that does not carry a
+# human gate. A protected tag carries the same requirement.
+EXECUTOR_FIELD = "executor"
+TAGS_FIELD = "tags"
+EXECUTORS = (policy.HUMAN, policy.AGENT)
+# What rule 3 of the policy compares, version to version.
+POLICY_SCALAR_FIELDS = ("title", *TEXT_FIELDS, LINK_FIELD, EXECUTOR_FIELD)
+POLICY_LIST_FIELDS = ("common_mistakes", TAGS_FIELD)
 
 
 class SopError(Exception):
@@ -147,6 +160,17 @@ class SOP:
     # The procedure that follows this one, by id. Makes a process walkable
     # rather than merely described.
     next_sop: Optional[str] = None
+    # Who executes an instance of this step. `human` is load-bearing — see
+    # `instantiate()`. None is unclassified, which the policy reads as `agent`.
+    executor: Optional[str] = None
+    # Lower-cased labels. The protected ones (`money`, `irreversible` by default)
+    # freeze the step against agents — agentco/policy.py.
+    tags: list[str] = field(default_factory=list)
+    # Who wrote this version, and whether the operator had declared them human.
+    # None on versions that predate the record. Rule 3 of the revision policy
+    # is computed from `author_kind`, and only from versions marked `human`.
+    author: Optional[str] = None
+    author_kind: Optional[str] = None
 
     # Set when a later version replaces this one. Kept rather than deleted:
     # instances pinned to this version must stay resolvable forever, or their
@@ -180,7 +204,7 @@ def validate_fields(payload: dict) -> dict:
     believes they wrote one thing and the store holds another, and the
     difference surfaces at handoff time to whoever is least able to notice it.
     """
-    allowed = set(TEXT_FIELDS) | {"common_mistakes", LINK_FIELD}
+    allowed = set(TEXT_FIELDS) | {"common_mistakes", LINK_FIELD, EXECUTOR_FIELD, TAGS_FIELD}
     unknown = set(payload) - allowed
     if unknown:
         raise SopContractError(
@@ -243,7 +267,34 @@ def validate_fields(payload: dict) -> dict:
             )
         out[LINK_FIELD] = link.strip()
 
-    if not out:
+    if EXECUTOR_FIELD in payload and payload[EXECUTOR_FIELD] is not None:
+        executor = payload[EXECUTOR_FIELD]
+        if executor not in EXECUTORS:
+            raise SopContractError(
+                f"'{EXECUTOR_FIELD}' must be one of {list(EXECUTORS)}, got "
+                f"{executor!r} — it names who runs an instance of this step, and "
+                f"the revision policy reads it. Omit the key to leave the step "
+                f"unclassified (which the policy treats as 'agent')."
+            )
+        out[EXECUTOR_FIELD] = executor
+
+    if TAGS_FIELD in payload and payload[TAGS_FIELD] is not None:
+        tags = payload[TAGS_FIELD]
+        if isinstance(tags, (str, dict)) or not isinstance(tags, (list, tuple)):
+            raise SopContractError(
+                f"'{TAGS_FIELD}' must be a LIST of strings, got {type(tags).__name__}."
+            )
+        cleaned_tags: list[str] = []
+        for i, tag in enumerate(tags):
+            if not isinstance(tag, str) or not tag.strip():
+                raise SopContractError(f"'{TAGS_FIELD}'[{i}] must be a non-empty string, got {tag!r}")
+            # Folded, so `Money` is not a way past a rule written for `money`.
+            folded = tag.strip().lower()
+            if folded not in cleaned_tags:
+                cleaned_tags.append(folded)
+        out[TAGS_FIELD] = cleaned_tags
+
+    if not {k for k in out if k != TAGS_FIELD and k != EXECUTOR_FIELD}:
         raise SopContractError(
             "an SOP with no fields set reads as delegation-ready and hands its "
             "executor nothing. Fill at least one field."
@@ -254,9 +305,15 @@ def validate_fields(payload: dict) -> dict:
 class SopLibrary:
     """Versioned SOP storage. Same JSONL-under-a-lock shape as the work queue."""
 
-    def __init__(self, path: Path | str = "sops.jsonl"):
+    def __init__(self, path: Path | str = "sops.jsonl", protected_tags: Optional[Sequence[str]] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # The tags that freeze a step against agents. Injectable for tests;
+        # otherwise the defaults plus whatever the registry added.
+        self.protected_tags = (
+            frozenset(protected_tags) if protected_tags is not None
+            else policy.protected_tags_from_env()
+        )
         # Raw BYTES — a line that failed to decode has no faithful string
         # form, and is carried through every write rather than dropped.
         self.quarantined: list[bytes] = []
@@ -319,12 +376,23 @@ class SopLibrary:
 
     # -- authoring -------------------------------------------------------
 
-    def create(self, title: str, **body) -> SOP:
+    def create(
+        self,
+        title: str,
+        *,
+        author: Optional[str] = None,
+        author_kind: Optional[str] = None,
+        **body,
+    ) -> SOP:
         """Write version 1, as a DRAFT.
 
         Draft rather than active because `instantiate()` refuses a draft: a
         procedure should be readable by the person who will follow it before it
         starts producing work for them.
+
+        `author` / `author_kind` record who wrote it. An unstated kind is
+        `agent` — fail closed, the same reading the policy gives an actor the
+        operator never declared human.
         """
         validated = validate_fields(body)
         sop = SOP(
@@ -332,6 +400,8 @@ class SopLibrary:
             version=1,
             title=title,
             status=SopStatus.DRAFT,
+            author=author,
+            author_kind=author_kind or policy.AGENT,
             **validated,
         )
         with self._locked():
@@ -340,7 +410,15 @@ class SopLibrary:
             self._write_all(existing, self.quarantined)
         return sop
 
-    def revise(self, sop_id: str, title: Optional[str] = None, **body) -> SOP:
+    def revise(
+        self,
+        sop_id: str,
+        title: Optional[str] = None,
+        *,
+        author: Optional[str] = None,
+        author_kind: Optional[str] = None,
+        **body,
+    ) -> SOP:
         """Write the NEXT version. The previous one is superseded, never edited.
 
         Unset fields carry forward from the version being revised, so a change
@@ -350,7 +428,15 @@ class SopLibrary:
         The old version stays in the store with `superseded_by` set. Deleting it
         would orphan every instance pinned to it, and those instances are the
         entire evidence base for whether the revision was an improvement.
+
+        **The revision policy runs here, before anything is written.** When
+        `author_kind` is not `human` — and an unstated kind is not — the three
+        rules in `agentco/policy.py` are checked against the whole history,
+        and a refusal leaves the store byte-identical. This is the write
+        boundary every transport funnels through, which is why the policy
+        lives here and not in a handler.
         """
+        reviser_kind = author_kind or policy.AGENT
         with self._locked():
             all_sops = self._read_all()
             versions = [s for s in all_sops if s.sop_id == sop_id]
@@ -389,6 +475,10 @@ class SopLibrary:
                 carried["common_mistakes"] = list(latest.common_mistakes)
             if latest.next_sop:
                 carried[LINK_FIELD] = latest.next_sop
+            if latest.executor:
+                carried[EXECUTOR_FIELD] = latest.executor
+            if latest.tags:
+                carried[TAGS_FIELD] = list(latest.tags)
             carried.update({k: v for k, v in body.items()})
             validated = validate_fields({k: v for k, v in carried.items() if v is not None})
 
@@ -397,7 +487,19 @@ class SopLibrary:
                 version=latest.version + 1,
                 title=title or latest.title,
                 status=SopStatus.DRAFT,
+                author=author,
+                author_kind=reviser_kind,
                 **validated,
+            )
+            policy.check_revision(
+                history=versions,
+                baseline=latest,
+                proposed=new,
+                reviser_kind=reviser_kind,
+                protected_tags=self.protected_tags,
+                scalar_fields=POLICY_SCALAR_FIELDS,
+                list_fields=POLICY_LIST_FIELDS,
+                action="revise",
             )
             for sop in all_sops:
                 if sop.sop_id == sop_id and sop.superseded_by is None:
@@ -412,8 +514,22 @@ class SopLibrary:
             self._write_all(all_sops, self.quarantined)
         return new
 
-    def activate(self, sop_id: str, version: int) -> SOP:
-        """Make one version the one `instantiate()` uses by default."""
+    def activate(
+        self,
+        sop_id: str,
+        version: int,
+        *,
+        author: Optional[str] = None,
+        author_kind: Optional[str] = None,
+    ) -> SOP:
+        """Make one version the one `instantiate()` uses by default.
+
+        Policed like a revision, measured against the version currently active
+        (or the latest, when none is). Without this, the policy has a door
+        beside it: an agent forbidden from re-adding a step a human removed
+        could simply re-activate the version from before the human removed it.
+        """
+        reviser_kind = author_kind or policy.AGENT
         with self._locked():
             all_sops = self._read_all()
             target = None
@@ -422,6 +538,21 @@ class SopLibrary:
                     target = sop
             if target is None:
                 raise SopError(f"no SOP {sop_id!r} version {version}")
+            versions = [s for s in all_sops if s.sop_id == sop_id]
+            baseline = next(
+                (s for s in versions if s.status == SopStatus.ACTIVE),
+                max(versions, key=lambda s: s.version),
+            )
+            policy.check_revision(
+                history=versions,
+                baseline=baseline,
+                proposed=target,
+                reviser_kind=reviser_kind,
+                protected_tags=self.protected_tags,
+                scalar_fields=POLICY_SCALAR_FIELDS,
+                list_fields=POLICY_LIST_FIELDS,
+                action="activate",
+            )
             for sop in all_sops:
                 if sop.sop_id == sop_id and sop.status == SopStatus.ACTIVE:
                     sop.status = SopStatus.SUPERSEDED
@@ -558,6 +689,25 @@ class SopLibrary:
                 f"generating work from an unactivated procedure hands somebody a "
                 f"half-written instruction with the authority of a published one."
             )
+
+        # A human step, or a protected one, is a step whose instances a human
+        # closes. Enforced here rather than described in the SOP text, because
+        # the class is what the revision policy protects — and protecting a
+        # label that changed nothing would be protecting nothing.
+        protected_here = sorted(set(sop.tags) & self.protected_tags)
+        if sop.executor == policy.HUMAN or protected_here:
+            gate = work_kwargs.get("verify")
+            if not isinstance(gate, dict) or gate.get("kind") != "human":
+                reason = (
+                    f"is a human step" if sop.executor == policy.HUMAN
+                    else f"carries protected tag(s) {protected_here}"
+                )
+                raise SopError(
+                    f"SOP {sop_id!r} v{sop.version} {reason}, so every instance "
+                    f"must carry a gate of kind 'human' naming its verifier. "
+                    f"Pass verify={{'kind': 'human', 'check': ..., 'verifier': ...}} "
+                    f"— a human step that an agent can close is not a human step."
+                )
 
         metadata = dict(work_kwargs.pop("metadata", None) or {})
         metadata["sop_ref"] = sop.ref

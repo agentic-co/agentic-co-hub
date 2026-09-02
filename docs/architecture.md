@@ -151,6 +151,15 @@ Drafting a revision does not promote it. The version in use stays in use until
 it is explicitly activated, so writing an improvement is a safe act rather than
 one that quietly takes the live procedure out of service.
 
+Both are policed when the reviser is an agent (`agentco/policy.py`). A step
+tagged `money` or `irreversible` is frozen against agents; a step's class
+(`executor: human | agent`) ratchets toward human only; and no agent revision
+moves a field into a state a human moved it away from. Who is human is what
+the operator declared in `AGENTCO_HUMANS` — never inferred, and an undeclared
+registry polices everyone. A human or protected step cannot be instantiated
+without a `human` gate, so the class changes what happens, not just what the
+procedure says.
+
 **The improvement loop is deliberately absent.** Nothing proposes a better
 version from observed failures. That machinery is worthless without instances to
 learn from, and building it first would mean tuning against imagination — the
