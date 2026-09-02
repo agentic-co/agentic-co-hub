@@ -123,6 +123,27 @@ def test_a_deterministic_gate_is_not_routed_anywhere(queue):
     assert vehicles(queue) == []
 
 
+def test_a_deterministic_gate_that_failed_its_check_is_not_routed_either(queue):
+    """Routing follows the gate KIND, not the status alone. A deterministic
+    gate's executor IS its attester — that is the whole of what makes it
+    deterministic — so a rejected one is owed a re-run by the same process, not
+    a reviewer.
+
+    It is also the FIX-L3.4 hole arriving through a second door: a deterministic
+    gate may name no verifier and requires no capability, so its vehicle would
+    be assigned to nobody and claimable by anyone.
+    """
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    claimed = queue.claim(item.id, "executor")
+    queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE,
+                        attestation=attestation("pytest -q", exit_status=1))
+    assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
+    assert queue.get(item.id).metadata["verify_retry"]["decision"] == "fix"
+
+    assert verifiers.route_open_gates(queue)["created"] == []
+    assert vehicles(queue) == []
+
+
 def test_an_ungated_item_and_an_unparked_one_are_not_routed(queue):
     queue.create("no gate at all")
     queue.create("gated but not yet finished", verify=JUDGED)
