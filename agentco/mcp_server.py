@@ -82,6 +82,8 @@ from agentco.work import (
     Queue,
     TERMINAL,
     WorkError,
+    parse_terminal_status,
+    unknown_item,
     WorkStatus,
     resolve_work_store,
 )
@@ -523,13 +525,9 @@ def create_server(
         answer with `attest`.
         """
         try:
-            parsed_status = WorkStatus(status)
-        except ValueError:
-            raise ToolError(
-                f"status {status!r} is not one of "
-                f"{', '.join(sorted(s.value for s in TERMINAL))} — "
-                f"report_result records terminal outcomes only."
-            )
+            parsed_status = parse_terminal_status(status)
+        except Refusal as exc:
+            raise _refuse(exc) from exc
         try:
             updated = backend.work_report(
                 item_id, attempt, parsed_status, result=result,
@@ -539,11 +537,7 @@ def create_server(
         except (WorkError, ValueError, Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
         if updated is None:
-            raise ToolError(
-                f"no work item {item_id!r} on this queue — there is nothing to fence "
-                f"this report against. Check the id came from work_pull or work_create "
-                f"against this same store."
-            )
+            raise _refuse(unknown_item(item_id, "fence this report against"))
         return updated
 
     @mcp.tool(name="work_create")
@@ -674,11 +668,7 @@ def create_server(
         except (WorkError, ValueError, Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
         if updated is None:
-            raise ToolError(
-                f"no work item {item_id!r} on this queue — there is nothing here "
-                f"to attest against. Check the id came from work_pull or "
-                f"work_create against this same store."
-            )
+            raise _refuse(unknown_item(item_id, "attest against"))
         return updated
 
     @mcp.tool(name="whoami")

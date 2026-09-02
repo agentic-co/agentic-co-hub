@@ -82,6 +82,8 @@ from agentco.work import (
     TERMINAL,
     WorkError,
     WorkStatus,
+    parse_terminal_status,
+    unknown_item,
     resolve_work_store,
 )
 
@@ -478,30 +480,7 @@ def create_app(
         """Report a terminal outcome, fenced on the attempt the lease was issued under."""
 
         def work(actor: str, payload: dict) -> dict:
-            raw_status = payload.get("status", "")
-            try:
-                parsed = WorkStatus(raw_status)
-            except ValueError:
-                raise Refusal(
-                    code="not_terminal",
-                    message=f"status {raw_status!r} is not a terminal outcome",
-                    remediation=(
-                        "Report one of "
-                        f"{', '.join(sorted(s.value for s in TERMINAL))}. "
-                        "A lease is released by reporting, not by reporting progress."
-                    ),
-                    http_status=400,
-                ) from None
-            if parsed not in TERMINAL:
-                raise Refusal(
-                    code="not_terminal",
-                    message=f"{parsed.value} is not a terminal outcome",
-                    remediation=(
-                        "Report one of "
-                        f"{', '.join(sorted(s.value for s in TERMINAL))}."
-                    ),
-                    http_status=400,
-                )
+            parsed = parse_terminal_status(payload.get("status", ""))
             attempt = _int(payload, "attempt", -1)
             if attempt < 0:
                 raise Refusal(
@@ -531,16 +510,7 @@ def create_app(
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             if updated is None:
-                raise Refusal(
-                    code="work_item_unknown",
-                    message=f"no work item {item_id!r} on this queue",
-                    remediation=(
-                        "There is nothing to fence this report against. Check the id "
-                        "came from POST /work/pull or POST /work against this same "
-                        "registry."
-                    ),
-                    http_status=404,
-                )
+                raise unknown_item(item_id, "act on")
             return {"state": "accepted", "item": json.loads(updated.to_json())}
 
         return await _handle(request, "work_report", work)
@@ -578,12 +548,7 @@ def create_app(
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             if updated is None:
-                raise Refusal(
-                    code="work_item_unknown",
-                    message=f"no work item {item_id!r} on this queue",
-                    remediation="Check the id came from work_pull or work_create against this registry.",
-                    http_status=404,
-                )
+                raise unknown_item(item_id, "adjudicate")
             return {"state": "accepted", "item": json.loads(updated.to_json())}
 
         return await _handle(request, "adjudicate", work)
@@ -634,15 +599,7 @@ def create_app(
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             if updated is None:
-                raise Refusal(
-                    code="work_item_unknown",
-                    message=f"no work item {item_id!r} on this queue",
-                    remediation=(
-                        "Check the id came from the same registry. There is "
-                        "nothing here to attest against."
-                    ),
-                    http_status=404,
-                )
+                raise unknown_item(item_id, "act on")
             return {"state": "accepted", "item": json.loads(updated.to_json())}
 
         return await _handle(request, "attest", work)
@@ -753,13 +710,6 @@ def create_app(
         def work(actor: str, payload: dict) -> dict:
             _reject_author_in_body(payload)
             version = _int(payload, "version", -1)
-            if version < 1:
-                raise Refusal(
-                    code="version_required",
-                    message="activate names a specific version",
-                    remediation="Send {\"version\": N} — the version you mean to make active.",
-                    http_status=400,
-                )
             try:
                 sop = library.activate(
                     sop_id, version,

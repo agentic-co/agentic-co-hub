@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from agentco.errors import Refusal
 from agentco.work import (
     BlockedError,
     CapabilityError,
@@ -174,8 +175,9 @@ def test_an_honest_retry_is_idempotent(queue):
 def test_report_result_refuses_a_non_terminal_status(queue):
     item = queue.create("x")
     claimed = queue.claim(item.id, "worker-a", now=NOW)
-    with pytest.raises(ValueError):
+    with pytest.raises(Refusal) as caught:
         queue.report_result(item.id, claimed.lease_attempt, WorkStatus.PENDING)
+    assert caught.value.code == "not_terminal", "one code for every transport — see agentco.work.parse_terminal_status"
 
 
 # --------------------------------------------------------------------------- #

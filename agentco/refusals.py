@@ -14,6 +14,7 @@ from __future__ import annotations
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
 from agentco.policy import RevisionPolicyError
+from agentco.publish import RegistryError
 from agentco.sop import SopError
 from agentco.work import CapabilityError, DecompositionError, WorkError
 
@@ -31,6 +32,21 @@ def classify(exc: Exception) -> Refusal:
     """
     if isinstance(exc, Refusal):
         return exc
+    if isinstance(exc, RegistryError):
+        # A refusal that already crossed the wire once, coming back through a
+        # proxy (the MCP server in remote mode). It carries the registry's own
+        # code; re-classifying it as `invalid_request` threw that away, and the
+        # conformance suite watched every remote refusal collapse into one.
+        payload = exc.payload if isinstance(exc.payload, dict) else {}
+        if payload.get("code"):
+            return Refusal(
+                code=str(payload["code"]),
+                message=str(payload.get("message") or exc),
+                remediation=str(payload.get("remediation") or payload.get("message") or exc),
+                http_status=int(exc.status or 400),
+            )
+        return Refusal(code=f"registry_{exc.status or 'error'}", message=str(exc), remediation=str(exc),
+                       http_status=int(exc.status or 502))
     if isinstance(exc, NaturalKeyError):
         return Refusal(code="natural_key_invalid", message=str(exc), remediation=str(exc), http_status=400)
     if isinstance(exc, CapabilityError):

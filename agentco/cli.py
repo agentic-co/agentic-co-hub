@@ -581,8 +581,12 @@ def cmd_conform(args) -> int:
     L2 also holds the MCP surface to its published budget — twelve tools,
     12,500 schema bytes — because a roster that grew past what every calling
     harness pays for on every turn is a conformance failure too, just a quieter
-    one. Nothing here touches a live registry: the scenarios run against fresh
-    temporary stores, so this can be run anywhere the package is installed.
+    one. Nothing here touches a live registry: every variable the plane reads
+    to find a store or a registry (AGENTCO_DB, AGENTCO_REGISTRY_URL, ...) is
+    unset for the duration of the run — the second party proved the earlier
+    wording false by running this with AGENTCO_DB set and watching it write
+    into the live database — and the scenarios run against fresh temporary
+    stores, so this can be run anywhere the package is installed.
     """
     from agentco import conformance
 
@@ -630,18 +634,18 @@ LEVELS: dict[str, dict] = {
         "means": "publisher — the outbox push set means what the core means",
         "transports": ("outbox",),
         "scenarios": ["scope", "work", "judged-gate", "deterministic-gate", "adjudication", "procedure",
-                      "verifier-binding"],
+                      "verifier-binding", "lessons"],
     },
     "L2": {
         "means": "worker — the MCP roster and the HTTP surface are the core, within the published budget",
-        "transports": ("mcp", "http"),
+        "transports": ("mcp", "mcp-remote", "http"),
         "scenarios": ["scope", "work", "judged-gate", "deterministic-gate", "adjudication", "procedure",
-                      "decomposition", "verifier-binding"],
+                      "decomposition", "verifier-binding", "lessons"],
         "budget": True,
     },
     "L3": {
         "means": "verifier — gates park, route, and close identically on every transport",
-        "transports": ("http", "mcp", "outbox"),
+        "transports": ("http", "mcp", "mcp-remote", "outbox"),
         "scenarios": ["judged-gate", "deterministic-gate", "adjudication", "verifier-binding"],
     },
 }

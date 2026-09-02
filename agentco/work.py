@@ -198,6 +198,51 @@ RESOLUTION_KEY = "verify_resolution"
 HISTORY_KEY = "verify_history"
 
 
+def parse_terminal_status(raw: object) -> "WorkStatus":
+    """The status a report names, or the one refusal every transport gives for a bad one.
+
+    HTTP said `not_terminal`, MCP said prose, and the core raised a ValueError
+    the surfaces classified as `invalid_request` — three answers to one wrong
+    input. The conformance suite named it; this is the one answer.
+    """
+    try:
+        parsed = WorkStatus(raw)
+    except ValueError:
+        raise Refusal(
+            code="not_terminal",
+            message=f"status {raw!r} is not a terminal outcome",
+            remediation=(
+                f"Report one of {', '.join(sorted(s.value for s in TERMINAL))}. "
+                "A lease is released by reporting, not by reporting progress."
+            ),
+            http_status=400,
+        ) from None
+    if parsed not in TERMINAL:
+        raise Refusal(
+            code="not_terminal",
+            message=f"{parsed.value} is not a terminal outcome",
+            remediation=(
+                f"Report one of {', '.join(sorted(s.value for s in TERMINAL))}. "
+                "A lease is released by reporting, not by reporting progress."
+            ),
+            http_status=400,
+        )
+    return parsed
+
+
+def unknown_item(item_id: str, doing: str) -> Refusal:
+    """The one refusal for an id no store holds, worded once for every transport."""
+    return Refusal(
+        code="work_item_unknown",
+        message=f"no work item {item_id!r} on this queue",
+        remediation=(
+            f"There is nothing here to {doing}. Check the id came from work_pull or "
+            f"work_create against this same store."
+        ),
+        http_status=404,
+    )
+
+
 def releases_blockers(status: "WorkStatus | str") -> bool:
     """DONE, and nothing else, unblocks what depends on it.
 
@@ -1809,9 +1854,14 @@ class Queue:
         reported could then verify its own report. So: no lease, no report.
         """
         if status not in TERMINAL:
-            raise ValueError(
-                f"report_result applies terminal outcomes only (done/failed), "
-                f"got {status.value}"
+            raise Refusal(
+                code="not_terminal",
+                message=f"{status.value} is not a terminal outcome",
+                remediation=(
+                    f"Report one of {', '.join(sorted(s.value for s in TERMINAL))}. "
+                    "A lease is released by reporting, not by reporting progress."
+                ),
+                http_status=400,
             )
 
         current = self.get(item_id)
