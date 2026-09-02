@@ -771,3 +771,33 @@ def test_retire_refuses_to_take_work_out_of_a_verifiers_hands(queue):
     with pytest.raises(Exception):
         queue.retire(vehicle.id, "moot")
     assert queue.get(vehicle.id).leased_by == "reviewer"
+
+
+def test_a_report_on_an_unclaimed_vehicle_is_not_evidence_of_a_verifier(queue):
+    """The definition, tested on its own. Reporting an item at attempt 0 without
+    ever claiming it is exactly what the old routing did to retire a vehicle;
+    it advances the fence and nobody ever held the item. A definition that reads
+    the fence calls this a claim. Dies if `claimed_ever` counts `lease_attempt`."""
+    park(queue)
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    queue.report_result(vehicle.id, 0, WorkStatus.DONE, result="closed by nobody")
+    assert queue.get(vehicle.id).lease_attempt == 1, "the fence moved..."
+    assert verifiers.verifier_status(queue)["claimedEver"] == 0, "...and nobody claimed"
+
+
+def test_a_verifier_that_claimed_and_was_reaped_still_counts(queue):
+    """The other direction. A reap clears `leased_by` and leaves no report, but a
+    verifier DID turn up — the question is whether one exists, not whether one
+    finished. A definition built on `leased_by` or `lease_report` alone says
+    nobody ever came."""
+    import time as _t
+
+    park(queue)
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    queue.claim(vehicle.id, "reviewer", ttl_seconds=1, capabilities=["verify"])
+    _t.sleep(1.1)
+    assert [r.id for r in queue.reap_expired_leases()] == [vehicle.id]
+    assert queue.get(vehicle.id).leased_by is None
+    assert verifiers.verifier_status(queue)["claimedEver"] == 1

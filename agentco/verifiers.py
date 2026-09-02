@@ -387,14 +387,13 @@ def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
     items = queue.list()
 
     routed = [i for i in items if is_vehicle(i)]
-    # A real claim leaves one of two marks: a live lease, or a report filed by
-    # the holder (`lease_report.reported_by`). The fence count does NOT qualify
-    # — retiring a vehicle used to go through the report path, which advances
-    # it, and that turned a clock-only queue into "a verifier turned up".
-    claimed_ever = [
-        i for i in routed
-        if i.leased_by or ((i.metadata or {}).get("lease_report") or {}).get("reported_by")
-    ]
+    # `claim()` records every claim in `metadata.claims`, and that is the only
+    # evidence that counts. Not `leased_by` (cleared by a report or a reap), not
+    # `lease_report` (absent when the holder vanished and was reaped), and never
+    # the fence — `lease_attempt` is advanced by reports and reaps that are not
+    # claims, and counting it once turned a clock-only queue into "a verifier
+    # turned up".
+    claimed_ever = [i for i in routed if (i.metadata or {}).get("claims")]
     quarantined_parents = {i.id for i in items if is_quarantined(i)}
     outstanding = [
         i for i in routed

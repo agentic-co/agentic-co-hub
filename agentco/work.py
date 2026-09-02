@@ -802,8 +802,17 @@ class Queue:
                     f"cannot claim {item_id} for {agent!r}: status is "
                     f"{item.status.value}, {because}"
                 )
+            # Every claim leaves a mark no later event removes. `leased_by` is
+            # cleared by a report or a reap, and `lease_attempt` is advanced by
+            # things that are not claims — so neither answers "did anybody ever
+            # hold this", which is what the verifier-presence report asks of a
+            # routing vehicle. Bounded: a poller re-claiming one item a thousand
+            # times is not a thousand facts.
+            history = list((item.metadata or {}).get("claims") or [])[-19:]
+            history.append({"agent": agent, "attempt": item.lease_attempt + 1, "at": _iso(at)})
             return {
                 "status": WorkStatus.IN_PROGRESS,
+                "metadata": {**(item.metadata or {}), "claims": history},
                 # `assigned_agent` is deliberately NOT written here. Taking work
                 # is not the same act as being assigned it, and overwriting the
                 # routing decision with the claimant erased the only record that
