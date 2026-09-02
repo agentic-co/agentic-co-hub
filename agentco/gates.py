@@ -47,6 +47,12 @@ from agentco.errors import Refusal
 
 GATE_KINDS = ("deterministic", "judged", "human")
 
+# The capability an L3 node declares to be routed judged gates. It lives here
+# rather than in `agentco/verifiers.py` so that `work.py` can enforce it without
+# importing the module that imports `work.py` — and one string in one place,
+# because a capability spelled two ways is a lane that silently has no workers.
+VERIFY_CAPABILITY = "verify"
+
 # What happens to a gated item still unverified when its park clock expires.
 # `escalate` is the only value that needs a destination, because it is the only
 # one that hands the decision to somebody.

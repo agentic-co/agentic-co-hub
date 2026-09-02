@@ -1,5 +1,9 @@
 # The connection harness — implementation plan
 
+> This is the internal build plan. The user-facing "how do I connect my harness"
+> guide is [`participation.md`](participation.md) — a near-identical filename was
+> the first thing a reader tripped over, so the two are named apart deliberately.
+
 > **Goal:** a coordination plane any agentic harness can connect to, without the
 > plane knowing or caring which one it is.
 

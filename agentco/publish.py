@@ -295,6 +295,7 @@ class Registry:
         item_id: str,
         attestation: dict,
         agent_label: Optional[str] = None,
+        capabilities: Optional[list[str]] = None,
     ) -> dict:
         """Answer a gate on a parked item. The submitter comes from the signature.
 
@@ -305,6 +306,8 @@ class Registry:
         body: dict[str, Any] = {"attestation": attestation}
         if agent_label:
             body["agentLabel"] = agent_label
+        if capabilities:
+            body["capabilities"] = capabilities
         return self._call("POST", f"/work/{item_id}/attest", body)
 
     def sop_get(self, sop_id: str, version: Optional[int] = None) -> dict:

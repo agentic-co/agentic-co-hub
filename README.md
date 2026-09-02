@@ -98,7 +98,10 @@ verb that mattered sat behind tier 2's one config line, so a harness that config
 could read the splice and do nothing with it — an audience, not a participant. A harness at
 that level is now **L1**: it publishes by appending a line to `.agentco/outbox.jsonl`, no
 config and no credential needed on its side, and a local drainer signs and delivers it. See
-[`docs/outbox.md`](docs/outbox.md) and the [participation-ladder ADR](docs/decisions/0002-participation-ladder.md).
+[`docs/participation.md`](docs/participation.md) for what to run at each level,
+[`docs/outbox.md`](docs/outbox.md) for the L1 path in full, and the
+[participation-ladder ADR](docs/decisions/0002-participation-ladder.md) for why the
+ladder has these rungs.
 
 ## What it is not
 

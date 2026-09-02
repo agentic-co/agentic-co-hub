@@ -122,12 +122,12 @@ def test_neither_verify_state_releases_a_dependent_item(queue):
     ) == [upstream.id]
 
     # And once the gate says no, it is still not released.
-    queue.attest(upstream.id, attestation(check=JUDGED["check"], exit_status=1), "reviewer-b")
+    queue.attest(upstream.id, attestation(check=JUDGED["check"], exit_status=1), "reviewer-b", capabilities=["verify"])
     assert queue.get(upstream.id).status == WorkStatus.VERIFY_FAILED
     assert downstream.id not in {i.id for i in queue.ready()}
 
     # Only the gate passing releases it.
-    queue.attest(upstream.id, attestation(check=JUDGED["check"]), "reviewer-b")
+    queue.attest(upstream.id, attestation(check=JUDGED["check"]), "reviewer-b", capabilities=["verify"])
     assert queue.get(upstream.id).status == WorkStatus.DONE
     assert downstream.id in {i.id for i in queue.ready()}
 
@@ -223,7 +223,7 @@ def test_the_executor_may_not_attest_its_own_judged_gate(queue):
     item = queue.create("ship it", verify=JUDGED)
     claim_and_finish(queue, item, agent="worker-a")
     with pytest.raises(Refusal) as caught:
-        queue.attest(item.id, attestation(check=JUDGED["check"]), "worker-a")
+        queue.attest(item.id, attestation(check=JUDGED["check"]), "worker-a", capabilities=["verify"])
     assert "cannot also verify" in caught.value.message
     assert queue.get(item.id).status == WorkStatus.AWAITING_VERIFY
 

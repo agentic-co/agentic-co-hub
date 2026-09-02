@@ -38,11 +38,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+from agentco import gates
 from agentco.work import Queue, WorkItem, WorkStatus
 
-# The capability an L3 node declares. One string, in one place, because a
-# capability spelled two ways is a lane that silently has no workers.
-VERIFY_CAPABILITY = "verify"
+# Re-exported from `gates` rather than defined twice. `work.attest` enforces it,
+# and work.py cannot import this module without a cycle.
+VERIFY_CAPABILITY = gates.VERIFY_CAPABILITY
 
 # Gate kinds that need somebody other than the executor. `deterministic` is
 # absent on purpose: the executor IS its intended attester.
