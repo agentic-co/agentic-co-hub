@@ -75,6 +75,7 @@ from agentco.stores import open_queue, open_sop_library, resolve_registry_db
 from agentco.work import (
     DEFAULT_LEASE_TTL_S,
     CapabilityError,
+    DecompositionError,
     Queue,
     TERMINAL,
     WorkError,
@@ -132,6 +133,11 @@ def _work_refusal(exc: Exception) -> Refusal:
     if isinstance(exc, CapabilityError):
         return Refusal(code="capability_mismatch", message=str(exc),
                        remediation=str(exc), http_status=409)
+    if isinstance(exc, DecompositionError):
+        # 422: the body named a tree position this item may not take. Not a
+        # conflict with the state of the world — the bound was known.
+        return Refusal(code="decomposition_bound", message=str(exc),
+                       remediation=str(exc), http_status=422)
     if isinstance(exc, WorkError):
         # LeaseError and BlockedError both land here. 409 rather than 422: the
         # request was well-formed and lost to the state of the world, which is

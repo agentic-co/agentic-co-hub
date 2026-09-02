@@ -133,6 +133,19 @@ class CapabilityError(WorkError):
     """
 
 
+class DecompositionError(WorkError):
+    """A child that would break the decomposition bound, or a repair filed beneath.
+
+    The bound is a human review bound, not a law of nature (asop.md
+    § Decomposition bounds): a parent holds at most `MAX_CHILDREN` children —
+    six work units and the verify unit that closes them — and a tree goes at
+    most `MAX_DEPTH` deep. Both are refused at create, BEFORE the store is
+    touched, because the reader who pays for an oversized tree is the one
+    person accountable for it, and a tree they cannot sanity-check is one
+    nobody checks.
+    """
+
+
 class DuplicateSuppressed(Exception):
     """Internal signal that `create()` found an existing item with the same key.
 
@@ -334,6 +347,150 @@ RESERVED_METADATA_KEYS = frozenset({
 })
 # And the natural-key namespace the routing pass uses for vehicles.
 RESERVED_KEY_PREFIX = "verify:"
+
+
+# --------------------------------------------------------------------------- #
+# Decomposition — parent / child, and the bound on both axes
+# --------------------------------------------------------------------------- #
+
+#: `metadata.parent` names the item this one decomposes. `metadata.repairs`
+#: names the failed item this one is a fix FOR — a repair goes BESIDE the
+#: failed unit (same parent, or none), never beneath it, so repair depth stays
+#: bounded and a fix does not consume the parent's review budget.
+PARENT_KEY = "parent"
+REPAIRS_KEY = "repairs"
+
+#: Six work units plus the verify unit that closes them. The escape hatch is
+#: explicit and environment-wide, per the contract: a registry may RAISE it.
+#: A goal that genuinely needs more is usually two goals.
+MAX_CHILDREN = int(os.environ.get("AGENTCO_MAX_CHILDREN", "7"))
+#: Root goal at depth 0; its leaves at most this far down. 7³ = 343 leaves.
+MAX_DEPTH = int(os.environ.get("AGENTCO_MAX_DEPTH", "3"))
+
+
+def _decomposition_refusal(message: str) -> DecompositionError:
+    return DecompositionError(message)
+
+
+def enforce_decomposition(
+    item: "WorkItem",
+    *,
+    lookup: Callable[[str], Optional[dict]],
+    count_children: Callable[[str], int],
+) -> Optional[str]:
+    """Check a new item's place in the tree. Returns the parent id to block, or None.
+
+    Shared by both `create` implementations for the reason `build_item` is:
+    one rule, two stores. `lookup` returns the RAW row for an id (or None) and
+    `count_children` the number of non-repair children a parent already has;
+    both run inside the caller's lock, so the count cannot move under the
+    check.
+
+    What is refused, each before anything is written:
+
+      * a parent that does not exist — a child of nothing is a loose end by
+        construction, and the id is usually a typo that would otherwise sit in
+        metadata unread forever;
+      * a parent that is DONE — a closed goal cannot grow; file a new one;
+      * a parent already holding `MAX_CHILDREN` — the human review bound;
+      * a chain deeper than `MAX_DEPTH`;
+      * a repair filed BENEATH the item it repairs, or under a parent other
+        than the repaired item's own — repairs go beside.
+
+    The parent returned is the one whose `blocked_by` must gain this item, so
+    a parent cannot close while a child is open. A repair blocks nobody: the
+    failed original it repairs is still red and still blocking.
+    """
+    meta = item.metadata or {}
+    parent_id = meta.get(PARENT_KEY)
+    repairs_id = meta.get(REPAIRS_KEY)
+    if parent_id is None and repairs_id is None:
+        return None
+
+    for key, value in ((PARENT_KEY, parent_id), (REPAIRS_KEY, repairs_id)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise _decomposition_refusal(
+                f"metadata.{key} must be a work item id, got {value!r}."
+            )
+
+    if repairs_id is not None:
+        repaired = lookup(repairs_id)
+        if repaired is None:
+            raise _decomposition_refusal(
+                f"metadata.repairs names {repairs_id!r}, which does not exist. "
+                f"A repair is for a failed unit; name the one that failed."
+            )
+        their_parent = (repaired.get("metadata") or {}).get(PARENT_KEY)
+        if parent_id == repairs_id:
+            raise _decomposition_refusal(
+                f"a repair goes BESIDE the unit it repairs, never beneath it: "
+                f"{repairs_id!r} cannot be both metadata.repairs and "
+                f"metadata.parent. Use parent={their_parent!r} or omit it."
+            )
+        if parent_id is not None and parent_id != their_parent:
+            raise _decomposition_refusal(
+                f"a repair goes beside the unit it repairs: {repairs_id!r} sits "
+                f"under {their_parent!r}, so its repair may sit under "
+                f"{their_parent!r} or nowhere, not under {parent_id!r}."
+            )
+        # Beside means: same depth as the original, no budget consumed, and
+        # the original — still failed, still blocking — is what holds the
+        # parent open. Nothing further to check and nobody new to block.
+        return None
+
+    parent = lookup(parent_id)
+    if parent is None:
+        raise _decomposition_refusal(
+            f"metadata.parent names {parent_id!r}, which does not exist. A child "
+            f"of nothing is a loose end by construction — file the goal first."
+        )
+    if parent.get("status") == WorkStatus.DONE.value:
+        raise _decomposition_refusal(
+            f"{parent_id!r} is done; a closed goal cannot grow. If the work is "
+            f"real, it is a new goal."
+        )
+
+    depth, seen, cursor = 1, {parent_id}, parent
+    while True:
+        above = (cursor.get("metadata") or {}).get(PARENT_KEY)
+        if above is None:
+            break
+        if above in seen:
+            raise _decomposition_refusal(
+                f"the parent chain above {parent_id!r} loops at {above!r}; refusing "
+                f"to add to a tree whose depth cannot be measured."
+            )
+        seen.add(above)
+        cursor = lookup(above)
+        if cursor is None:
+            raise _decomposition_refusal(
+                f"the parent chain above {parent_id!r} is broken at {above!r}, which "
+                f"does not exist. Repair the chain before adding to it."
+            )
+        depth += 1
+    if depth > MAX_DEPTH:
+        raise _decomposition_refusal(
+            f"a child of {parent_id!r} would sit at depth {depth}; the bound is "
+            f"{MAX_DEPTH}. The tree is deeper than one accountable person can "
+            f"review. Close a level, or start a second goal."
+        )
+
+    held = count_children(parent_id)
+    if held >= MAX_CHILDREN:
+        raise _decomposition_refusal(
+            f"{parent_id!r} already holds {held} children; the bound is "
+            f"{MAX_CHILDREN} — six work units and the verify unit that closes "
+            f"them. This is a human review bound, not a capacity: a goal that "
+            f"genuinely needs more is usually two goals. (A registry may raise "
+            f"it with AGENTCO_MAX_CHILDREN; that is the explicit escape hatch.)"
+        )
+    return parent_id
+
+
+def is_child_row(row: dict, parent_id: str) -> bool:
+    """A non-repair child of `parent_id`, from a raw row."""
+    meta = row.get("metadata") or {}
+    return meta.get(PARENT_KEY) == parent_id and meta.get(REPAIRS_KEY) is None
 
 
 def build_item(
@@ -652,6 +809,19 @@ class Queue:
                         existing.metadata = dict(existing.metadata or {})
                         existing.metadata["natural_key_conflict"] = True
                         return existing
+            by_id = {row.get("id"): row for row in raw_rows}
+            blocked_parent = enforce_decomposition(
+                item,
+                lookup=by_id.get,
+                count_children=lambda pid: sum(1 for r in raw_rows if is_child_row(r, pid)),
+            )
+            if blocked_parent is not None:
+                # The parent cannot close while this child is open. Written in
+                # the same lock as the child, so there is no instant in which
+                # the child exists and the parent is claimable past it.
+                parent_row = by_id[blocked_parent]
+                parent_row["blocked_by"] = sorted(set(parent_row.get("blocked_by") or []) | {item.id})
+                parent_row["updated_at"] = _iso(_now())
             raw_rows.append(json.loads(item.to_json()))
             self._write_all(raw_rows, quarantined)
         return item
