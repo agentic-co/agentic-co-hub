@@ -390,7 +390,12 @@ def test_the_http_report_and_attest_verbs_ignore_a_gate_in_the_body(tmp_path):
     from agentco.app import create_app
 
     keys = {"bigmac": "s3cret"}
-    app = create_app(db_path=str(tmp_path / "r.sqlite3"), keys=keys)
+    app = create_app(
+        db_path=str(tmp_path / "r.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        keys=keys,
+    )
     registry = _loopback(TestClient(app), "bigmac", keys)
 
     original = dict(DETERMINISTIC)

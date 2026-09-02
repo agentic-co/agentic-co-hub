@@ -18,6 +18,17 @@ leakguard.toml
 *.sqlite3
 *.sqlite3-*
 
+# Live stores, never artefacts of the project. `work.jsonl` reached two commits
+# through `git add -A` because the default work store is a RELATIVE path, so a
+# server or a test started in the repo root writes one here and it looks like a
+# source file. A store in a published tree is somebody's queue state on the
+# internet.
+work.jsonl
+sops.jsonl
+tasks.jsonl
+receipts.jsonl
+.agentco/
+
 # Per-developer harness config. `.claude/settings.local.json` is where a  # leakguard: allow
 # contributor's own MCP entry and tier-3 session hook land — machine-specific
 # absolute paths, and nobody else's business.

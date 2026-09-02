@@ -182,3 +182,49 @@ def test_findings_report_file_line_rule_and_remediation():
     assert "f.md:1" in rendered
     assert "[email]" in rendered
     assert "→" in rendered
+
+
+# --------------------------------------------------------------------------- #
+# Stores are never artefacts of this project
+# --------------------------------------------------------------------------- #
+
+
+def test_live_store_filenames_are_gitignored():
+    """`work.jsonl` reached two commits, and leakguard could not have caught it.
+
+    The store held no names, so nothing in the guard's remit fired — and a work
+    store in a published tree is still somebody's queue state on the internet.
+    Two things conspired: `git add -A`, and a work-store default that is a
+    RELATIVE path, so a server or a test started in the repo root writes one here
+    where it looks like a source file.
+
+    leakguard scans CONTENT. This is about a filename, which is why it lives
+    beside it as its own check rather than as a rule inside it.
+    """
+    ignored = Path(".gitignore").read_text().splitlines()
+    for name in ("work.jsonl", "sops.jsonl", "tasks.jsonl", "receipts.jsonl", ".agentco/"):
+        assert name in ignored, (
+            f"{name} is not gitignored — a live store is one `git add -A` away "
+            f"from being published, and the guard next door cannot see filenames"
+        )
+
+
+def test_no_store_is_tracked_in_this_repository():
+    """The other half: gitignoring a file that is ALREADY tracked changes nothing.
+
+    `.gitignore` is not retroactive, so the entry above would have been cosmetic
+    while the committed copy kept updating on every `git add -A`. This asserts
+    the state, not the intention.
+    """
+    import subprocess
+
+    tracked = subprocess.run(
+        ["git", "ls-files"], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    offenders = [
+        path
+        for path in tracked
+        if Path(path).name in ("work.jsonl", "sops.jsonl", "tasks.jsonl", "receipts.jsonl")
+        or path.startswith(".agentco/")
+    ]
+    assert offenders == [], f"live store(s) tracked in a public repo: {offenders}"
