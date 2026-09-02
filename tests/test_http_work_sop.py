@@ -408,3 +408,52 @@ def test_instantiating_a_draft_is_refused_across_http(client):
     assert response.status_code == 422
     assert "draft" in response.json()["message"].lower()
     assert response.json()["remediation"].strip()
+
+
+# --------------------------------------------------------------------------- #
+# FIX-L3.10 / FIX-L3.11 over the wire — the commit that fixed them claimed these
+# tests and had not written them
+# --------------------------------------------------------------------------- #
+
+JUDGED_GATE = {
+    "kind": "judged",
+    "check": "a reviewer confirms the rollback ran",
+    "max_park_seconds": 3600,
+    "on_timeout": "escalate",
+    "escalate_to": "release-owner",
+}
+
+
+def test_a_report_from_an_actor_who_does_not_hold_the_lease_is_refused(client):
+    """The attempt number is in every `GET /work` response, so dana can read
+    kofi's fence and report kofi's item at it. That report used to be recorded as
+    kofi's completion — and dana could then attest it."""
+    item = create_item(client, verify=JUDGED_GATE)
+    pulled = post(client, "/work/pull", "kofi", {}).json()
+    assert pulled["item"]["leased_by"] == "kofi"
+
+    hijack = post(client, f"/work/{item['id']}/report", "dana",
+                  {"attempt": pulled["attempt"], "status": "done"})
+    assert hijack.status_code >= 400, hijack.text
+    assert "held by 'kofi'" in hijack.json()["message"]
+
+    still = get(client, "/work", "dana").json()["items"]
+    [row] = [i for i in still if i["id"] == item["id"]]
+    assert row["status"] == "in_progress" and row["leased_by"] == "kofi"
+
+
+def test_a_report_on_an_unclaimed_item_is_refused_over_http(client):
+    """No lease, no report. Attempt 0 matched attempt 0 on an item nobody held,
+    and the parked item's executor was None — which the separation check on a
+    judged gate could never see."""
+    item = create_item(client, verify=JUDGED_GATE)
+    ghost = post(client, f"/work/{item['id']}/report", "dana", {"attempt": 0, "status": "done"})
+    assert ghost.status_code >= 400, ghost.text
+    assert "nobody holds it" in ghost.json()["message"]
+
+    attest = post(client, f"/work/{item['id']}/attest", "dana", {
+        "capabilities": ["verify"],
+        "attestation": {"check": JUDGED_GATE["check"], "exit_status": 0,
+                        "environment": "dana's laptop", "at": "2026-09-02T12:00:00+00:00"},
+    })
+    assert attest.status_code >= 400, "nothing was parked, so there is nothing to attest"
