@@ -132,6 +132,17 @@ def cmd_run(args) -> int:
     }
     placebo = json.loads(args.placebo) if args.placebo else None
 
+    lesson_source = None
+    if args.work_store:
+        from agentco.work import Queue
+
+        provenance = library.lesson_provenance(args.sop_id, Queue(args.work_store), args.lesson_version)
+        lesson_source = {"loop": len(provenance["loop"]), "hand": len(provenance["hand"])}
+        print(f"  lesson channel of v{args.lesson_version}: "
+              f"{lesson_source['loop']} loop-fed, {lesson_source['hand']} hand-fed")
+    else:
+        print("  lesson channel provenance: unknown (pass --work-store to attribute the lessons)")
+
     run_id = args.run_id or f"run-{uuid.uuid4().hex[:8]}"
     print(f"  run {run_id}: {len(taskset)} tasks x {len(Arm)} arms x {args.replicates} replicate(s)")
     summary = run_trials(
@@ -139,6 +150,7 @@ def cmd_run(args) -> int:
         sop_for_arm=sop_for_arm,
         replicates=args.replicates,
         placebo_mistakes=placebo,
+        lesson_source=lesson_source,
     )
     print(json.dumps(summary, indent=2))
     if summary["stoppedEarly"]:
@@ -183,6 +195,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--sop-store", default=None)
     p_run.add_argument("--run-id", default=None, help="reuse to resume a stopped run")
     p_run.add_argument("--placebo", default=None, help='JSON list, e.g. \'["..."]\'')
+    p_run.add_argument(
+        "--work-store", default=None,
+        help="the work store holding the adjudications; lets the report say whether the lesson arm's lessons were loop-fed or hand-fed",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_rep = sub.add_parser("report", help="read the ledger and render the verdict")

@@ -33,6 +33,7 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | **Adjudication tagging** — `good`/`bad`, adjudicator ≠ executor | built (`Queue.adjudicate`) | — |
 | **Plan-vs-actual** — plan under the pin, review at completion | built (`work.plan_vs_actual`) | — |
 | **Revision proposals** — accumulated from adjudications, drafted through the policy | built (`SopLibrary.propose`, `agentco lessons`) | — |
+| **Lesson provenance** — the eval tells a loop-fed lesson from a hand-fed one | built (`SopLibrary.lesson_provenance`, `evals run --work-store`) | — |
 | **`sop_revise` / `sop_activate` on MCP** and in the outbox push set | built (P4.4, P4.5) — twelve of twelve tools; eight push verbs | L2 |
 | Conformance suite | absent | all |
 
@@ -240,10 +241,15 @@ systems — needs the rails before it needs the loop.
   set, drained under the machine credential as drafts; `PENDING_VERBS` is
   empty and stays as the mechanism for the next name.
 
-*Proven by:* the eval harness in [`../evals/`](../evals/README.md), which
-already exists. Phase 4 is the first point at which its `asop_lesson` arm has
-something real to measure — until the loop closes, the lesson channel is
-hand-fed. The policy was proven by mutation, the Phase 1 way: each rule, the
+*Proven by:* the eval harness in [`../evals/`](../evals/README.md). Phase 4 is
+the first point at which its `asop_lesson` arm has something real to measure —
+until the loop closed, the lesson channel was hand-fed, and the arm could not
+tell. Now it can: `SopLibrary.lesson_provenance` attributes each
+`common_mistakes` entry to the loop (the `bad` adjudication `propose()` turned
+into it, matched on the record, not the wording) or to a hand; the ledger
+records that on every lesson-arm trial (`python3 -m evals run --work-store`);
+and the report says which the arm measured, or that it does not know — never
+either answer by default ([`tests/test_lesson_loop.py`](../tests/test_lesson_loop.py)). The policy was proven by mutation, the Phase 1 way: each rule, the
 lift, the activate path, the instantiate gate and the fail-closed default were
 removed in turn and a test failed each time ([`tests/test_revision_policy.py`](../tests/test_revision_policy.py)).
 

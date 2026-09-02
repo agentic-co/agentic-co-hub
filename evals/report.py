@@ -171,6 +171,26 @@ def family_deltas(trials: list, base_arm: str, lesson_arm: str, replicates: int 
     return sorted(out, key=lambda r: r["family"])
 
 
+def lesson_channel(trials: list) -> Optional[dict]:
+    """Where the lesson arm's lessons came from, as the trials recorded it.
+
+    None when no lesson-arm trial carried the attribution — the run had no work
+    store to ask — and that is reported as unknown, never as either answer. A
+    result on `asop_lesson` with `loop == 0` is a result about a person's
+    lesson, and the report has to say so beside the number.
+    """
+    sources = [t.lesson_source for t in trials
+               if t.arm == Arm.ASOP_LESSON.value and isinstance(t.lesson_source, dict)]
+    if not sources:
+        return None
+    loop = max(int(s.get("loop") or 0) for s in sources)
+    hand = max(int(s.get("hand") or 0) for s in sources)
+    return {"loop": loop, "hand": hand, "loopFed": loop > 0,
+            "reading": ("the loop's lessons" if loop and not hand else
+                        "a mix of loop-fed and hand-fed lessons" if loop else
+                        "hand-fed lessons only — this measures a person, not the loop")}
+
+
 def verdict(trials: list, replicates: int = 1, alpha: float = 0.05) -> dict:
     """The pre-registered bar, evaluated. Written before the result is known.
 
@@ -204,6 +224,7 @@ def verdict(trials: list, replicates: int = 1, alpha: float = 0.05) -> dict:
             floor["pValue"] < alpha and floor["favours"] == Arm.PROSE.value
         ),
         "comparisons": [lesson, placebo, contract, floor],
+        "lessonChannel": lesson_channel(trials),
         "familyDeltas": deltas,
     }
 
@@ -239,6 +260,13 @@ def render_text(trials: list, replicates: int = 1) -> str:
             f"{row['family']:<28}{base:>8}{les:>9}{delta:>9}   "
             f"{'REGRESSED' if row['regressed'] else ''}"
         )
+
+    channel = lesson_channel(trials)
+    lines += ["", "LESSON CHANNEL  (what asop_lesson actually rendered)", "-" * 78]
+    if channel is None:
+        lines.append("  unknown — the run recorded no provenance (pass --work-store)")
+    else:
+        lines.append(f"  loop-fed {channel['loop']}, hand-fed {channel['hand']}: {channel['reading']}")
 
     lines += ["", "PRE-REGISTERED VERDICT", "-" * 78]
     for clause, ok in v["clauses"].items():

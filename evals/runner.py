@@ -92,10 +92,12 @@ def run_trial(
     root: Path,
     sop: Optional[SOP] = None,
     placebo_mistakes: Optional[list] = None,
+    lesson_source: Optional[dict] = None,
 ) -> Trial:
     """One purchase: render, execute, gate, record. Never raises for a work failure."""
     workdir = _seed_workdir(task, root)
     sop_ref = sop.ref if sop is not None else None
+    source = lesson_source if arm is Arm.ASOP_LESSON else None
     try:
         prompt = render(arm, task.prompt, sop=sop, placebo_mistakes=placebo_mistakes)
         completion = fleet.complete(
@@ -108,6 +110,7 @@ def run_trial(
             run_id=run_id,
             task_id=task.task_id,
             family=task.family,
+            lesson_source=source,
             arm=arm.value,
             replicate=replicate,
             passed=result.passed,
@@ -132,6 +135,7 @@ def run_trial(
             run_id=run_id,
             task_id=task.task_id,
             family=task.family,
+            lesson_source=source,
             arm=arm.value,
             replicate=replicate,
             passed=False,
@@ -154,8 +158,13 @@ def run(
     arms: tuple = ALL_ARMS,
     placebo_mistakes: Optional[list] = None,
     progress: bool = True,
+    lesson_source: Optional[dict] = None,
 ) -> dict:
     """Score every task under every arm, resuming whatever the ledger already holds.
+
+    `lesson_source` is `SopLibrary.lesson_provenance` reduced to counts for the
+    version the lesson arm presents; it is recorded on every lesson-arm trial
+    so the report can say whether the arm measured the loop or a person.
 
     `sop_for_arm` maps an arm to the SOP version it presents — `ASOP` to the
     base version, `ASOP_LESSON` to the revision carrying the harvested lesson.
@@ -182,6 +191,7 @@ def run(
                             task, arm, replicate, fleet, run_id, root,
                             sop=sop_for_arm.get(arm),
                             placebo_mistakes=placebo_mistakes,
+                            lesson_source=lesson_source,
                         )
                     except BudgetExceeded as exc:
                         stopped = str(exc)
