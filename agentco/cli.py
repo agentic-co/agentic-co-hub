@@ -573,6 +573,97 @@ def cmd_lessons(args) -> int:
     return status
 
 
+def cmd_conform(args) -> int:
+    """Per-level conformance a harness owner runs themselves. Exit non-zero with what is missing.
+
+    Runs the conformance scenarios (agentco/conformance.py) for the transports a
+    level relies on and names every place a transport departs from the core.
+    L2 also holds the MCP surface to its published budget — twelve tools,
+    12,500 schema bytes — because a roster that grew past what every calling
+    harness pays for on every turn is a conformance failure too, just a quieter
+    one. Nothing here touches a live registry: the scenarios run against fresh
+    temporary stores, so this can be run anywhere the package is installed.
+    """
+    from agentco import conformance
+
+    level = args.level.upper()
+    if level not in LEVELS:
+        print(f"unknown level {args.level!r}; choose one of {', '.join(LEVELS)}", file=sys.stderr)
+        return 2
+    spec = LEVELS[level]
+    report = conformance.conformance_report(names=spec["scenarios"], transports=spec["transports"])
+    missing = list(report["failures"])
+    budget = None
+    if spec.get("budget"):
+        budget = _mcp_budget()
+        if budget["tools"] > budget["toolCeiling"]:
+            missing.append(f"L2: {budget['tools']} MCP tools registered; the ceiling is {budget['toolCeiling']}")
+        if budget["schemaBytes"] > budget["byteBudget"]:
+            missing.append(f"L2: MCP tool schemas measure {budget['schemaBytes']} bytes; the budget is {budget['byteBudget']}")
+    out = {
+        "level": level, "means": spec["means"], "transports": list(spec["transports"]),
+        "scenarios": spec["scenarios"], "conforms": not missing, "missing": missing,
+        **({"budget": budget} if budget else {}),
+    }
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        print(f"{level} — {spec['means']}")
+        print(f"  transports: {', '.join(spec['transports'])}; scenarios: {', '.join(spec['scenarios'])}")
+        if budget:
+            print(f"  MCP surface: {budget['tools']}/{budget['toolCeiling']} tools, "
+                  f"{budget['schemaBytes']}/{budget['byteBudget']} schema bytes")
+        if missing:
+            print(f"  NOT CONFORMANT — {len(missing)} finding(s):")
+            for line in missing:
+                print(f"    - {line}")
+        else:
+            print("  conformant: every transport this level relies on is the core")
+    return 0 if not missing else 1
+
+
+#: What each level of the participation ladder relies on, and therefore what
+#: `agentco conform --level` has to prove. The scenario names are
+#: agentco/conformance.SCENARIOS.
+LEVELS: dict[str, dict] = {
+    "L1": {
+        "means": "publisher — the outbox push set means what the core means",
+        "transports": ("outbox",),
+        "scenarios": ["scope", "work", "judged-gate", "deterministic-gate", "adjudication", "procedure",
+                      "verifier-binding"],
+    },
+    "L2": {
+        "means": "worker — the MCP roster and the HTTP surface are the core, within the published budget",
+        "transports": ("mcp", "http"),
+        "scenarios": ["scope", "work", "judged-gate", "deterministic-gate", "adjudication", "procedure",
+                      "decomposition", "verifier-binding"],
+        "budget": True,
+    },
+    "L3": {
+        "means": "verifier — gates park, route, and close identically on every transport",
+        "transports": ("http", "mcp", "outbox"),
+        "scenarios": ["judged-gate", "deterministic-gate", "adjudication", "verifier-binding"],
+    },
+}
+
+
+def _mcp_budget() -> dict:
+    """The two numbers the ADR publishes, measured the way tests/test_mcp_server.py measures them."""
+    import tempfile
+
+    from agentco.mcp_server import create_server
+
+    with tempfile.TemporaryDirectory(prefix="agentco-conform-budget-") as tmp:
+        server = create_server(db_path=f"{tmp}/r.sqlite3", work_store=f"{tmp}/work.jsonl",
+                               sop_store=f"{tmp}/sops.jsonl", actor="conform")
+        tools = list(server._tool_manager.list_tools())
+        total = 0
+        for t in sorted(tools, key=lambda t: t.name):
+            payload = {"name": t.name, "description": t.description, "parameters": t.parameters}
+            total += len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    return {"tools": len(tools), "toolCeiling": 12, "schemaBytes": total, "byteBudget": 12_500}
+
+
 def cmd_writeback(args) -> int:
     """Tell each origin its gate is parked. Off unless configured, and says so.
 
@@ -769,6 +860,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_les.add_argument("--propose", action="store_true", help="draft the next version from pending adjudications")
     p_les.add_argument("--json", action="store_true", help="machine-readable output")
     p_les.set_defaults(func=cmd_lessons)
+
+    p_conf = sub.add_parser(
+        "conform",
+        help="per-level conformance: prove the transports a level relies on are the core; exit non-zero with what is missing",
+    )
+    p_conf.add_argument("--level", required=True, help="L1 (publisher), L2 (worker), or L3 (verifier)")
+    p_conf.add_argument("--json", action="store_true", help="machine-readable output")
+    p_conf.set_defaults(func=cmd_conform)
 
     p_wb = sub.add_parser("writeback", help="notify originating records that a gate is parked")
     p_wb.add_argument("--via", default="webhook", help="registered writer name (default: webhook)")

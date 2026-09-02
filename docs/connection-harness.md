@@ -36,15 +36,15 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | **Revision proposals** — accumulated from adjudications, drafted through the policy | built (`SopLibrary.propose`, `agentco lessons`) | — |
 | **Lesson provenance** — the eval tells a loop-fed lesson from a hand-fed one | built (`SopLibrary.lesson_provenance`, `evals run --work-store`) | — |
 | **`sop_revise` / `sop_activate` on MCP** and in the outbox push set | built (P4.4, P4.5) — twelve of twelve tools; eight push verbs | L2 |
-| Conformance suite | absent | all |
+| Conformance suite — core vs. HTTP, MCP, outbox; `agentco conform --level` | built (`agentco/conformance.py`) | all |
 
-One of those absences is worth naming plainly. **Shared learning, the headline
-claim, still has no write path on the primary surface**: a harness on MCP can
-read a procedure but cannot contribute a lesson to it. The one write path that
-does exist, `revise` over HTTP, is now policed (P4.0 — the first unit of Phase
-4, built); the loop that would feed it is not. That is the rest of Phase 4, and
-it and Phase 5 (conformance) are what remains of the phases below — Phases 0
-through 3 are built.
+Nothing in the table is absent any more. **Shared learning, the headline claim,
+has its write path on the primary surface** — `sop_revise` and `sop_activate` on
+MCP, behind the revision policy — and the loop that feeds it: adjudication,
+plan-vs-actual, proposals drafted by `agentco lessons`, and provenance the eval
+harness reads. Phase 5 closed the two-write-path risk with a suite rather than a
+habit. Phases 0 through 5 are built; the phases below are the record of how, and
+the risks section is what still has to stay true.
 
 ---
 
@@ -285,13 +285,29 @@ bound it is — recursion is how the bound is honoured. Refusals are HTTP 422
 The suite is what makes "two write paths" a maintenance cost rather than a
 divergence risk.
 
-- **One semantic core, three transports** — outbox, MCP, HTTP — proven to
-  produce identical results for identical input. Any behaviour reachable one way
-  and not another is a bug the suite names.
-- **Per-level conformance tests** a harness owner can run themselves:
-  `agentco conform --level L2` exits non-zero with what is missing.
-- **Published byte budget** alongside the twelve-tool count, per the ADR's
-  second revisit condition.
+- **One semantic core, three transports** — built ([`agentco/conformance.py`](../agentco/conformance.py)).
+  A scenario is a script of steps with no transport in it. It runs once with
+  every step through the in-process core, then once per transport with every
+  step the transport carries performed through it; the world is photographed
+  after each run — items, procedure versions, the event feed, identifiers
+  replaced by labels — and the photographs and every step's outcome (success,
+  or a refusal with the same code) must match. Nine scenarios cover scope,
+  work, both gate kinds, adjudication, procedures under the policy,
+  decomposition and verifier binding; every push verb and every MCP tool is
+  exercised by at least one. Any difference is named by scenario, step and
+  transport. The suite found two on its first run and both are fixed: MCP
+  rendered `revision_policy:protected` as `revision_policy`, and an outbox
+  receipt for `sop_revise` did not say which version it drafted. The refusal
+  mapping is now one module (`agentco/refusals.py`) shared by HTTP and MCP.
+- **Per-level conformance tests** a harness owner can run themselves — built:
+  `agentco conform --level L1|L2|L3` runs the scenarios for the transports that
+  level relies on against fresh temporary stores and exits non-zero listing
+  what is missing. The test of the test is in
+  [`tests/test_conformance.py`](../tests/test_conformance.py): break a transport
+  and the suite names it.
+- **Published byte budget** alongside the twelve-tool count — held by `conform
+  --level L2` as well as by the test suite: twelve tools, 12,500 schema bytes,
+  measured the same way in both places.
 
 ---
 

@@ -176,6 +176,7 @@ export AGENTCO_VERIFIERS=you         # who may answer judged gates; unset, `veri
 
 python3 -m agentco keygen you > ~/.agentco/keys.json   # then chmod 600
 python3 -m agentco serve --port 8787                   # loopback by default
+python3 -m agentco conform --level L2                  # the transports you rely on are the core, or it says what differs
 ```
 
 Or in Docker — one container, state on a named volume, port published to

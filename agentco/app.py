@@ -61,7 +61,8 @@ from fastapi.responses import JSONResponse
 from agentco import auth, db, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
-from agentco.policy import RevisionPolicyError
+from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
+from agentco.refusals import classify
 from agentco.sop import (
     EXECUTOR_FIELD,
     LINK_FIELD,
@@ -116,45 +117,9 @@ def _int(payload: dict, key: str, default: int) -> int:
 
 
 def _work_refusal(exc: Exception) -> Refusal:
-    """Translate the queue's and library's own exceptions into refusals.
+    """The one classification, shared with the MCP surface — see agentco/refusals.py."""
+    return classify(exc)
 
-    These modules predate `Refusal` and raise their own types, in which the
-    message IS the remediation by their own convention — so it travels
-    unchanged rather than being reworded into something that no longer matches
-    the library's words. What this adds is the part only the HTTP surface can
-    decide: the status code, and a stable code to branch on.
-
-    Nothing here may fall through to the generic 500. A fenced report arriving
-    late is the queue working exactly as designed; reporting it as a server bug
-    would teach a worker its correct behaviour is a crash.
-    """
-    if isinstance(exc, NaturalKeyError):
-        return Refusal(code="natural_key_invalid", message=str(exc),
-                       remediation=str(exc), http_status=400)
-    if isinstance(exc, CapabilityError):
-        return Refusal(code="capability_mismatch", message=str(exc),
-                       remediation=str(exc), http_status=409)
-    if isinstance(exc, DecompositionError):
-        # 422: the body named a tree position this item may not take. Not a
-        # conflict with the state of the world — the bound was known.
-        return Refusal(code="decomposition_bound", message=str(exc),
-                       remediation=str(exc), http_status=422)
-    if isinstance(exc, WorkError):
-        # LeaseError and BlockedError both land here. 409 rather than 422: the
-        # request was well-formed and lost to the state of the world, which is
-        # a conflict, not a malformed body.
-        return Refusal(code="work_conflict", message=str(exc),
-                       remediation=str(exc), http_status=409)
-    if isinstance(exc, RevisionPolicyError):
-        # 403, not 422: the body was well-formed and the actor authenticated.
-        # What was refused is who asked. `rule` names which of the three.
-        return Refusal(code=f"revision_policy:{exc.rule}", message=str(exc),
-                       remediation=str(exc), http_status=403)
-    if isinstance(exc, SopError):
-        return Refusal(code="sop_refused", message=str(exc),
-                       remediation=str(exc), http_status=422)
-    return Refusal(code="invalid_request", message=str(exc),
-                   remediation=str(exc), http_status=400)
 
 OPERATOR_ENV_VAR = "AGENTCO_REGISTRY_OPERATOR"
 # The identity excluded from the adoption gate's own publisher count —
