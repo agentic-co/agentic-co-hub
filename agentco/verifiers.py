@@ -38,7 +38,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from agentco import gates
+from agentco import events, gates
 from agentco.work import Queue, WorkItem, WorkStatus
 
 # Re-exported from `gates` rather than defined twice. `work.attest` enforces it,
@@ -76,13 +76,20 @@ def verifies(item: WorkItem) -> Optional[str]:
     return (item.metadata or {}).get(VEHICLE_MARKER)
 
 
-def route_open_gates(queue: Queue, *, dry_run: bool = False) -> dict:
+def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
     """Give every parked judged or human gate a vehicle, and retire moot ones.
 
     Both directions in one pass, because they are the same bookkeeping: a
     verifier can only act on what is routed to it, and a vehicle whose verdict
     arrived elsewhere is a queue entry that will be claimed by somebody with
     nothing to do.
+
+    `conn` is the registry connection. Given one, the pass emits `WorkParked`
+    the first time it notices a parked gate — carrying the PARK time rather than
+    the observation time, so a consumer reads when the gate actually started
+    waiting and not when a cron happened to look. Without it the pass still
+    routes; making a gate claimable and telling anybody it exists are different
+    jobs, and only the second needs a feed.
 
     Idempotent by inspection rather than by catching a duplicate: `create`
     announces a suppressed duplicate on stderr, which is right for a human
@@ -143,6 +150,23 @@ def route_open_gates(queue: Queue, *, dry_run: bool = False) -> dict:
                 "subject_title": item.title,
             },
         )
+        if conn is not None:
+            deadline = due_at(item)
+            events.append(
+                conn,
+                kind="WorkParked",
+                actor=events.PLANE_ACTOR,
+                occurred_at=(_parked_at(item) or _now()).isoformat(),
+                payload={
+                    "itemId": item.id,
+                    "title": item.title,
+                    "gateKind": gate["kind"],
+                    "check": gate.get("check"),
+                    "assignedTo": plan["assigned_agent"],
+                    "requires": plan["requires"],
+                    "dueAt": deadline.isoformat() if deadline else None,
+                },
+            )
 
     for vehicle in items:
         if not is_vehicle(vehicle) or vehicle.status in (WorkStatus.DONE, WorkStatus.FAILED):
@@ -217,7 +241,13 @@ def due_at(item: WorkItem) -> Optional[datetime]:
     return started + timedelta(seconds=int(gate["max_park_seconds"]))
 
 
-def sweep_park_clocks(queue: Queue, *, now: Optional[datetime] = None, dry_run: bool = False) -> dict:
+def sweep_park_clocks(
+    queue: Queue,
+    *,
+    now: Optional[datetime] = None,
+    conn=None,
+    dry_run: bool = False,
+) -> dict:
     """Resolve every gate whose park clock has run out, by its declared default.
 
     **Correctness without liveness is a deadlock with good intentions.** A gate
@@ -273,6 +303,21 @@ def sweep_park_clocks(queue: Queue, *, now: Optional[datetime] = None, dry_run: 
             escalated.append({"item": item.id, "to": gate.get("escalate_to"), "waited": waited})
             if not dry_run:
                 queue.annotate(item.id, {ESCALATED_KEY: {**record, "to": gate.get("escalate_to")}})
+                if conn is not None:
+                    events.append(
+                        conn,
+                        kind="GateEscalated",
+                        actor=events.PLANE_ACTOR,
+                        occurred_at=at.isoformat(),
+                        payload={
+                            "itemId": item.id,
+                            "title": item.title,
+                            "to": gate.get("escalate_to"),
+                            "waitedSeconds": waited,
+                            "declaredSeconds": int(gate["max_park_seconds"]),
+                            "check": gate.get("check"),
+                        },
+                    )
             continue
 
         resolved.append({"item": item.id, "default": default, "waited": waited})

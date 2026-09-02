@@ -458,11 +458,15 @@ def cmd_verifiers(args) -> int:
     from agentco.work import Queue, resolve_work_store
 
     queue = Queue(resolve_work_store(args.work_store))
+    # The registry connection is what lets the passes emit onto the change feed,
+    # which is the only way a parked gate reaches anything downstream. Opened
+    # lazily so a read-only status call needs no database at all.
+    conn = _conn(args) if (args.route or args.sweep) else None
     report = {"status": verifiers.verifier_status(queue)}
     if args.route:
-        report["routing"] = verifiers.route_open_gates(queue, dry_run=args.dry_run)
+        report["routing"] = verifiers.route_open_gates(queue, conn=conn, dry_run=args.dry_run)
     if args.sweep:
-        report["sweep"] = verifiers.sweep_park_clocks(queue, dry_run=args.dry_run)
+        report["sweep"] = verifiers.sweep_park_clocks(queue, conn=conn, dry_run=args.dry_run)
 
     if args.json:
         print(json.dumps(report, indent=2))

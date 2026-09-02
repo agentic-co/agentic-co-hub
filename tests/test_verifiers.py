@@ -469,3 +469,94 @@ def test_the_oldest_outstanding_gate_is_reported(queue):
     status = verifiers.verifier_status(queue, now=later(3600))
     assert status["outstanding"] == 1
     assert status["oldestOutstandingSeconds"] >= 3600
+
+
+# --------------------------------------------------------------------------- #
+# The change feed carries work-queue events at all
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def registry(tmp_path):
+    from agentco import db
+
+    return db.connect(tmp_path / "registry.sqlite3")
+
+
+def feed(conn, kind=None):
+    from agentco import events as events_mod
+
+    rows = events_mod.read(conn)["events"]
+    return [e for e in rows if kind is None or e["kind"] == kind]
+
+
+def test_routing_a_parked_gate_puts_it_on_the_change_feed(queue, registry):
+    """**The substrate that was missing.** The feed is how everything else here
+    reaches a harness — the tier-1 splice, the session hook, the digest sender
+    all read it — and a work item entering `awaiting_verify` emitted nothing, so
+    no tier could surface it even in principle."""
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    verifiers.route_open_gates(queue, conn=registry)
+
+    [event] = feed(registry, "WorkParked")
+    assert event["payload"]["itemId"] == item.id
+    assert event["payload"]["gateKind"] == "human"
+    assert event["payload"]["assignedTo"] == "dana"
+    assert event["payload"]["dueAt"] is not None
+    assert event["actor"] == "agentco", "the plane observed this; no person caused it"
+
+
+def test_the_event_carries_the_park_time_not_the_observation_time(queue, registry):
+    """A cron looked at 09:05; the gate has been waiting since 08:00. A consumer
+    deciding whether that is urgent needs the second number.
+
+    The first version of this test parked and routed in the same second, so
+    dropping `occurred_at` entirely changed nothing it could see — it passed
+    against a mutation that removed the mechanism. The park time is now pushed
+    an hour into the past, which is the only version that can fail.
+    """
+    item = park(queue)
+    an_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    queue.annotate(item.id, {"verify_parked_at": an_hour_ago})
+
+    verifiers.route_open_gates(queue, conn=registry)
+    [event] = feed(registry, "WorkParked")
+    assert event["occurredAt"] == an_hour_ago, (
+        "the feed stamped when the cron looked, not when the gate started waiting"
+    )
+
+
+def test_an_escalation_reaches_the_feed_with_who_and_how_long(queue, registry):
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    verifiers.sweep_park_clocks(queue, now=later(), conn=registry)
+
+    [event] = feed(registry, "GateEscalated")
+    assert event["payload"] == {
+        "itemId": item.id,
+        "title": item.title,
+        "to": "dana",
+        "waitedSeconds": 120,
+        "declaredSeconds": 60,
+        "check": gate(kind="human", on_timeout="escalate")["check"],
+    }
+
+
+def test_the_passes_work_without_a_registry_and_emit_nothing(queue):
+    """Routing and the clock are about the QUEUE. A caller with no registry
+    connection still gets both; it just gets no feed, which is the honest
+    degradation — the alternative is a pass that refuses to run because a
+    downstream consumer is not configured."""
+    park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    assert len(verifiers.route_open_gates(queue)["created"]) == 1
+    assert len(verifiers.sweep_park_clocks(queue, now=later())["escalated"]) == 1
+
+
+def test_events_are_not_re_emitted_on_every_pass(queue, registry):
+    """The pass runs every few minutes. A feed that repeats itself is a feed
+    whose consumers learn to ignore it."""
+    park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    for _ in range(3):
+        verifiers.route_open_gates(queue, conn=registry)
+        verifiers.sweep_park_clocks(queue, now=later(), conn=registry)
+    assert len(feed(registry, "WorkParked")) == 1
+    assert len(feed(registry, "GateEscalated")) == 1
