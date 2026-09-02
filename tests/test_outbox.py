@@ -399,7 +399,12 @@ def test_a_line_from_an_unconfigured_harness_reaches_the_registry(tmp_path):
     """The whole of L1, end to end: append a line holding no credential, run the
     drainer, and the claim is in the registry under the machine's identity with
     the harness named as unverified."""
-    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    app = create_app(
+        db_path=str(tmp_path / "registry.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        keys=KEYS,
+    )
     client = TestClient(app)
     registry = LoopbackRegistry("bigmac", client)
 
@@ -418,7 +423,12 @@ def test_a_line_from_an_unconfigured_harness_reaches_the_registry(tmp_path):
 def test_a_registry_refusal_comes_back_as_a_refusal_not_a_retry(tmp_path):
     """A too-broad prefix is refused by the registry every time. Recording that
     as a transport failure would retry it on every drain forever."""
-    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    app = create_app(
+        db_path=str(tmp_path / "registry.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        keys=KEYS,
+    )
     registry = LoopbackRegistry("bigmac", TestClient(app))
 
     box = Outbox(tmp_path / ".agentco")
@@ -478,7 +488,12 @@ def test_a_gate_can_be_answered_through_the_zero_config_floor(tmp_path):
     The verifier's drainer signs as a DIFFERENT machine, and that is the
     deployment rather than a detail of the fixture — see the test below.
     """
-    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    app = create_app(
+        db_path=str(tmp_path / "registry.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        keys=KEYS,
+    )
     client = TestClient(app)
     executor = LoopbackRegistry("bigmac", client)
 
@@ -533,7 +548,12 @@ def test_a_judged_gate_cannot_be_closed_from_the_machine_that_executed_it(tmp_pa
     what a judged gate means. The deterministic case is unaffected, because
     there the executor IS the intended attester.
     """
-    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    app = create_app(
+        db_path=str(tmp_path / "registry.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        keys=KEYS,
+    )
     client = TestClient(app)
     executor = LoopbackRegistry("bigmac", client)
 
@@ -568,7 +588,12 @@ def test_a_judged_gate_cannot_be_closed_from_the_machine_that_executed_it(tmp_pa
 def test_a_deterministic_gate_is_answered_by_its_own_executor_through_the_floor(tmp_path):
     """The other half: a deterministic gate is MEANT to be attested by whoever
     completed it, so the same machine relaying it is the intended path."""
-    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    app = create_app(
+        db_path=str(tmp_path / "registry.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        keys=KEYS,
+    )
     client = TestClient(app)
     executor = LoopbackRegistry("bigmac", client)
 
@@ -613,7 +638,12 @@ def test_a_failed_gate_is_visible_in_the_receipt_not_hidden_behind_published(tmp
     is that its gate said no — and before the item's status was lifted into the
     receipt, that reached nobody at all.
     """
-    app = create_app(db_path=str(tmp_path / "registry.sqlite3"), keys=KEYS)
+    app = create_app(
+        db_path=str(tmp_path / "registry.sqlite3"),
+        work_store=str(tmp_path / "work.jsonl"),
+        sop_store=str(tmp_path / "sops.jsonl"),
+        keys=KEYS,
+    )
     client = TestClient(app)
     executor = LoopbackRegistry("bigmac", client)
 
