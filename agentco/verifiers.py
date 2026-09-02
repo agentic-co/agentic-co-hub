@@ -35,7 +35,7 @@ like a delivery. The stuck-gate digest is the honest floor until then.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from agentco import gates
@@ -173,4 +173,118 @@ def route_open_gates(queue: Queue, *, dry_run: bool = False) -> dict:
         "created": created,
         "retired": retired,
         "capability": VERIFY_CAPABILITY,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The park clock
+# --------------------------------------------------------------------------- #
+
+# How a gate was resolved, recorded on every item the clock touches. A reader
+# must be able to tell a VERIFIED pass from a pass nobody gave — otherwise the
+# clock quietly manufactures verified work, which is the most expensive lie this
+# system could tell about itself.
+RESOLUTION_KEY = "verify_resolution"
+ESCALATED_KEY = "verify_escalated"
+
+
+def _parked_at(item: WorkItem) -> Optional[datetime]:
+    """When the clock started. `updated_at` is the fallback, and it is honest.
+
+    `report_result` stamps `verify_parked_at` when it parks a gated item, so
+    anything parked by this version has an exact answer. An item parked by an
+    EARLIER version has none, and the moment it last changed is the closest
+    truthful thing available — a clock that refused to start on those would
+    leave the oldest parked gates, the very ones most likely to be stuck, as the
+    only ones nothing ever resolves.
+    """
+    raw = (item.metadata or {}).get("verify_parked_at") or item.updated_at
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def due_at(item: WorkItem) -> Optional[datetime]:
+    """When this item's gate runs out of time, or None if it has no clock."""
+    gate = item.verify or {}
+    started = _parked_at(item)
+    if not gate or started is None:
+        return None
+    return started + timedelta(seconds=int(gate["max_park_seconds"]))
+
+
+def sweep_park_clocks(queue: Queue, *, now: Optional[datetime] = None, dry_run: bool = False) -> dict:
+    """Resolve every gate whose park clock has run out, by its declared default.
+
+    **Correctness without liveness is a deadlock with good intentions.** A gate
+    that nobody answers is the ordinary case, not the exception — the reviewer
+    is on holiday, the verifier node is misconfigured, the person left. Without
+    this, every one of those becomes an item that blocks its dependents forever,
+    and the queue's own answer to "what is stuck" is silence.
+
+    So a deadline resolves. `pass` completes the item, `fail` rejects it, and
+    `escalate` hands it to the named party and keeps it parked — because
+    escalating IS the declared outcome there, and closing it would be answering
+    a question the gate explicitly said a person should answer.
+
+    **A default resolution is never recorded as a verdict.** Nothing gets an
+    attestation it did not earn: the item carries a resolution record naming the
+    clock, the default that fired and how long it waited, so "verified" and
+    "nobody looked and the default said pass" are distinguishable forever after.
+    The alternative is a queue that manufactures its own green.
+
+    Only `awaiting_verify` has a clock. A `verify_failed` item is not waiting on
+    anybody — it is waiting on a fix, which the retry policy governs, and a
+    second clock on top of that would close items whose repair was in progress.
+    """
+    at = now or _now()
+    resolved: list[dict] = []
+    escalated: list[dict] = []
+
+    for item in queue.list():
+        if item.status is not WorkStatus.AWAITING_VERIFY:
+            continue
+        deadline = due_at(item)
+        if deadline is None or deadline > at:
+            continue
+
+        gate = item.verify or {}
+        default = gate.get("on_timeout")
+        waited = int((at - (_parked_at(item) or at)).total_seconds())
+        record = {
+            "by": "park-clock",
+            "default": default,
+            "waited_seconds": waited,
+            "declared_seconds": int(gate["max_park_seconds"]),
+            "resolved_at": at.isoformat(),
+            # Said out loud in the record itself, because this is the field
+            # somebody will read six weeks from now while deciding whether to
+            # trust the outcome above it.
+            "note": "resolved by the declared default, NOT by a verdict — no check was run",
+        }
+
+        if default == "escalate":
+            if (item.metadata or {}).get(ESCALATED_KEY):
+                continue  # already handed over; the digest keeps surfacing it
+            escalated.append({"item": item.id, "to": gate.get("escalate_to"), "waited": waited})
+            if not dry_run:
+                queue.annotate(item.id, {ESCALATED_KEY: {**record, "to": gate.get("escalate_to")}})
+            continue
+
+        resolved.append({"item": item.id, "default": default, "waited": waited})
+        if dry_run:
+            continue
+        if default == "pass":
+            queue.resolve_by_default(item.id, WorkStatus.DONE, record)
+        else:
+            queue.resolve_by_default(item.id, WorkStatus.VERIFY_FAILED, record)
+
+    return {
+        "state": "dry-run" if dry_run else "swept",
+        "resolved": resolved,
+        "escalated": escalated,
     }

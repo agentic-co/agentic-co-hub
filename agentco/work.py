@@ -1190,6 +1190,62 @@ class Queue:
 
         return self._mutate(item_id, fence)
 
+    def annotate(self, item_id: str, metadata: dict) -> Optional[WorkItem]:
+        """Merge keys into an item's metadata, changing nothing else.
+
+        Deliberately narrow. It cannot touch status, lease, blockers or the
+        gate — a general `update` is how a gate becomes editable by whoever
+        holds the item, which is the tautology `attest` refuses one layer up.
+        """
+
+        def merge(item: WorkItem) -> dict:
+            return {"metadata": {**(item.metadata or {}), **metadata}}
+
+        return self._mutate(item_id, merge)
+
+    def resolve_by_default(
+        self,
+        item_id: str,
+        status: WorkStatus,
+        resolution: dict,
+    ) -> Optional[WorkItem]:
+        """Close a gate on the clock rather than on a verdict. Never grants evidence.
+
+        The park clock's only way to move an item, and separate from `attest` on
+        purpose: `attest` records that somebody checked, and this records that
+        nobody did and the gate said what to do about it. Sharing a path would
+        make the two indistinguishable in the store a week later, and "verified"
+        would come to mean "either verified or nobody looked".
+
+        So `attestation` is untouched — an item resolved this way keeps whatever
+        evidence it genuinely had, which for a parked judged gate is none.
+        """
+        if status not in (WorkStatus.DONE, WorkStatus.VERIFY_FAILED):
+            raise ValueError(
+                f"a park clock resolves to done or verify_failed, got {status.value}"
+            )
+
+        def resolve(item: WorkItem) -> dict:
+            if item.status is not WorkStatus.AWAITING_VERIFY:
+                raise LeaseError(
+                    f"refusing to resolve {item_id}: it is {item.status.value}, not "
+                    f"awaiting a verdict. The clock runs on parked gates only — "
+                    f"anything else has an answer already, and a default must not "
+                    f"replace one."
+                )
+            metadata = {**(item.metadata or {}), "verify_resolution": resolution}
+            updates: dict = {"status": status, "metadata": metadata}
+            if status is WorkStatus.VERIFY_FAILED:
+                updates["verify_failures"] = item.verify_failures + 1
+                metadata["verify_retry"] = {
+                    "failures": item.verify_failures + 1,
+                    "decision": gates.retry_decision(item.verify_failures + 1),
+                    "decided_at": _iso(_now()),
+                }
+            return updates
+
+        return self._mutate(item_id, resolve)
+
     def reap_expired_leases(self, now: Optional[datetime] = None) -> list[WorkItem]:
         """Return in-progress items whose lease has expired to the ready set.
 
