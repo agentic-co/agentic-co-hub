@@ -127,11 +127,11 @@ fixtures, so every work-queue and SOP test is a conformance test. A contract
 proven against one implementation is a description of that implementation.
 
 Twelve tools, and twelve is a ceiling enforced by a test rather than
-remembered. Ten are built: `claim_scope`, `release_scope`, `snapshot`,
+remembered. All twelve are built: `claim_scope`, `release_scope`, `snapshot`,
 `events`, `work_pull`, `work_report`, `work_create`, `sop_get`, `whoami`,
-`attest`. Two more are reserved names, not yet tools — `sop_revise` and
-`sop_activate`, added to the count by
-`docs/decisions/0002-participation-ladder.md` before either ships.
+`attest`, and — with Phase 4, behind the revision policy — `sop_revise` and
+`sop_activate`, the two names `docs/decisions/0002-participation-ladder.md`
+reserved before either shipped.
 A large tool surface costs every calling harness context on every
 tool-choice decision it makes — that is paid by every conversation, not just
 the one using it. A thirteenth tool means deleting one. The count is a proxy

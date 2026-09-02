@@ -46,7 +46,7 @@ exists to prevent, and a duplicate one is visible and harmless.
 was never about the verb: a push set naming something the drainer cannot deliver
 is a queue that fills with lines nobody can send, so a verb waits for its
 transport and is refused with "not yet" until then. `sop_revise` and
-`sop_activate` are where `attest` was, and land with Phase 4.
+`sop_activate` waited there too, and landed with Phase 4.
 """
 
 from __future__ import annotations
@@ -92,13 +92,22 @@ PUSH_VERBS: tuple[str, ...] = (
     # judged gate's attestation is. The reviewer is somewhere else, or it is
     # not a review.
     "adjudicate",
+    # Landed with Phase 4, the last two names the participation ladder reserved.
+    # A lesson learned on an unconfigured harness reaches the shared procedure
+    # through the same file as everything else — as a DRAFT, authored by the
+    # drainer's machine credential, so the revision policy applies to it
+    # exactly as to any agent: a protected step is refused at the registry, and
+    # nothing here activates unless a line says so and the policy agrees.
+    "sop_revise",
+    "sop_activate",
 )
 
 # Reserved for the push set, blocked on their transport rather than on a
 # decision. Named here so that a line using one gets a refusal that says
 # "not yet" instead of "never", which are different instructions to the caller.
-# `attest` was the first entry and graduated; these two land with Phase 4.
-PENDING_VERBS: tuple[str, ...] = ("sop_revise", "sop_activate")
+# `attest` was the first entry and graduated; `sop_revise` and `sop_activate`
+# followed with Phase 4. Empty now, kept as the mechanism for the next name.
+PENDING_VERBS: tuple[str, ...] = ()
 
 LINE_FIELDS = ("line_id", "at", "verb", "payload", "agent_label")
 
@@ -615,6 +624,13 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
                 payload["evidence"],
                 agent_label=label,
             )
+        if verb == "sop_revise":
+            body = dict(payload.get("changes") or {})
+            if payload.get("title") is not None:
+                body["title"] = payload["title"]
+            return registry.sop_revise(payload["sopId"], **body)
+        if verb == "sop_activate":
+            return registry.sop_activate(payload["sopId"], payload["version"])
         if verb == "work_report":
             return registry.work_report(
                 payload["itemId"],

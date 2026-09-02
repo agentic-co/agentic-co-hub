@@ -83,18 +83,28 @@ def test_the_push_set_carries_reports_and_not_filings():
         # Same test as attest: a statement about work somebody did, from
         # somebody who did not do it. Joined the day its endpoint shipped (P4.1).
         "adjudicate",
+        # The last two reserved names, landed with Phase 4 (P4.5). A lesson
+        # from an unconfigured harness reaches the shared procedure as a draft
+        # under the drainer's credential — and the revision policy.
+        "sop_revise",
+        "sop_activate",
     }
 
 
-def test_a_reserved_verb_is_refused_as_not_yet_rather_than_never(box):
+def test_a_reserved_verb_is_refused_as_not_yet_rather_than_never(box, monkeypatch):
     """A verb that belongs in the push set but has no transport yet. The refusal
     has to say which, because "not yet" and "never" are different instructions.
 
-    `attest` was the first name here and graduated the day its endpoint shipped,
-    which is the behaviour this pair of lists is for: the wait is on the
-    transport, never on the verb."""
+    `attest` was the first name here and graduated the day its endpoint shipped;
+    `sop_revise` and `sop_activate` followed with Phase 4, so the list is empty
+    today. The mechanism stays, and is exercised here with a name of the
+    future's: the wait is on the transport, never on the verb."""
+    assert PENDING_VERBS == (), "every reserved verb has shipped — update this test when one is added"
+    from agentco import outbox as outbox_module
+
+    monkeypatch.setattr(outbox_module, "PENDING_VERBS", ("sop_retire",))
     with pytest.raises(Refusal) as caught:
-        box.push(PENDING_VERBS[0], {"sopId": "sop-1"})
+        box.push("sop_retire", {"sopId": "sop-1"})
     assert "no transport yet" in caught.value.message
     assert "Hold this line" in caught.value.remediation
 

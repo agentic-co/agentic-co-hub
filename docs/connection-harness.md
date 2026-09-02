@@ -33,7 +33,7 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | **Adjudication tagging** — `good`/`bad`, adjudicator ≠ executor | built (`Queue.adjudicate`) | — |
 | **Plan-vs-actual** — plan under the pin, review at completion | built (`work.plan_vs_actual`) | — |
 | **Revision proposals** — accumulated from adjudications, drafted through the policy | built (`SopLibrary.propose`, `agentco lessons`) | — |
-| **`sop_revise` / `sop_activate` on MCP** | HTTP only; reserved in the outbox push set | L2 |
+| **`sop_revise` / `sop_activate` on MCP** and in the outbox push set | built (P4.4, P4.5) — twelve of twelve tools; eight push verbs | L2 |
 | Conformance suite | absent | all |
 
 One of those absences is worth naming plainly. **Shared learning, the headline
@@ -229,8 +229,16 @@ systems — needs the rails before it needs the loop.
   existing versions are untouched: an instance pinned to v1 reads the same v1
   after the pass. Proposals carry forward across versions until a reviser
   addresses or clears them.
-- **`sop_revise` and `sop_activate` on MCP**, closing the shared-learning write
-  gap — behind the policy, or the gap closes onto an unpoliced path.
+- **`sop_revise` and `sop_activate` on MCP** — built, tools eleven and twelve
+  of twelve, inside the byte budget. The write path for shared learning on the
+  primary surface, behind the policy: the tool takes `changes` (SOP fields;
+  `null` clears one) and the author is the process identity with the kind the
+  operator declared in `AGENTCO_HUMANS`. In remote mode the proxy forwards
+  neither — the registry takes the author from the signature and the kind from
+  its own declaration, so a caller cannot become human by configuring a proxy.
+  The same two verbs graduated from the outbox's reserved list into the push
+  set, drained under the machine credential as drafts; `PENDING_VERBS` is
+  empty and stays as the mechanism for the next name.
 
 *Proven by:* the eval harness in [`../evals/`](../evals/README.md), which
 already exists. Phase 4 is the first point at which its `asop_lesson` arm has

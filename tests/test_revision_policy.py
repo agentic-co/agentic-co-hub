@@ -507,10 +507,16 @@ def test_over_http_a_human_step_is_instantiated_with_its_gate(tmp_path):
 
 
 def test_over_http_the_body_cannot_declare_the_kind(tmp_path):
-    """`author_kind` in the payload is not a body key. A caller cannot become
-    human by saying so."""
+    """`author_kind` in the payload is refused, not ignored. A caller cannot
+    become human by saying so — and must not believe it did."""
     client = _client(tmp_path)
-    created = _post(client, "/sops", "fixer-bot", {"title": "t", "purpose": "p", "author_kind": "human", "author": "dana"})
-    assert created.status_code == 200, created.text
-    assert created.json()["sop"]["author_kind"] == AGENT
-    assert created.json()["sop"]["author"] == "fixer-bot"
+    for body in ({"author_kind": "human"}, {"author": "dana"}):
+        created = _post(client, "/sops", "fixer-bot", {"title": "t", "purpose": "p", **body})
+        assert created.status_code == 400, created.text
+        assert created.json()["code"] == "author_from_signature"
+    created = _post(client, "/sops", "fixer-bot", {"title": "t", "purpose": "p"})
+    sop = created.json()["sop"]
+    assert (sop["author"], sop["author_kind"]) == ("fixer-bot", AGENT)
+    for path in (f"/sops/{sop['sop_id']}/revise", f"/sops/{sop['sop_id']}/activate"):
+        refused_ = _post(client, path, "fixer-bot", {"purpose": "q", "version": 1, "author_kind": "human"})
+        assert refused_.status_code == 400, (path, refused_.text)

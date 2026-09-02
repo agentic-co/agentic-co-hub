@@ -57,7 +57,7 @@ would only reject later, at a point where the caller has no chance to react.
 ## The push set — and what is deliberately not in it
 
 ```python
-PUSH_VERBS = ("claim_scope", "release_scope", "snapshot", "work_report", "attest", "adjudicate")
+PUSH_VERBS = ("claim_scope", "release_scope", "snapshot", "work_report", "attest", "adjudicate", "sop_revise", "sop_activate")
 ```
 
 **Any tool may push. No tool may file.** `work_create` is not in the push
@@ -89,10 +89,15 @@ the two are written together.
 
 `attest` joined the set the day its transport shipped. It was the first name on
 the reserved list, and the list works exactly that way: a verb waits for
-somewhere to send it, never for a decision about whether it belongs. A line
-using a still-reserved verb — `sop_revise` and `sop_activate`, which land with
-Phase 4 — gets a refusal that says "not yet", distinct from the refusal an
-unrecognised verb gets, which says "never through this path".
+somewhere to send it, never for a decision about whether it belongs.
+`sop_revise` and `sop_activate` waited there too and landed with Phase 4: a
+lesson pushed from an unconfigured harness reaches the shared procedure as a
+DRAFT, authored by the drainer's machine credential — an agent, under the
+revision policy, unless the operator declared that machine human — and nothing
+activates unless a separate `sop_activate` line says so and the policy agrees.
+The reserved list is empty today and stays as the mechanism: a line using a
+still-reserved verb gets a refusal that says "not yet", distinct from the
+refusal an unrecognised verb gets, which says "never through this path".
 
 **One deployment constraint follows from `attest` being here, and it is the
 separation rule rather than a limitation of the floor.** The drainer signs with
