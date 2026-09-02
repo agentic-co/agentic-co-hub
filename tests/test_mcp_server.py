@@ -320,11 +320,32 @@ def test_work_pull_skips_an_item_it_lacks_the_capability_for(mcp):
     the wrapper must not stop on the first CapabilityError, or a worker with no
     declared capabilities could never drain a mixed queue."""
     tool(mcp, "work_create")(title="needs gpu", requires=["gpu"])
-    assert tool(mcp, "work_pull")(capabilities=[]) is None
+    assert tool(mcp, "work_pull")() is None
 
     plain = tool(mcp, "work_create")(title="no requirements")
-    pulled = tool(mcp, "work_pull")(capabilities=[])
+    pulled = tool(mcp, "work_pull")()
     assert pulled is not None and pulled["id"] == plain["id"]
+
+
+def test_work_pull_takes_neither_an_agent_nor_capabilities_from_the_model(mcp):
+    """FIX-L3.1. The lease holder is what a judged gate's separation check
+    compares the verifier against. When `agent` was a tool argument, a model could
+    pull as "ghost-worker", report, and attest its own work from the same node.
+    Identity and capabilities are configuration; a model is in no position to
+    declare, per call, who the machine it runs on is."""
+    import inspect
+
+    params = set(inspect.signature(mcp._tool_manager.get_tool("work_pull").fn).parameters)
+    assert "agent" not in params
+    assert "capabilities" not in params
+    assert params == {"ttl_seconds"}
+
+
+def test_a_pulled_item_is_leased_to_the_node_not_to_a_name(mcp):
+    created = tool(mcp, "work_create")(title="who claims this")
+    pulled = tool(mcp, "work_pull")()
+    assert pulled["id"] == created["id"]
+    assert pulled["leased_by"] == tool(mcp, "whoami")()["actor"]
 
 
 # --------------------------------------------------------------------------- #

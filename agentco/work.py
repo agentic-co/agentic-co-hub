@@ -948,6 +948,13 @@ class Queue:
         that was waiting on correctness gets released by a different item's
         success.
 
+        The executor this compares against is the lease holder, so the claim
+        "cannot be self-asserted" is only as true as the transport's claim path.
+        HTTP claims as the signed actor; MCP used to accept an `agent` argument
+        and does not any more — a model that could name the executor could name
+        one that was not itself. Any future claim path has to hold the same line
+        or this check is decoration.
+
         `capabilities` is the same self-declared routing list `claim` takes, and
         a judged gate refuses a verdict from a node that does not declare
         `verify`. Be precise about what that buys: capabilities are asserted by
@@ -968,6 +975,16 @@ class Queue:
         verified, and a gate that accepts the executor's verdict is a
         deterministic gate with extra ceremony.
         """
+        if not isinstance(submitted_by, str) or not submitted_by.strip():
+            raise Refusal(
+                code=gates.ATTESTATION_INVALID,
+                message="attest needs an authenticated submitter and got none",
+                remediation=(
+                    "The submitter is the actor the transport authenticated. An "
+                    "empty one would pass the executor-separation check by never "
+                    "equalling anything, which is a verdict from nobody."
+                ),
+            )
         current = self.get(item_id)
         if current is None:
             return None
@@ -1018,7 +1035,7 @@ class Queue:
                         ),
                     )
             executor = (item.metadata or {}).get("lease_report", {}).get("reported_by")
-            if gate.get("kind") != "deterministic" and submitted_by and submitted_by == executor:
+            if gate.get("kind") != "deterministic" and submitted_by == executor:
                 raise Refusal(
                     code=gates.ATTESTATION_INVALID,
                     message=(
@@ -1202,6 +1219,41 @@ class Queue:
             return {"metadata": {**(item.metadata or {}), **metadata}}
 
         return self._mutate(item_id, merge)
+
+    def retire(self, item_id: str, result: str) -> Optional[WorkItem]:
+        """Close an item nobody is working on, without it ever looking worked.
+
+        For routing vehicles that have become moot. `report_result` was the
+        wrong tool for this and the reason was invisible until measured: a
+        report ENDS a lease, so it advances the fence — and `lease_attempt > 0`
+        was how the verifier-presence report decided a vehicle had ever been
+        claimed. Retiring vehicles through the report path therefore flipped a
+        queue that no verifier had ever touched to "configured", which is the
+        exact condition that report exists to catch.
+
+        Refuses anything under a live lease. Somebody holding this item is
+        somebody working it, and the routing pass does not get to take work out
+        of a verifier's hands because its own view of the queue went stale
+        between the read and the write.
+        """
+
+        def close(item: WorkItem) -> dict:
+            if item.status in SETTLED:
+                raise LeaseError(
+                    f"refusing to retire {item_id}: it is already {item.status.value}."
+                )
+            if item.lease_active_at(_now()):
+                raise LeaseError(
+                    f"refusing to retire {item_id}: {item.leased_by!r} holds it until "
+                    f"{item.lease_expires_at}. A live lease is somebody working; "
+                    f"retiring under them would take the work out of their hands."
+                )
+            # The fence is NOT advanced. This item was never handed out, and the
+            # count of times it was handed out has to stay true.
+            return {"status": WorkStatus.DONE, "result": result,
+                    "leased_by": None, "lease_expires_at": None}
+
+        return self._mutate(item_id, close)
 
     def resolve_by_default(
         self,

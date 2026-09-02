@@ -206,14 +206,10 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
             # result saying exactly that.
             retired.append(vehicle.id)
             if not dry_run:
-                queue.report_result(
+                queue.retire(
                     vehicle.id,
-                    vehicle.lease_attempt,
-                    WorkStatus.DONE,
-                    result=(
-                        f"retired by routing: {parent_id} is no longer awaiting a "
-                        f"verdict. The outcome is on the item itself, never here."
-                    ),
+                    f"retired by routing: {parent_id} is no longer awaiting a "
+                    f"verdict. The outcome is on the item itself, never here.",
                 )
 
     return {
@@ -391,7 +387,14 @@ def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
     items = queue.list()
 
     routed = [i for i in items if is_vehicle(i)]
-    claimed_ever = [i for i in routed if i.lease_attempt > 0]
+    # A real claim leaves one of two marks: a live lease, or a report filed by
+    # the holder (`lease_report.reported_by`). The fence count does NOT qualify
+    # — retiring a vehicle used to go through the report path, which advances
+    # it, and that turned a clock-only queue into "a verifier turned up".
+    claimed_ever = [
+        i for i in routed
+        if i.leased_by or ((i.metadata or {}).get("lease_report") or {}).get("reported_by")
+    ]
     quarantined_parents = {i.id for i in items if is_quarantined(i)}
     outstanding = [
         i for i in routed
@@ -547,12 +550,10 @@ def sweep_quarantine(
             if verifies(vehicle) == item.id and vehicle.status not in (
                 WorkStatus.DONE, WorkStatus.FAILED
             ):
-                queue.report_result(
-                    vehicle.id, vehicle.lease_attempt, WorkStatus.DONE,
-                    result=(
-                        f"retired by quarantine: unanswered for {waited}s after "
-                        f"escalation. The gate is still open; it is no longer offered."
-                    ),
+                queue.retire(
+                    vehicle.id,
+                    f"retired by quarantine: unanswered for {waited}s after "
+                    f"escalation. The gate is still open; it is no longer offered.",
                 )
 
     return {"state": "dry-run" if dry_run else "quarantined", "quarantined": quarantined}
