@@ -67,6 +67,15 @@ A plan-vs-actual review is generated **at the moment of completion** (while the 
 still exists), and revision proposals accumulate against the template. The loop closes
 on a cadence — captured per-run, revised deliberately, never silently.
 
+Revision is itself policed when the reviser is an agent. Three rules, generic to
+every registry and computable because versions are immutable and the chain records
+who authored each: protected tags (`money` and `irreversible` by default) are
+immutable to an agent revision; a step's class may ratchet toward human but never
+away from it; and an agent may not reintroduce what a human removed. A human
+reviser is bound by none of these. Without the policy, self-revision is an
+unpoliced write path into the procedures — the one shape a harness with
+production access cannot accept.
+
 ### What an ASOP is not
 
 - Not a prompt file: prose without a gate is advice.
