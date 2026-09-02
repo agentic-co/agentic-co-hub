@@ -173,6 +173,17 @@ TERMINAL = (WorkStatus.DONE, WorkStatus.FAILED)
 # answering again (`Queue.attest`).
 SETTLED = TERMINAL + (WorkStatus.AWAITING_VERIFY, WorkStatus.VERIFY_FAILED)
 
+# How a gate was resolved WITHOUT a verdict — written by `resolve_by_default`
+# and by nothing else. Its presence at the top level of an item's metadata is
+# the statement "the last thing that settled this was a clock, not a check", so
+# a real verdict arriving afterwards has to displace it. It does not delete it:
+# the clock genuinely fired, that is a fact about this item, and it moves under
+# HISTORY_KEY. Left in place, a `done` item carried an attestation next to a
+# note reading "no check was run" — the store contradicting itself about the one
+# thing it exists to be believed on.
+RESOLUTION_KEY = "verify_resolution"
+HISTORY_KEY = "verify_history"
+
 
 def releases_blockers(status: "WorkStatus | str") -> bool:
     """DONE, and nothing else, unblocks what depends on it.
@@ -950,6 +961,14 @@ class Queue:
     ) -> Optional[WorkItem]:
         """Answer a gate. The only transition out of a verify state.
 
+        **A verdict displaces the park clock's record of there being none.** An
+        item the clock failed and a verifier then passed used to close DONE
+        carrying both the attestation and a top-level note reading "no check was
+        run", and every reader — including this module's own presence report —
+        believed the second. The clock's record moves under `HISTORY_KEY`; it is
+        not deleted, because the clock did fire and how long the gate waited
+        before somebody answered it is worth keeping.
+
         **A fix item never substitutes for the work it repairs.** A failed unit
         keeps `VERIFY_FAILED`, and keeps blocking everything downstream, until
         ITS OWN gate runs again and passes — which is this call. Anything else
@@ -1066,6 +1085,16 @@ class Queue:
                 "passed": gates.attestation_passes(record),
                 "re_verify": item.status == WorkStatus.VERIFY_FAILED,
             }
+            # An answer supersedes the absence of one. The clock may have failed
+            # this gate before anybody looked, and that record must not survive
+            # at the top level once somebody has: it says no check was run, and
+            # a reader six weeks from now would find it sitting beside the
+            # evidence of the check. It is moved rather than dropped — the clock
+            # firing happened, and how long this waited before it got a verdict
+            # is the whole history of the gate.
+            superseded = metadata.pop(RESOLUTION_KEY, None)
+            if superseded is not None:
+                metadata[HISTORY_KEY] = [*(metadata.get(HISTORY_KEY) or []), superseded]
             if gates.attestation_passes(record):
                 metadata.pop("verify_retry", None)
                 return {
@@ -1280,6 +1309,12 @@ class Queue:
 
         So `attestation` is untouched — an item resolved this way keeps whatever
         evidence it genuinely had, which for a parked judged gate is none.
+
+        The record it writes under `RESOLUTION_KEY` is a claim about the LAST
+        thing that settled this item, so `attest` moves it into `HISTORY_KEY`
+        when a real verdict arrives afterwards. Nothing here has to know that;
+        it is stated because the two functions jointly own the meaning of that
+        key, and a reader of one of them should not have to find the other.
         """
         if status not in (WorkStatus.DONE, WorkStatus.VERIFY_FAILED):
             raise ValueError(
@@ -1294,7 +1329,7 @@ class Queue:
                     f"anything else has an answer already, and a default must not "
                     f"replace one."
                 )
-            metadata = {**(item.metadata or {}), "verify_resolution": resolution}
+            metadata = {**(item.metadata or {}), RESOLUTION_KEY: resolution}
             updates: dict = {"status": status, "metadata": metadata}
             if status is WorkStatus.VERIFY_FAILED:
                 updates["verify_failures"] = item.verify_failures + 1

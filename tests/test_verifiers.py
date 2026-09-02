@@ -346,6 +346,58 @@ def test_a_default_pass_is_never_recorded_as_a_verdict(queue):
     assert resolution["declared_seconds"] == 60 and resolution["waited_seconds"] >= 60
 
 
+def test_a_verdict_displaces_the_clocks_record_but_does_not_erase_it(queue):
+    """FIX-L3.3. **A done item must never carry a top-level record saying no
+    check was run.** The clock failed this gate and wrote its resolution; a
+    reviewer then answered it for real. `attest` popped `verify_retry` and left
+    `verify_resolution` behind, so the item closed DONE with an attestation
+    sitting next to a note reading "no check was run" — the store contradicting
+    itself about the one thing it exists to be believed on.
+
+    Deleting the resolution would be the other lie. The clock DID fire, and that
+    is true and worth keeping, so it moves under a history key and the top level
+    holds only the transition that actually settled the item.
+    """
+    criteria = gate(on_timeout="fail")
+    item = park(queue, gate=criteria)
+    verifiers.sweep_park_clocks(queue, now=later())
+    assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
+    assert queue.get(item.id).metadata["verify_resolution"]["by"] == "park-clock"
+
+    queue.attest(item.id, attestation(criteria["check"]), "reviewer", capabilities=["verify"])
+
+    closed = queue.get(item.id)
+    assert closed.status is WorkStatus.DONE
+    assert closed.attestation["exit_status"] == 0
+    assert "verify_resolution" not in closed.metadata, (
+        "the top-level record still says nobody checked, and somebody did"
+    )
+    [superseded] = closed.metadata["verify_history"]
+    assert superseded["by"] == "park-clock" and superseded["default"] == "fail"
+    assert "no check was run" in superseded["note"], "the clock firing is still a fact"
+
+
+def test_a_clock_failure_a_verifier_later_overturns_counts_as_a_verdict(queue):
+    """The same defect read through the presence report. `verifier_status`
+    classified on `verify_resolution` first, so an item a reviewer genuinely
+    answered was counted as resolved-by-default — and a queue with real
+    verification happening warned that it was approving its own work on a timer.
+
+    The top-level resolution key is the final-transition test precisely because
+    a verdict displaces it. That is one mechanism, not two: a second
+    discriminator here would be a check no test could prove necessary.
+    """
+    criteria = gate(on_timeout="fail")
+    item = park(queue, gate=criteria)
+    verifiers.sweep_park_clocks(queue, now=later())
+    queue.attest(item.id, attestation(criteria["check"]), "reviewer", capabilities=["verify"])
+
+    status = verifiers.verifier_status(queue)
+    assert status["resolvedByVerdict"] == 1
+    assert status["resolvedByDefault"] == 0
+    assert status["warning"] is None, "a reviewer answered this one"
+
+
 def test_a_default_failure_counts_against_the_retry_policy(queue):
     """A gate that timed out is a failure of this attempt, so the same policy
     applies — one fix, then a human, never a third autonomous try."""
