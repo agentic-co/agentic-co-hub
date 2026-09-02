@@ -191,9 +191,13 @@ when their sections come up — recorded here so the attribution survives:
 
 ## Not planned
 
-Writing to a system of record. Any path that does eventually exist will be separately
-gated, narrow, and off by default. The whole value proposition is that adopting AgentCo
-cannot damage the system you already trust.
+Writing to a system of record, beyond the one path that now exists and was built to the
+constraint this section always stated: separately gated, narrow, and off by default. The
+[write-back connector](writeback.md) notifies an originating record that its human gate
+is parked — a notice, never a state change — and does nothing at all until an operator
+configures a destination. The whole value proposition is that adopting AgentCo cannot
+damage the system you already trust, and a notification path that can only append is the
+largest exception that leaves that true.
 
 ---
 

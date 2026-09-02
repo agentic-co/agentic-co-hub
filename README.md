@@ -109,6 +109,15 @@ ladder has these rungs.
 authoritative. AgentCo never becomes the place work lives, and it holds no competing
 version of a fact another system owns.
 
+There is exactly one path that reaches back the other way, and it is named here rather
+than buried: an **opt-in write-back** ([`docs/writeback.md`](docs/writeback.md)) that can
+tell the record a piece of work came from that its human gate is waiting. It is off
+until configured, it carries a notice and nothing that could change a state or close a
+ticket, and the built-in path POSTs to a URL you control — so the code that touches
+Azure DevOps is yours, holding your credential. Absent that configuration the sentence
+above holds without qualification, which is the only way a promise like it is worth
+making.
+
 **It never blocks anyone.** Scope claims are advisory. If AgentCo is down, every tool
 falls back to exactly what it does today.
 
