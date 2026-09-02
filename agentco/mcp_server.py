@@ -205,9 +205,10 @@ class _LocalBackend:
         return json.loads(self.queue.create(title, **kw).to_json())
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
-               capabilities=None) -> Optional[dict]:
+               capabilities=None, adjudication=None) -> Optional[dict]:
         updated = self.queue.attest(
-            item_id, attestation, submitted_by=submitted_by, capabilities=capabilities
+            item_id, attestation, submitted_by=submitted_by, capabilities=capabilities,
+            adjudication=adjudication,
         )
         return json.loads(updated.to_json()) if updated is not None else None
 
@@ -275,9 +276,10 @@ class _RemoteBackend:
         ).get("item")
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
-               capabilities=None) -> Optional[dict]:
+               capabilities=None, adjudication=None) -> Optional[dict]:
         return self.registry.attest(
-            item_id, attestation, capabilities=list(capabilities or ()) or None
+            item_id, attestation, capabilities=list(capabilities or ()) or None,
+            adjudication=adjudication,
         ).get("item")
 
     def work_create(self, title: str, requires=(), blocked_by=(), assigned_agent=None,
@@ -582,7 +584,7 @@ def create_server(
             raise _refuse(exc) from exc
 
     @mcp.tool(name="attest")
-    def attest(item_id: str, attestation: dict) -> dict:
+    def attest(item_id: str, attestation: dict, adjudication: Optional[dict] = None) -> dict:
         """Answer a gate on an item parked in `awaiting_verify` (or re-run a failed one).
 
         The verifier's verb, as distinct from the executor's `work_report`: a
@@ -598,12 +600,16 @@ def create_server(
 
         The plane verifies the record's shape and stores the claim. It never
         runs the command, which makes this a trust floor rather than a proof.
+
+        `adjudication` — optional `{verdict: good|bad, evidence}` — tags the
+        divergence you saw while verifying. You may not be the executor.
         """
         try:
             updated = backend.attest(
                 item_id,
                 attestation,
                 submitted_by=who,
+                adjudication=adjudication,
                 # The NODE's declared capabilities, from its own configuration —
                 # not an argument on the tool. A model that could pass this
                 # would be declaring, per call, what the machine it runs on is

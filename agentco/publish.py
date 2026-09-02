@@ -296,19 +296,36 @@ class Registry:
         attestation: dict,
         agent_label: Optional[str] = None,
         capabilities: Optional[list[str]] = None,
+        adjudication: Optional[dict] = None,
     ) -> dict:
         """Answer a gate on a parked item. The submitter comes from the signature.
 
         The verb a verifier uses, as distinct from the executor's `work_report`:
         a judged gate exists precisely because the party that did the work may
-        not be the party that says it is correct.
+        not be the party that says it is correct. `adjudication` rides along
+        when the verifier is also judging the divergence they saw.
         """
         body: dict[str, Any] = {"attestation": attestation}
         if agent_label:
             body["agentLabel"] = agent_label
         if capabilities:
             body["capabilities"] = capabilities
+        if adjudication is not None:
+            body["adjudication"] = adjudication
         return self._call("POST", f"/work/{item_id}/attest", body)
+
+    def adjudicate(
+        self,
+        item_id: str,
+        verdict: str,
+        evidence: str,
+        agent_label: Optional[str] = None,
+    ) -> dict:
+        """Tag a divergence `good` or `bad`. The adjudicator is the signature, never the body."""
+        body: dict[str, Any] = {"verdict": verdict, "evidence": evidence}
+        if agent_label:
+            body["agentLabel"] = agent_label
+        return self._call("POST", f"/work/{item_id}/adjudicate", body)
 
     def sop_get(self, sop_id: str, version: Optional[int] = None) -> dict:
         """One version, or the active one. A miss is `sop: null`, not an error."""

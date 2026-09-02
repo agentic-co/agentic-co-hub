@@ -57,7 +57,7 @@ would only reject later, at a point where the caller has no chance to react.
 ## The push set — and what is deliberately not in it
 
 ```python
-PUSH_VERBS = ("claim_scope", "release_scope", "snapshot", "work_report", "attest")
+PUSH_VERBS = ("claim_scope", "release_scope", "snapshot", "work_report", "attest", "adjudicate")
 ```
 
 **Any tool may push. No tool may file.** `work_create` is not in the push
@@ -79,6 +79,13 @@ the other three: it succeeds when the same machine identity already pulled
 the item over L2 (MCP or HTTP) and is now reporting the outcome through the
 cheaper path, not when a harness that has only ever pushed lines tries to
 report work it was never leased.
+
+`adjudicate` joined with Phase 4's first record: a `good` / `bad` tag on a
+divergence, with evidence, from somebody who did not execute the work. The
+drainer's machine credential is the adjudicator, so — as with a judged gate — an
+adjudication relayed from the machine that executed the item is refused as
+self-adjudication. An `attest` line may also carry an `adjudication` object and
+the two are written together.
 
 `attest` joined the set the day its transport shipped. It was the first name on
 the reserved list, and the list works exactly that way: a verb waits for

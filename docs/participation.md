@@ -60,8 +60,8 @@ agent side — a local drainer, run by someone with the registry credential,
 picks the line up, signs it, and delivers it.
 
 The line has five fields — `line_id`, `at`, `verb`, `payload`, and an optional
-`agent_label` — and only five verbs are accepted: `claim_scope`,
-`release_scope`, `snapshot`, `work_report`, `attest`. `work_create` is
+`agent_label` — and only six verbs are accepted: `claim_scope`,
+`release_scope`, `snapshot`, `work_report`, `attest`, `adjudicate`. `work_create` is
 deliberately not in that set: pushing a scope claim or a report is a statement
 about work you're already doing, and filing work into somebody else's queue is
 a different act — it has a consequence for a person who didn't ask for it, and
@@ -154,7 +154,7 @@ reserved names — not yet built, so they don't appear):
 | `work_report` | Report a terminal outcome (`done`/`failed`), fenced against the lease attempt you were issued. |
 | `work_create` | File a new item onto the queue. |
 | `sop_get` | Read one version of a procedure, or the active one. |
-| `attest` | Answer a gate on an item parked `awaiting_verify`, or re-run a failed one — see L3 below. |
+| `attest` | Answer a gate on an item parked `awaiting_verify`, or re-run a failed one — see L3 below. Takes an optional `adjudication` (`{verdict: good\|bad, evidence}`) so the verifier can tag the divergence they saw in the same call; the adjudicator is never the executor, enforced. Over HTTP the tag also has its own endpoint, `POST /work/{id}/adjudicate`. |
 
 Identity is where the two encodings diverge, and it matters for how much you
 trust what you're reading back. Over **stdio** there's no request to sign, so

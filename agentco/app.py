@@ -572,6 +572,49 @@ def create_app(
 
         return await _handle(request, "work_report", work)
 
+    @app.post("/work/{item_id}/adjudicate")
+    async def post_work_adjudicate(item_id: str, request: Request) -> JSONResponse:
+        """Tag a divergence `good` or `bad`, as somebody who did not execute it.
+
+        The adjudicator is the signed actor. A body that tries to name one is
+        refused rather than ignored, because a caller who believed the body
+        field counted would think the executor's own tag had been recorded
+        under a reviewer's name.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            named = sorted({"adjudicator", "by"} & set(payload))
+            if named:
+                raise Refusal(
+                    code="adjudicator_from_signature",
+                    message=f"the body names an adjudicator ({named}); the signature already did",
+                    remediation=(
+                        "Remove it. Who adjudicates is who signed the request — "
+                        "the separation from the executor is checked against "
+                        "that identity and no other."
+                    ),
+                    http_status=400,
+                )
+            try:
+                updated = queue.adjudicate(
+                    item_id,
+                    payload.get("verdict"),
+                    payload.get("evidence"),
+                    adjudicator=actor,
+                )
+            except (WorkError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+            if updated is None:
+                raise Refusal(
+                    code="work_item_unknown",
+                    message=f"no work item {item_id!r} on this queue",
+                    remediation="Check the id came from work_pull or work_create against this registry.",
+                    http_status=404,
+                )
+            return {"state": "accepted", "item": json.loads(updated.to_json())}
+
+        return await _handle(request, "adjudicate", work)
+
     @app.post("/work/{item_id}/attest")
     async def post_work_attest(item_id: str, request: Request) -> JSONResponse:
         """Answer a gate. The only transition out of a verify state.
@@ -610,6 +653,10 @@ def create_app(
                     # signature decides WHO; the body declares what this node is
                     # set up to run, which is routing rather than privilege.
                     capabilities=payload.get("capabilities"),
+                    # The verifier judging the divergence they saw, in the same
+                    # call. Written under `adjudicate`'s rules with the signed
+                    # actor as adjudicator.
+                    adjudication=payload.get("adjudication"),
                 )
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
