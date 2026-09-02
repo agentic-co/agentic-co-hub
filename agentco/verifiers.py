@@ -580,10 +580,15 @@ def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
     # turned up".
     claimed_ever = [i for i in routed if (i.metadata or {}).get("claims")]
     quarantined_parents = {i.id for i in items if is_quarantined(i)}
+    # Outstanding is "nobody is working this now": not settled, no live lease.
+    # Not "never handed out" — a vehicle a verifier claimed and was then reaped
+    # from is exactly as unattended as one nobody ever touched, and reading the
+    # fence here excluded it. (M6 in the third review; the docstring said
+    # unclaimed and the code said attempt-zero, which are different things.)
     outstanding = [
         i for i in routed
         if i.status not in (WorkStatus.DONE, WorkStatus.FAILED)
-        and i.lease_attempt == 0
+        and not i.leased_by
         and verifies(i) not in quarantined_parents
     ]
 
