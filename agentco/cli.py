@@ -513,6 +513,66 @@ def cmd_verifiers(args) -> int:
     return 1 if report["status"]["warning"] else 0
 
 
+def cmd_lessons(args) -> int:
+    """Self-revision, as a pass: what the adjudications propose, and draft it.
+
+    Read-only unless `--propose`. Drafting goes through `SopLibrary.propose`,
+    which is an agent revision under the policy unless `AGENTCO_HUMANS` names
+    the operator — so a protected procedure is refused here exactly as it
+    would be anywhere else, and nothing is ever activated by this command.
+    """
+    from agentco import policy
+    from agentco.sop import SopError, SopLibrary, resolve_sop_store
+    from agentco.work import Queue, resolve_work_store
+
+    queue = Queue(resolve_work_store(args.work_store))
+    library = SopLibrary(resolve_sop_store(args.sop_store))
+    targets = [args.sop] if args.sop else sorted({s.sop_id for s in library.list_active()})
+    actor = os.environ.get("AGENTCO_ACTOR") or "agentco-lessons"
+    report: dict = {"sops": []}
+    status = 0
+    for sop_id in targets:
+        try:
+            view = library.proposals(sop_id, queue)
+        except SopError as exc:
+            print(f"{sop_id}: {exc}", file=sys.stderr)
+            status = 2
+            continue
+        entry = {"proposals": view}
+        if args.propose and view["pending"]:
+            try:
+                draft = library.propose(
+                    sop_id, queue, author=actor,
+                    author_kind=policy.kind_of(actor, policy.humans_from_env()),
+                )
+                entry["drafted"] = json.loads(draft.to_json()) if draft else None
+            except (SopError, ValueError) as exc:
+                entry["refused"] = str(exc)
+                status = 1
+        report["sops"].append(entry)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return status
+    for entry in report["sops"]:
+        view = entry["proposals"]
+        print(f"{view['sopId']}: active v{view['activeVersion']}, latest v{view['latestVersion']} "
+              f"({view['latestStatus']}); {view['pending']} adjudication(s) pending")
+        for e in view["revisions"]:
+            mark = f"→ v{e['proposedIn']}" if e["proposedIn"] else "pending"
+            print(f"  good  {e['itemId']} v{e['pinnedVersion']} [{mark}] {e['evidence']}")
+        for e in view["rootCause"]:
+            mark = f"→ v{e['proposedIn']}" if e["proposedIn"] else "pending"
+            print(f"  bad   {e['itemId']} v{e['pinnedVersion']} [{mark}] {e['evidence']}")
+        for line in view["openProposals"]:
+            print(f"  open proposal: {line}")
+        if "drafted" in entry and entry["drafted"]:
+            print(f"  drafted v{entry['drafted']['version']} (draft — activate deliberately)")
+        if "refused" in entry:
+            print(f"  refused: {entry['refused']}")
+    return status
+
+
 def cmd_writeback(args) -> int:
     """Tell each origin its gate is parked. Off unless configured, and says so.
 
@@ -698,6 +758,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     p_ver.add_argument("--json", action="store_true", help="machine-readable output")
     p_ver.set_defaults(func=cmd_verifiers)
+
+    p_les = sub.add_parser(
+        "lessons",
+        help="self-revision: what the adjudications propose for each procedure, and draft it",
+    )
+    p_les.add_argument("--sop", default=None, help="one SOP id (default: every active procedure)")
+    p_les.add_argument("--work-store", default=None, help="path to the work store")
+    p_les.add_argument("--sop-store", default=None, help="path to the SOP store")
+    p_les.add_argument("--propose", action="store_true", help="draft the next version from pending adjudications")
+    p_les.add_argument("--json", action="store_true", help="machine-readable output")
+    p_les.set_defaults(func=cmd_lessons)
 
     p_wb = sub.add_parser("writeback", help="notify originating records that a gate is parked")
     p_wb.add_argument("--via", default="webhook", help="registered writer name (default: webhook)")

@@ -65,6 +65,7 @@ from agentco.policy import RevisionPolicyError
 from agentco.sop import (
     EXECUTOR_FIELD,
     LINK_FIELD,
+    PROPOSALS_FIELD,
     TAGS_FIELD,
     TEXT_FIELDS,
     SopError,
@@ -86,7 +87,7 @@ from agentco.work import (
 # Derived, never hand-kept: a literal list here would silently drop any field
 # added to sop.py, and the symptom is an SOP that saves without the half the
 # author just wrote.
-SOP_BODY_KEYS = (*TEXT_FIELDS, "common_mistakes", LINK_FIELD, EXECUTOR_FIELD, TAGS_FIELD)
+SOP_BODY_KEYS = (*TEXT_FIELDS, "common_mistakes", LINK_FIELD, EXECUTOR_FIELD, TAGS_FIELD, PROPOSALS_FIELD)
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
@@ -818,6 +819,42 @@ def create_app(
             return {"state": "accepted", "item": json.loads(item.to_json())}
 
         return await _handle(request, "sop_instantiate", work)
+
+    @app.get("/sops/{sop_id}/proposals")
+    async def get_sop_proposals(sop_id: str, request: Request) -> JSONResponse:
+        """What the adjudications say the next version should account for."""
+
+        def work(actor: str, payload: dict) -> dict:
+            try:
+                return library.proposals(sop_id, queue)
+            except (SopError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+
+        return await _handle(request, "sop_proposals", work)
+
+    @app.post("/sops/{sop_id}/propose")
+    async def post_sop_propose(sop_id: str, request: Request) -> JSONResponse:
+        """Draft the next version from pending adjudications. Never activates.
+
+        The signed actor is the author, and the policy applies to them as to
+        any reviser — a proposal is an agent revision unless the operator says
+        the caller is human. `nothing_pending` is a state, not an error.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            try:
+                draft = library.propose(
+                    sop_id, queue,
+                    author=actor,
+                    author_kind=policy.kind_of(actor, declared_humans),
+                )
+            except (SopError, WorkError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+            if draft is None:
+                return {"state": "nothing_pending", "sop": None}
+            return {"state": "drafted", "sop": json.loads(draft.to_json())}
+
+        return await _handle(request, "sop_propose", work)
 
     @app.get("/sops/{sop_id}/chain")
     async def get_sop_chain(sop_id: str, request: Request) -> JSONResponse:

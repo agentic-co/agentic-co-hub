@@ -318,6 +318,18 @@ _0006 = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0007 — `sops.proposals`: revision proposals accumulating against the template.
+#
+# One line per `good` adjudication, written by `SopLibrary.propose` onto the
+# draft it creates and carried forward until a reviser addresses or dismisses
+# it. NOT NULL DEFAULT '[]' for the reason `tags` is: JSON columns are decoded
+# unconditionally on read and a NULL would quarantine every pre-existing row.
+# --------------------------------------------------------------------------- #
+
+_0007 = ("ALTER TABLE sops ADD COLUMN proposals TEXT NOT NULL DEFAULT '[]'",)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001),
     Migration(2, "durable-work-and-sops", _0002),
@@ -325,6 +337,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(4, "work-item-gates", _0004),
     Migration(5, "calls-transport-and-label", _0005),
     Migration(6, "sop-class-tags-authorship", _0006),
+    Migration(7, "sop-proposals", _0007),
 )
 
 

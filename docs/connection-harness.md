@@ -32,7 +32,7 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | **Revision policy** — three rules an agent revision obeys, on `revise` and `activate` | built ([`agentco/policy.py`](../agentco/policy.py)) | — |
 | **Adjudication tagging** — `good`/`bad`, adjudicator ≠ executor | built (`Queue.adjudicate`) | — |
 | **Plan-vs-actual** — plan under the pin, review at completion | built (`work.plan_vs_actual`) | — |
-| **Revision proposals** | **absent** | — |
+| **Revision proposals** — accumulated from adjudications, drafted through the policy | built (`SopLibrary.propose`, `agentco lessons`) | — |
 | **`sop_revise` / `sop_activate` on MCP** | HTTP only; reserved in the outbox push set | L2 |
 | Conformance suite | absent | all |
 
@@ -213,9 +213,22 @@ systems — needs the rails before it needs the loop.
   adjudicator concludes, and this is what they read. Both keys are reserved at
   create; `instantiate` holds the caller's own metadata to that rule before it
   files. An item that pins no procedure gets no review.
-- **Revision proposals** accumulating against the template — good adjudications
-  feed the next version, bad ones feed root-cause. Proposals pass through the
-  same policy as any other agent revision.
+- **Revision proposals** — built. `SopLibrary.proposals` is the accumulated
+  view over the adjudicated instances pinned to a procedure: `good` ones are
+  revision proposals, `bad` ones are root-cause pointers, each marked with the
+  draft that consumed it. `SopLibrary.propose` is the deliberate step — `agentco
+  lessons --propose`, `POST /sops/{id}/propose` — that turns the pending ones
+  into a DRAFT through `revise`: good adjudications land as entries in the
+  procedure's `proposals` list (the evidence the next author reads; the plane
+  never writes the prose), bad ones as `common_mistakes` — the lesson channel
+  the eval harness measures. The draft is an agent revision unless the operator
+  declared the caller human, so the policy holds in full: a protected step is
+  refused, a lesson a human removed does not come back, a proposal a human
+  dismissed stays dismissed. The lesson cap refuses rather than drops — which
+  mistake stopped biting is a human's call. Nothing here activates, and the
+  existing versions are untouched: an instance pinned to v1 reads the same v1
+  after the pass. Proposals carry forward across versions until a reviser
+  addresses or clears them.
 - **`sop_revise` and `sop_activate` on MCP**, closing the shared-learning write
   gap — behind the policy, or the gap closes onto an unpoliced path.
 
