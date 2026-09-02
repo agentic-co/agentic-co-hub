@@ -1062,6 +1062,21 @@ class Queue:
                             f"is the same rule reaching the verdict."
                         ),
                     )
+            named = gate.get("verifier")
+            if gate.get("kind") == "human" and named and submitted_by != named:
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=(
+                        f"{item.id}'s human gate names {named!r} to answer it, and "
+                        f"{submitted_by!r} is not that person"
+                    ),
+                    remediation=(
+                        f"Have {named!r} attest, or revise the gate to name whoever "
+                        f"should. A human gate exists to put ONE named person's "
+                        f"judgement on the work; a verdict from anyone else who is "
+                        f"merely not the executor is a judged gate wearing a name."
+                    ),
+                )
             executor = (item.metadata or {}).get("lease_report", {}).get("reported_by")
             if gate.get("kind") != "deterministic" and submitted_by == executor:
                 raise Refusal(
