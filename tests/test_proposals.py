@@ -197,7 +197,7 @@ def test_a_lesson_a_human_removed_does_not_come_back_through_the_pass(library, q
     # Forge the exact lesson text a human removed, to prove the policy sees it.
     record = dict(queue.get(item.id).metadata["adjudication"])
     record["evidence"] = "testing on prod"
-    queue.annotate(item.id, {"adjudication": record})
+    queue.annotate(item.id, {"adjudication": record}, by_plane=True)
     # The pass appends "(adjudicated bad on ...)" so the text differs; what the
     # policy guards is the human's exact removal. Prove that path directly:
     with pytest.raises(RevisionPolicyError):
@@ -324,3 +324,114 @@ def test_the_cli_pass_reports_and_drafts(tmp_path, capsys, monkeypatch):
     assert drafted["version"] == 2 and drafted["author"] == "agentco-lessons" and drafted["author_kind"] == AGENT
     assert drafted["common_mistakes"][0].startswith("reported done without running the diff")
     assert library.get(sop.sop_id).version == 1, "the CLI never activates either"
+
+
+# --------------------------------------------------------------------------- #
+# second-party findings (Max, 4465f65) — each closed with the test that caught it
+# --------------------------------------------------------------------------- #
+
+
+def test_a_dismissed_proposal_does_not_jam_the_loop(library, queue):
+    """Finding 1: a consumed adjudication whose mark was lost (crash window)
+    after a human dismissed its text refused every later pass by rule 3 —
+    forever. Now a dismissed text is consumed AS dismissed and the rest moves."""
+    sop = procedure(library)
+    first = adjudicated(library, queue, sop, "good", "first")
+    draft = library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT)
+    library.revise(sop.sop_id, proposals=None, author="dana", author_kind=HUMAN)  # dismissed
+    # The crash window: consumption never got recorded.
+    record = dict(queue.get(first.id).metadata["adjudication"]); record.pop(PROPOSED_KEY)
+    queue.annotate(first.id, {"adjudication": record}, by_plane=True)
+    assert library.proposals(sop.sop_id, queue)["pending"] == 1
+
+    second = adjudicated(library, queue, sop, "good", "second")
+    redraft = library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT)
+    assert redraft is not None, "the pass is not jammed"
+    assert [p.split(" (")[0] for p in redraft.proposals] == ["second"], "the dismissed text stays dismissed"
+    marked = queue.get(first.id).metadata["adjudication"]
+    assert marked[PROPOSED_KEY] == redraft.version and marked["dismissed_by_human"] is True
+    assert library.proposals(sop.sop_id, queue)["pending"] == 0
+    assert library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT) is None
+
+
+def test_a_full_lesson_channel_does_not_hold_good_proposals_hostage(library, queue):
+    """Finding 2: the cap refused the whole pass. Now goods are drafted, the
+    lessons the cap has no room for stay PENDING — neither dropped nor blocking."""
+    sop = procedure(library, common_mistakes=[f"known mistake {i}" for i in range(MAX_COMMON_MISTAKES)])
+    bad = adjudicated(library, queue, sop, "bad", "one more")
+    good = adjudicated(library, queue, sop, "good", "step 2 is redundant")
+    draft = library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT)
+    assert draft is not None and len(draft.proposals) == 1
+    assert draft.common_mistakes == sop.common_mistakes, "the cap held the lesson channel"
+    view = library.proposals(sop.sop_id, queue)
+    assert {e["itemId"]: e["proposedIn"] for e in view["revisions"]} == {good.id: draft.version}
+    assert {e["itemId"]: e["proposedIn"] for e in view["rootCause"]} == {bad.id: None}, "pending, not dropped"
+    # Only when NOTHING can move is the cap a refusal — and a loud one.
+    with pytest.raises(SopError) as caught:
+        library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT)
+    assert "human's call" in str(caught.value)
+
+
+def test_the_cap_boundary_is_exact(library, queue):
+    """Mutant Q2 (`>` vs `>=`) survived: exactly-at-cap drafts, one over defers."""
+    sop = procedure(library, common_mistakes=[f"known mistake {i}" for i in range(MAX_COMMON_MISTAKES - 1)])
+    adjudicated(library, queue, sop, "bad", "fits")
+    draft = library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT)
+    assert len(draft.common_mistakes) == MAX_COMMON_MISTAKES
+    adjudicated(library, queue, sop, "bad", "does not fit")
+    with pytest.raises(SopError):
+        library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT)
+
+
+def test_proposals_are_isolated_per_procedure(library, queue):
+    """Mutant Q4 survived: nothing pinned the cross-SOP filter."""
+    a, b = procedure(library), procedure(library)
+    adjudicated(library, queue, a, "good", "about a")
+    adjudicated(library, queue, b, "bad", "about b")
+    draft_a = library.propose(a.sop_id, queue, author="bot", author_kind=AGENT)
+    assert [p.split(" (")[0] for p in draft_a.proposals] == ["about a"] and draft_a.common_mistakes == []
+    draft_b = library.propose(b.sop_id, queue, author="bot", author_kind=AGENT)
+    assert draft_b.proposals == [] and draft_b.common_mistakes[0].startswith("about b")
+
+
+def test_later_drafts_do_not_move_v1s_pointer(library, queue):
+    """Mutant Q8 survived: only the first draft's `superseded_by` was asserted."""
+    sop = procedure(library)
+    adjudicated(library, queue, sop, "good", "one")
+    library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT)
+    adjudicated(library, queue, sop, "good", "two")
+    library.propose(sop.sop_id, queue, author="bot", author_kind=AGENT)
+    assert library.get(sop.sop_id, version=1).superseded_by == 2
+    assert library.get(sop.sop_id, version=2).superseded_by == 3
+    assert library.get(sop.sop_id, version=3).superseded_by is None
+
+
+def test_over_http_propose_refuses_a_body_that_names_the_author(tmp_path):
+    """Finding 3: `/propose` ignored body author fields where `/revise` refuses them."""
+    client, sop, _ = _http_setup(tmp_path)
+    refused = _post(client, f"/sops/{sop['sop_id']}/propose", "bot", {"author_kind": "human"})
+    assert refused.status_code == 400 and refused.json()["code"] == "author_from_signature"
+    assert _get(client, f"/sops/{sop['sop_id']}/proposals", "kofi").json()["pending"] == 1, "nothing drafted"
+
+
+def test_the_cli_pass_honours_the_operators_declaration(tmp_path, capsys, monkeypatch):
+    """Mutant Q7 survived: the CLI's human path was untested."""
+    from agentco.sop import SopLibrary
+    from agentco.work import Queue
+
+    queue = Queue(tmp_path / "work.jsonl")
+    library = SopLibrary(tmp_path / "sops.jsonl")
+    sop = procedure(library, tags=["money"])
+    adjudicated(library, queue, sop, "good", "approval step is redundant")
+    args = ["lessons", "--work-store", str(tmp_path / "work.jsonl"), "--sop-store", str(tmp_path / "sops.jsonl"),
+            "--propose", "--json"]
+
+    monkeypatch.setenv("AGENTCO_ACTOR", "dana")
+    monkeypatch.delenv("AGENTCO_HUMANS", raising=False)
+    assert cli.main(args) == 1, "an agent's pass on a protected step is refused"
+    assert "protected" in json.loads(capsys.readouterr().out)["sops"][0]["refused"]
+
+    monkeypatch.setenv("AGENTCO_HUMANS", "dana")
+    assert cli.main(args) == 0
+    drafted = json.loads(capsys.readouterr().out)["sops"][0]["drafted"]
+    assert drafted["author"] == "dana" and drafted["author_kind"] == HUMAN

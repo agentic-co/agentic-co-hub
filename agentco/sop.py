@@ -843,50 +843,103 @@ class SopLibrary:
         too, but this says why first.
 
         Returns None when nothing is pending, so a scheduled pass that finds
-        nothing to do is a quiet run, not an error.
+        nothing to do is a quiet run, not an error. Good proposals are drafted
+        even when the lesson channel is full: the cap holds the lesson channel,
+        not the whole loop, and the lessons it has no room for stay pending
+        rather than being dropped or blocking the rest.
         """
         view = self.proposals(sop_id, queue)
         pending_good = [e for e in view["revisions"] if e["proposedIn"] is None]
         pending_bad = [e for e in view["rootCause"] if e["proposedIn"] is None]
         if not pending_good and not pending_bad:
             return None
-        latest = self.history(sop_id)[-1]
+        history = self.history(sop_id)
+        latest = history[-1]
+
+        # What a human has already dismissed. An entry a human removed from the
+        # list is one rule 3 forbids an agent to put back — and the pass is an
+        # agent. Proposing it again would refuse the whole draft, every time,
+        # for every adjudication that came after: one dismissed text would jam
+        # the loop forever. So a dismissed text is CONSUMED as dismissed — the
+        # adjudication is marked, the text is not re-proposed — and the human's
+        # word stands without holding everything else hostage to it.
+        _, forbidden = policy.forbidden_states(
+            history, scalar_fields=POLICY_SCALAR_FIELDS, list_fields=POLICY_LIST_FIELDS
+        )
+
+        def dismissed(field_name: str, text: str) -> bool:
+            return (field_name, text, "present") in forbidden
 
         body: dict = {}
-        if pending_bad:
-            lessons = list(latest.common_mistakes)
-            for entry in pending_bad:
-                lesson = lesson_text(entry["itemId"], entry["by"], entry["evidence"])
-                if lesson not in lessons:
-                    lessons.append(lesson)
-            if len(lessons) > MAX_COMMON_MISTAKES:
-                raise SopError(
-                    f"cannot draft {sop_id!r}: {len(pending_bad)} pending lesson(s) would "
-                    f"put common_mistakes at {len(lessons)}; the cap is "
-                    f"{MAX_COMMON_MISTAKES}. The cap is the discipline — which mistake "
-                    f"has stopped biting is a human's call. Prune the list in a human "
-                    f"revision, then run the pass again."
-                )
+        consumed: list[dict] = []          # entries the draft carries
+        dismissed_entries: list[dict] = []  # entries a human already said no to
+        present_entries: list[dict] = []    # lessons a hand had already typed
+        deferred: list[dict] = []           # lessons the cap has no room for
+
+        lessons = list(latest.common_mistakes)
+        for entry in pending_bad:
+            lesson = lesson_text(entry["itemId"], entry["by"], entry["evidence"])
+            if dismissed("common_mistakes", lesson):
+                dismissed_entries.append(entry)
+            elif lesson in lessons:
+                # Somebody typed this exact lesson already. Consumed — there is
+                # nothing to add — but marked so provenance keeps it a hand's:
+                # the loop did not write it, it found it there.
+                present_entries.append(entry)
+            elif len(lessons) >= MAX_COMMON_MISTAKES:
+                deferred.append(entry)
+            else:
+                lessons.append(lesson)
+                consumed.append(entry)
+        if lessons != list(latest.common_mistakes):
             body["common_mistakes"] = lessons
-        if pending_good:
-            proposals = list(latest.proposals)
-            for entry in pending_good:
-                proposal = (
-                    f"{entry['evidence']} (adjudicated good on {entry['itemId']} by "
-                    f"{entry['by']}; v{entry['pinnedVersion']} was wrong here)"
-                )
+
+        proposals = list(latest.proposals)
+        for entry in pending_good:
+            proposal = (
+                f"{entry['evidence']} (adjudicated good on {entry['itemId']} by "
+                f"{entry['by']}; v{entry['pinnedVersion']} was wrong here)"
+            )
+            if dismissed(PROPOSALS_FIELD, proposal):
+                dismissed_entries.append(entry)
+            else:
                 if proposal not in proposals:
                     proposals.append(proposal)
+                consumed.append(entry)
+        if proposals != list(latest.proposals):
             body[PROPOSALS_FIELD] = proposals
 
-        draft = self.revise(sop_id, author=author, author_kind=author_kind, **body)
-        for entry in pending_good + pending_bad:
+        if not body:
+            if deferred and not dismissed_entries:
+                # Nothing could move and the ONLY reason is the cap. Loud, and
+                # names the human decision — the cap is the discipline, and
+                # which mistake has stopped biting is not the pass's call.
+                raise SopError(
+                    f"cannot draft {sop_id!r}: {len(deferred)} pending lesson(s) and "
+                    f"common_mistakes already holds {MAX_COMMON_MISTAKES}, the cap. Which "
+                    f"mistake has stopped biting is a human's call. Prune the list in a "
+                    f"human revision, then run the pass again."
+                )
+            draft = None
+        else:
+            draft = self.revise(sop_id, author=author, author_kind=author_kind, **body)
+
+        marker = draft.version if draft is not None else latest.version
+        for entry, note in (
+            *((e, None) for e in consumed),
+            *((e, "dismissed_by_human") for e in dismissed_entries),
+            *((e, "already_present") for e in present_entries),
+        ):
             item = queue.get(entry["itemId"])
             if item is None:
                 continue
             record = dict((item.metadata or {}).get("adjudication") or {})
-            record[PROPOSED_KEY] = draft.version
-            queue.annotate(item.id, {"adjudication": record})
+            record[PROPOSED_KEY] = marker
+            if note:
+                record[note] = True
+            queue.annotate(item.id, {"adjudication": record}, by_plane=True)
+        # Deferred lessons stay PENDING — not consumed, not dropped — and show
+        # in `proposals()` until a human makes room.
         return draft
 
     def lesson_provenance(self, sop_id: str, queue: Queue, version: Optional[int] = None) -> dict:
@@ -919,6 +972,9 @@ class SopLibrary:
                 continue
             consumed = adjudication.get(PROPOSED_KEY)
             if adjudication.get("verdict") != "bad" or consumed is None or consumed > sop.version:
+                continue
+            if adjudication.get("already_present"):
+                # The pass found this lesson already typed. It did not write it.
                 continue
             text = lesson_text(item.id, adjudication.get("by"), adjudication.get("evidence"))
             loop_entries[text] = {"itemId": item.id, "by": adjudication.get("by"), "proposedIn": consumed}

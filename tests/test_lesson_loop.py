@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from agentco.policy import AGENT, HUMAN
-from agentco.sop import SopError, lesson_text
+from agentco.sop import PROPOSED_KEY, SopError, lesson_text
 from agentco.work import WorkStatus
 from evals.arms import Arm, render
 from evals.ledger import Ledger
@@ -129,12 +129,15 @@ def test_a_hand_that_copies_the_loops_wording_before_the_loop_ran_is_still_a_han
         "nothing has consumed the adjudication yet"
     )
 
-    draft = library.propose(sop.sop_id, queue, author="agentco-lessons", author_kind=AGENT)
-    assert draft.common_mistakes == [line], "same text; the loop deduplicated it"
-    assert library.lesson_provenance(sop.sop_id, queue, version=typed.version)["hand"] == [line], (
-        "at the version the person typed it, it is still the person's"
+    assert library.propose(sop.sop_id, queue, author="agentco-lessons", author_kind=AGENT) is None, (
+        "same text already there; nothing to draft"
     )
-    assert [e["lesson"] for e in library.lesson_provenance(sop.sop_id, queue, version=draft.version)["loop"]] == [line]
+    marked = queue.get(item.id).metadata["adjudication"]
+    assert marked[PROPOSED_KEY] == typed.version and marked["already_present"] is True
+    assert library.lesson_provenance(sop.sop_id, queue, version=typed.version)["hand"] == [line], (
+        "the pass found it there; it did not write it — still the person's"
+    )
+    assert library.proposals(sop.sop_id, queue)["pending"] == 0
 
 
 def test_a_good_adjudication_never_counts_as_a_lesson(library, queue):

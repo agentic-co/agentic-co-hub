@@ -642,7 +642,7 @@ def test_an_item_parked_before_the_clock_existed_still_gets_one(queue):
     one has none, and refusing to start its clock would leave the OLDEST parked
     gates — the ones most likely to be stuck — as the only ones nothing resolves."""
     item = park(queue, gate=gate(on_timeout="pass"))
-    queue.annotate(item.id, {"verify_parked_at": None})
+    queue.annotate(item.id, {"verify_parked_at": None}, by_plane=True)
     assert verifiers.due_at(queue.get(item.id)) is not None
     assert len(verifiers.sweep_park_clocks(queue, now=later())["resolved"]) == 1
 
@@ -741,7 +741,7 @@ def test_outstanding_excludes_a_quarantined_parents_vehicle(queue):
 
     queue.annotate(item.id, {verifiers.QUARANTINE_KEY: {
         "at": later().isoformat(), "escalated_to": "dana", "unanswered_seconds": 999999,
-    }})
+    }}, by_plane=True)
 
     assert verifiers.verifier_status(queue)["outstanding"] == 0
 
@@ -821,7 +821,7 @@ def test_the_event_carries_the_park_time_not_the_observation_time(queue, registr
     """
     item = park(queue)
     an_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    queue.annotate(item.id, {"verify_parked_at": an_hour_ago})
+    queue.annotate(item.id, {"verify_parked_at": an_hour_ago}, by_plane=True)
 
     verifiers.route_open_gates(queue, conn=registry)
     [event] = feed(registry, "WorkParked")
@@ -1007,7 +1007,7 @@ def test_the_digest_leads_with_the_count_and_sorts_by_neglect(queue):
     old_item, _ = abandoned(queue, title="ignored for ages")
     new_item, _ = abandoned(queue, title="ignored recently")
     queue.annotate(old_item.id, {"verify_parked_at":
-                                 (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()})
+                                 (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()}, by_plane=True)
     much_later = later(9 * 86400)
     verifiers.sweep_quarantine(queue, now=much_later)
 

@@ -200,7 +200,12 @@ systems — needs the rails before it needs the loop.
   `POST /work/{id}/adjudicate`; an `adjudication` rider on `attest` over HTTP,
   MCP and the outbox — which is how it reaches the primary surface without a
   thirteenth tool; and the `adjudicate` outbox verb. Refusals write nothing;
-  a rider the executor offers refuses the whole `attest` call.
+  a rider the executor offers refuses the whole `attest` call, a rider on a
+  deterministic gate is refused up front (attesting one makes you an executor),
+  and a rider that names its adjudicator is refused rather than ignored. Every
+  holder the item ever had counts as an executor, reaped leases included; and
+  `annotate` — the plane's own metadata merge — refuses plane-owned keys unless
+  the caller is the plane, so the in-process boundary matches the transports'.
 - **Plan-vs-actual review** — built. `instantiate` copies the procedure's own
   words (`title`, `definition_of_done`, `validation`, `entry_check`) under the
   pin as `metadata.sop_plan`, so the review reads what the executor was handed
@@ -225,11 +230,14 @@ systems — needs the rails before it needs the loop.
   the eval harness measures. The draft is an agent revision unless the operator
   declared the caller human, so the policy holds in full: a protected step is
   refused, a lesson a human removed does not come back, a proposal a human
-  dismissed stays dismissed. The lesson cap refuses rather than drops — which
-  mistake stopped biting is a human's call. Nothing here activates, and the
-  existing versions are untouched: an instance pinned to v1 reads the same v1
-  after the pass. Proposals carry forward across versions until a reviser
-  addresses or clears them.
+  dismissed stays dismissed — and is consumed as dismissed, so one human "no"
+  never jams the pass for every adjudication after it. The lesson cap holds
+  the lesson channel, not the loop: good proposals still draft, and the lessons
+  the cap has no room for stay pending — neither dropped nor blocking — until a
+  human prunes; only when nothing at all can move is the cap a refusal, and a
+  loud one. Nothing here activates, and the existing versions are untouched: an
+  instance pinned to v1 reads the same v1 after the pass. Proposals carry
+  forward across versions until a reviser addresses or clears them.
 - **`sop_revise` and `sop_activate` on MCP** — built, tools eleven and twelve
   of twelve, inside the byte budget. The write path for shared learning on the
   primary surface, behind the policy: the tool takes `changes` (SOP fields;

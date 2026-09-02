@@ -411,3 +411,83 @@ def test_over_the_outbox_an_attest_line_carries_the_rider(tmp_path):
     stored = Queue(tmp_path / "work.jsonl").get(item["id"])
     assert stored.status == WorkStatus.DONE
     assert stored.metadata["adjudication"]["by"] == "reviewer-box", "the machine credential adjudicated"
+
+
+# --------------------------------------------------------------------------- #
+# second-party findings (Max, c34530c) — each closed with the test that caught it
+# --------------------------------------------------------------------------- #
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+def test_a_rider_may_not_name_its_adjudicator(queue):
+    """Finding 2: a rider carrying `by` was ignored; two mutants that honoured
+    it survived. Now it is refused, and nothing lands."""
+    item = queue.create("judged", verify=JUDGED)
+    leased = queue.claim(item.id, "kofi")
+    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
+    with pytest.raises(Refusal) as caught:
+        queue.attest(item.id, attestation(), submitted_by="kofi", capabilities=["verify"],
+                     adjudication={"verdict": "good", "evidence": "x", "by": "dana"})
+    assert caught.value.code == ADJUDICATION_INVALID and "['by']" in caught.value.message
+    after = queue.get(item.id)
+    assert after.status == WorkStatus.AWAITING_VERIFY and "adjudication" not in (after.metadata or {})
+
+
+def test_a_deterministic_gate_rider_is_refused_before_the_verdict_lands(queue):
+    """Finding 3: a non-executor's rider on a deterministic gate landed the
+    attestation and THEN refused the tag — a partial write. Now the whole call
+    is refused up front: attesting a deterministic gate makes you an executor."""
+    item = queue.create("gated", verify=DETERMINISTIC)
+    leased = queue.claim(item.id, "kofi")
+    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE,
+                        attestation=attestation("pytest -q", exit_status=1))
+    with pytest.raises(Refusal) as caught:
+        queue.attest(item.id, attestation("pytest -q", 0), submitted_by="dana",
+                     adjudication={"verdict": "good", "evidence": "the check was flaky"})
+    assert caught.value.code == ADJUDICATION_SELF
+    after = queue.get(item.id)
+    assert after.status == WorkStatus.VERIFY_FAILED, "the attestation did not land"
+    assert (after.attestation or {}).get("submitted_by") != "dana"
+    # Without the rider the same attestation is fine, and dana adjudicates separately? No —
+    # dana is now an executor; a third party adjudicates.
+    queue.attest(item.id, attestation("pytest -q", 0), submitted_by="dana")
+    with pytest.raises(Refusal):
+        queue.adjudicate(item.id, "good", "x", adjudicator="dana")
+    assert queue.adjudicate(item.id, "good", "the check was flaky", adjudicator="eve")
+
+
+def test_a_reaped_first_holder_is_still_an_executor(queue):
+    """Finding 4: kofi's lease lapsed and was reaped; dana finished the work.
+    For idempotent work dana reported what kofi did — kofi may not grade it."""
+    t0 = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+    item = queue.create("idempotent export")
+    assert queue.claim(item.id, "kofi", ttl_seconds=60, now=t0) is not None
+    reaped = queue.reap_expired_leases(now=t0 + timedelta(minutes=5))
+    assert [r.id for r in reaped] == [item.id]
+    leased = queue.claim(item.id, "dana", now=t0 + timedelta(minutes=6))
+    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
+    assert set(executors_of(queue.get(item.id))) == {"kofi", "dana"}
+    for who in ("kofi", "dana"):
+        with pytest.raises(Refusal) as caught:
+            queue.adjudicate(item.id, "good", "x", adjudicator=who)
+        assert caught.value.code == ADJUDICATION_SELF
+    assert queue.adjudicate(item.id, "good", "x", adjudicator="eve")
+
+
+def test_annotate_cannot_forge_or_erase_plane_owned_keys(queue):
+    """Finding 1: `annotate` merged anything, including `adjudication` (a
+    forged tag) and `lease_report` (erasing the executor). Reserved keys now
+    need `by_plane`, which no transport can pass."""
+    item = executed(queue, agent="kofi")
+    for key in ("adjudication", "lease_report", "claims", "verifies", "plan_vs_actual"):
+        with pytest.raises(Refusal) as caught:
+            queue.annotate(item.id, {key: {"forged": True}})
+        assert caught.value.code == "metadata_reserved"
+    assert queue.get(item.id).metadata["lease_report"]["reported_by"] == "kofi"
+    with pytest.raises(Refusal):
+        queue.adjudicate(item.id, "good", "x", adjudicator="kofi")
+    # The plane's own passes still write their keys.
+    tagged = queue.annotate(item.id, {"verify_escalated": {"to": "dana"}}, by_plane=True)
+    assert tagged.metadata["verify_escalated"] == {"to": "dana"}
+    assert queue.annotate(item.id, {"note": "ordinary keys are fine"}).metadata["note"]
