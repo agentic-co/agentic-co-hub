@@ -773,4 +773,12 @@ def _thin(result: Any) -> Any:
         for field in ("id", "status", "verify_failures"):
             if item.get(field) is not None:
                 thinned.setdefault(field, item[field])
+    # The same lift for a procedure: a `sop_revise` line whose receipt did not
+    # say which version it drafted left the publisher unable to activate it —
+    # found by the conformance suite the day the verb joined the push set.
+    sop = result.get("sop")
+    if isinstance(sop, dict):
+        for field in ("sop_id", "version", "status"):
+            if sop.get(field) is not None:
+                thinned.setdefault(field, sop[field])
     return thinned or None

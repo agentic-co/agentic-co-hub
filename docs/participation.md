@@ -15,6 +15,10 @@ MCP, all against the same registry.
 | **L2 worker** | The full ten-tool surface: pull queued work, report outcomes, read the change feed, read SOPs. | One line in `.mcp.json`, or a signed HTTP client. |
 | **L3 verifier** | Intended to answer judged/human gates that an executor cannot grade itself. | Deliberate setup — and read the caveat in that section before you build anything around it. |
 
+Whichever level you pick, `agentco conform --level L1|L2|L3` proves the transports it
+relies on behave as the core does, against fresh temporary stores, and exits non-zero
+naming anything that differs — run it after an upgrade, before you trust the new build.
+
 L0 is read-only by design: a harness at that level can see what other agents
 claimed, but has no way to say anything back. If that's a problem the moment
 you read it, that's the ladder doing its job — it's telling you which level you

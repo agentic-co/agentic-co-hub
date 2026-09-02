@@ -71,6 +71,7 @@ from agentco.keys import NaturalKeyError
 # publish.py is standard-library only, so importing it here costs the `mcp`
 # extra nothing — unlike `app`, which would drag FastAPI in (see above).
 from agentco.publish import Registry, RegistryError
+from agentco.refusals import classify
 from agentco.sop import DEFAULT_SOP_STORE, SOP_STORE_ENV_VAR, SopError, SopLibrary, resolve_sop_store
 from agentco.stores import open_queue, open_sop_library, resolve_registry_db
 from agentco.work import (
@@ -155,12 +156,14 @@ def _refuse(exc: Exception) -> ToolError:
     `Refusal.__str__` already renders `"{code}: {message} — {remediation}"`
     (agentco/errors.py), so forwarding it verbatim keeps both halves intact
     for whatever harness is on the other end of the stdio pipe. `WorkError`
-    and `NaturalKeyError` predate `Refusal` and carry no separate code, but
-    by the same convention in their own modules the message IS the
-    remediation, so it travels unchanged rather than being reworded into
-    something that no longer matches the library's own words.
+    and `NaturalKeyError` predate `Refusal` and carry no code of their own, so
+    they pass through `agentco.refusals.classify` — the same mapping the HTTP
+    surface uses — and arrive as `work_conflict: ...`, `sop_refused: ...` and
+    so on. Before that, the same wrong input read as a code on one transport
+    and as prose on another, which is exactly the drift the conformance suite
+    exists to catch. The library's own words are kept; only the code is added.
     """
-    return ToolError(str(exc))
+    return ToolError(str(classify(exc)))
 
 
 class _LocalBackend:
