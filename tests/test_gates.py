@@ -86,9 +86,56 @@ def test_a_misspelled_gate_field_is_refused_rather_than_ignored(queue):
     assert "unknown gate field(s) ['max_park_second']" in caught.value.message
 
 
+def test_max_park_seconds_cannot_exceed_the_thirty_day_ceiling(queue):
+    """FIX-L3.8. `MAX_PARK_SECONDS` had no test — delete the `park >
+    MAX_PARK_SECONDS` refusal and this is the only thing that notices, because
+    every other gate test declares a window well under 30 days.
+
+    A window longer than the ceiling is parking forever with extra steps, and
+    parking forever is the exact state the clock exists to make impossible.
+    """
+    with pytest.raises(Refusal) as caught:
+        queue.create("ship it", verify=dict(DETERMINISTIC, max_park_seconds=gates.MAX_PARK_SECONDS + 1))
+    assert caught.value.code == gates.GATE_INVALID
+    assert "exceeds the ceiling" in caught.value.message
+
+    at_the_ceiling = queue.create("ship it too", verify=dict(DETERMINISTIC, max_park_seconds=gates.MAX_PARK_SECONDS))
+    assert at_the_ceiling.verify["max_park_seconds"] == gates.MAX_PARK_SECONDS
+
+
+def test_max_park_seconds_rejects_a_bool(queue):
+    """FIX-L3.8. `bool` is an `int` in Python, so `max_park_seconds: True`
+    would otherwise normalise to a one-second window without tripping the
+    `isinstance(park, int)` check below it. Delete the `isinstance(park,
+    bool)` guard and this is the only test that catches the item it creates —
+    a gate that reports itself as declaring a sane clock while actually
+    parking for one second.
+    """
+    with pytest.raises(Refusal) as caught:
+        queue.create("ship it", verify=dict(DETERMINISTIC, max_park_seconds=True))
+    assert caught.value.code == gates.GATE_INVALID
+    assert "must be a positive integer" in caught.value.message
+
+
 def test_an_escalation_with_no_destination_is_refused(queue):
     with pytest.raises(Refusal):
         queue.create("ship it", verify=dict(JUDGED, escalate_to=None))
+
+
+def test_escalate_to_set_without_escalate_is_refused(queue):
+    """FIX-L3.8. `escalate_to` and `on_timeout` answer different questions, so
+    a stray `escalate_to` on a gate that never escalates is refused rather
+    than silently ignored — a reader would otherwise have to guess whether it
+    is a leftover from an edit or a destination something actually consults.
+
+    Delete this refusal and the gate is stored carrying a field nothing reads,
+    which is exactly the kind of green-looking no-op this module exists to
+    refuse rather than tolerate.
+    """
+    with pytest.raises(Refusal) as caught:
+        queue.create("ship it", verify=dict(DETERMINISTIC, escalate_to="release-owner"))
+    assert caught.value.code == gates.GATE_INVALID
+    assert "nothing would ever read it" in caught.value.message
 
 
 def test_a_human_gate_with_nobody_named_to_answer_it_is_refused(queue):
