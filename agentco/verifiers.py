@@ -51,6 +51,14 @@ ROUTED_KINDS = ("judged", "human")
 
 VEHICLE_MARKER = "verifies"
 
+RETRY_KEY = "verify_retry"
+
+# Retry decisions (`gates.retry_decision`) that still want somebody to look.
+# `stop` is absent on purpose: the policy has already said there is no third
+# autonomous attempt, and a pass that kept offering the item would be the queue
+# overruling the decision it recorded one call earlier.
+REROUTED_DECISIONS = ("fix", "escalate")
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -66,6 +74,34 @@ def vehicle_key(item: WorkItem) -> str:
     exactly like nobody caring.
     """
     return f"verify:{item.id}:{item.verify_failures}"
+
+
+def needs_a_verifier(item: WorkItem) -> bool:
+    """True while this item's own gate is still waiting for somebody to answer it.
+
+    Two states qualify, and the second is the one L3 missed. `awaiting_verify`
+    is the obvious case. `verify_failed` is the ASOP re-verify invariant: a
+    failed unit keeps blocking everything downstream until ITS OWN gate runs
+    again and passes, so it is still owed a route — and it was never getting
+    one, because routing looked at `awaiting_verify` alone and nothing anywhere
+    returns an item there. The result was zero live vehicles and a sweep that
+    walked past the item forever.
+
+    Which failed items qualify is the retry policy's call, read off the record
+    the failure wrote rather than recomputed from the failure count. The
+    decision is a fact this queue stored; deriving it again here would be a
+    second opinion about it, and the two would eventually disagree. An item
+    carrying no decision at all is not routed: nothing said to try again, and
+    inventing that is how a `stop` becomes another attempt.
+    """
+    if is_vehicle(item) or (item.verify or {}).get("kind") not in ROUTED_KINDS:
+        return False
+    if item.status is WorkStatus.AWAITING_VERIFY:
+        return True
+    if item.status is not WorkStatus.VERIFY_FAILED:
+        return False
+    decision = ((item.metadata or {}).get(RETRY_KEY) or {}).get("decision")
+    return decision in REROUTED_DECISIONS
 
 
 def is_vehicle(item: WorkItem) -> bool:
@@ -100,19 +136,30 @@ def origin_of(item: WorkItem) -> dict:
 
 
 def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
-    """Give every parked judged or human gate a vehicle, and retire moot ones.
+    """Give every judged or human gate still owed an answer a vehicle, and
+    retire the moot ones.
 
     Both directions in one pass, because they are the same bookkeeping: a
     verifier can only act on what is routed to it, and a vehicle whose verdict
     arrived elsewhere is a queue entry that will be claimed by somebody with
     nothing to do.
 
+    "Still owed an answer" is `needs_a_verifier`, and it covers a REJECTED gate
+    as well as a parked one. That is the half this pass was missing: it routed
+    `awaiting_verify` alone, nothing returns a rejected item there, so after a
+    verdict-fail the item had no live vehicle and never got another one. Each
+    attempt is keyed separately, so the superseded vehicle is retired in the
+    same pass that files the new one — otherwise two verifiers hold two items
+    for one question.
+
     `conn` is the registry connection. Given one, the pass emits `WorkParked`
     the first time it notices a parked gate — carrying the PARK time rather than
     the observation time, so a consumer reads when the gate actually started
-    waiting and not when a cron happened to look. Without it the pass still
-    routes; making a gate claimable and telling anybody it exists are different
-    jobs, and only the second needs a feed.
+    waiting and not when a cron happened to look. A re-verify emits nothing: the
+    item is not parked, no clock is running on it, and a consumer told otherwise
+    would start timing a wait that is not happening. Without a connection the
+    pass still routes; making a gate claimable and telling anybody it exists are
+    different jobs, and only the second needs a feed.
 
     Idempotent by inspection rather than by catching a duplicate: `create`
     announces a suppressed duplicate on stderr, which is right for a human
@@ -121,26 +168,24 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
     stays as the backstop for two passes racing.
     """
     items = queue.list()
-    by_id = {i.id for i in items}
+    by_id = {i.id: i for i in items}
     routed_for = {verifies(i): i for i in items if is_vehicle(i)}
 
     created: list[dict] = []
     retired: list[str] = []
 
     for item in items:
-        if is_vehicle(item):
+        if not needs_a_verifier(item):
             continue
         gate = item.verify or {}
-        if gate.get("kind") not in ROUTED_KINDS:
-            continue
-        if item.status is not WorkStatus.AWAITING_VERIFY:
-            continue
         existing = routed_for.get(item.id)
-        if existing is not None and existing.status not in (WorkStatus.DONE, WorkStatus.FAILED):
-            continue
         if existing is not None and existing.natural_key == vehicle_key(item):
-            # Already answered for this attempt. A new one appears only when
-            # the failure count moves, which is what a re-verify does.
+            # This attempt is already routed — live, or closed because it was
+            # answered or quarantined. One clause rather than two: a vehicle for
+            # the CURRENT attempt is owed nothing further whatever state it is
+            # in, and a live vehicle for a superseded attempt is exactly what
+            # the retire loop below is for. Nothing new appears until the
+            # failure count moves, which is what a re-verify does.
             continue
 
         plan = {
@@ -178,9 +223,18 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
                 # first, and the whole point of routing is that they do not
                 # have to go looking.
                 "subject_title": item.title,
+                # Which attempt this is. A re-verify vehicle is not a fresh
+                # review — somebody already said no once — and a verifier who
+                # cannot tell the difference from the item in front of them will
+                # grade it as if nobody had.
+                "attempt": item.verify_failures,
             },
         )
-        if conn is not None:
+        if conn is not None and item.status is WorkStatus.AWAITING_VERIFY:
+            # Only a genuinely parked gate. Routing a re-verify is not a park:
+            # the item was answered and rejected, its clock is not running, and
+            # a consumer told "WorkParked" about it would start counting a wait
+            # that is not happening.
             deadline = due_at(item)
             events.append(
                 conn,
@@ -203,21 +257,35 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
         if not is_vehicle(vehicle) or vehicle.status in (WorkStatus.DONE, WorkStatus.FAILED):
             continue
         parent_id = verifies(vehicle)
-        parent = next((i for i in items if i.id == parent_id), None)
-        if parent_id not in by_id or (
-            parent is not None and parent.status is not WorkStatus.AWAITING_VERIFY
-        ):
-            # The verdict arrived through `attest`, or the parent is gone. The
-            # vehicle has nothing left to carry. Retiring it is not recording an
-            # outcome — the outcome lives on the parent — so it is closed with a
-            # result saying exactly that.
-            retired.append(vehicle.id)
-            if not dry_run:
-                queue.retire(
-                    vehicle.id,
-                    f"retired by routing: {parent_id} is no longer awaiting a "
-                    f"verdict. The outcome is on the item itself, never here.",
-                )
+        parent = by_id.get(parent_id)
+        if parent is None:
+            # Not "the parent has an answer" — the parent is not in this store
+            # at all: deleted, or a row this version cannot model, which
+            # `_read_all` drops. Tested separately, because every status test
+            # written against None is False and this arm is the only thing
+            # standing between that vehicle and being permanent work nobody can
+            # act on.
+            why = f"{parent_id} is not in this store"
+        elif not needs_a_verifier(parent):
+            why = f"{parent_id} is no longer waiting on a verdict"
+        elif vehicle.natural_key != vehicle_key(parent):
+            # A live vehicle for an attempt that has been superseded. The gate
+            # answered no, the failure count moved, and a fresh vehicle went out
+            # above — this one would send a second verifier to re-answer a
+            # question that already has an answer.
+            why = f"{parent_id} has moved on to attempt {parent.verify_failures}"
+        else:
+            continue
+
+        # Retiring is not recording an outcome — the outcome lives on the parent
+        # — so it closes with a result saying exactly that.
+        retired.append(vehicle.id)
+        if not dry_run:
+            queue.retire(
+                vehicle.id,
+                f"retired by routing: {why}. The outcome is on the item "
+                f"itself, never here.",
+            )
 
     return {
         "state": "dry-run" if dry_run else "routed",
