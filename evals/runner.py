@@ -148,6 +148,14 @@ def run_trial(
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def lesson_source_for(library, queue, sop_id: str, version: int) -> dict:
+    """`{loop, hand}` for the version the lesson arm presents — THAT version,
+    not the active one, or a run against a draft would be attributed to
+    whatever happened to be live."""
+    provenance = library.lesson_provenance(sop_id, queue, version)
+    return {"loop": len(provenance["loop"]), "hand": len(provenance["hand"])}
+
+
 def run(
     taskset: TaskSet,
     fleet: Fleet,

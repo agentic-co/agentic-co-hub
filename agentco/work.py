@@ -352,6 +352,13 @@ RESERVED_METADATA_KEYS = frozenset({
     # pin; `plan_vs_actual` is what the plane writes beside them at completion.
     # Both read back as fact by the adjudicator, so neither is a caller's to set.
     "sop_plan", "plan_vs_actual",
+    # The pin itself. Written only by `SopLibrary.instantiate`, and read back as
+    # fact by outcomes_by_version, drifted, proposals and lesson_provenance. A
+    # caller who could set it could pin an item to a procedure it never ran,
+    # have a colleague adjudicate it `bad`, and feed that procedure's lesson
+    # channel through the pass — a lesson nobody learned, in a procedure nobody
+    # followed. Found by the second party on P4.V.
+    "sop_ref",
 })
 PLAN_KEY = "sop_plan"
 PLAN_VS_ACTUAL_KEY = "plan_vs_actual"

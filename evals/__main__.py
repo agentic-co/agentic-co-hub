@@ -22,7 +22,7 @@ from evals.arms import Arm
 from evals.ledger import Ledger
 from evals.llm import ENV_API_BASE, ENV_API_KEY, ENV_MODEL, EXECUTOR, JUDGE, Fleet, LlmError
 from evals.report import render_text, verdict
-from evals.runner import run as run_trials
+from evals.runner import run as run_trials, lesson_source_for
 from evals.tasks import TaskSet
 
 DEFAULT_TASKS = Path(__file__).parent / "tasks"
@@ -136,8 +136,7 @@ def cmd_run(args) -> int:
     if args.work_store:
         from agentco.work import Queue
 
-        provenance = library.lesson_provenance(args.sop_id, Queue(args.work_store), args.lesson_version)
-        lesson_source = {"loop": len(provenance["loop"]), "hand": len(provenance["hand"])}
+        lesson_source = lesson_source_for(library, Queue(args.work_store), args.sop_id, args.lesson_version)
         print(f"  lesson channel of v{args.lesson_version}: "
               f"{lesson_source['loop']} loop-fed, {lesson_source['hand']} hand-fed")
     else:

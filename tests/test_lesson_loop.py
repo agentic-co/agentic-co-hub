@@ -250,3 +250,43 @@ def test_an_old_ledger_without_the_field_still_loads(tmp_path):
     trial = Trial.from_json(line)
     assert trial.lesson_source is None
     assert lesson_channel([trial]) is None
+
+
+# --------------------------------------------------------------------------- #
+# second-party findings (max-p4gates, 3293f6c) — surviving mutants pinned
+# --------------------------------------------------------------------------- #
+
+from evals.runner import lesson_source_for  # noqa: E402
+
+
+def test_the_lesson_source_is_for_the_version_asked_not_the_active_one(library, queue):
+    """Mutant M6 survived: the CLI's count could have been computed for the
+    active version and nobody would have known."""
+    sop = procedure(library)
+    _, active = loop_once(library, queue, sop)          # v2 active, loop-fed
+    draft = library.revise(sop.sop_id, common_mistakes=None, author="dana", author_kind=HUMAN)  # v3 draft, empty
+    assert lesson_source_for(library, queue, sop.sop_id, active.version) == {"loop": 1, "hand": 0}
+    assert lesson_source_for(library, queue, sop.sop_id, draft.version) == {"loop": 0, "hand": 0}
+    assert lesson_source_for(library, queue, sop.sop_id, 1) == {"loop": 0, "hand": 0}
+
+
+def test_a_mix_is_reported_as_a_mix(tmp_path):
+    """Mutant M7 survived: loop+hand read as 'the loop's lessons'."""
+    from evals.ledger import Trial
+    mixed = Trial(run_id="r", task_id="t", family="f", arm="asop_lesson", replicate=0, passed=True,
+                  gate={}, lesson_source={"loop": 1, "hand": 2})
+    channel = lesson_channel([mixed])
+    assert channel["loopFed"] and "mix" in channel["reading"]
+    assert "loop-fed 1, hand-fed 2: a mix" in render_text([mixed])
+
+
+def test_a_loop_lesson_carried_into_a_later_version_stays_the_loops(library, queue):
+    """Mutant M8 survived (`>` → `!=`): the lesson entered at v2 and a human's
+    unrelated v3 carried it forward — at v3 it is still the loop's."""
+    sop = procedure(library)
+    item, _ = loop_once(library, queue, sop)
+    later = library.revise(sop.sop_id, inputs="the export id", author="dana", author_kind=HUMAN)
+    library.activate(sop.sop_id, later.version, author="dana", author_kind=HUMAN)
+    provenance = library.lesson_provenance(sop.sop_id, queue, version=later.version)
+    assert [e["itemId"] for e in provenance["loop"]] == [item.id]
+    assert provenance["hand"] == []

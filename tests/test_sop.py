@@ -326,7 +326,7 @@ def test_a_gated_instance_awaiting_its_verdict_is_its_own_column(library, queue)
     """
     sop = a_sop(library)
     library.activate(sop.sop_id, 1)
-    item = queue.create("gated instance", metadata={"sop_ref": library.get(sop.sop_id).ref},
+    item = queue.create("gated instance", by_plane=True, metadata={"sop_ref": library.get(sop.sop_id).ref},
                         verify=JUDGED_GATE)
     finish(queue, item, WorkStatus.DONE)
 
@@ -349,9 +349,9 @@ def test_a_failed_gate_is_reported_and_kept_out_of_the_rate(library, queue):
     sop = a_sop(library)
     library.activate(sop.sop_id, 1)
     ref = library.get(sop.sop_id).ref
-    finish(queue, queue.create("clean", metadata={"sop_ref": ref}), WorkStatus.DONE)
+    finish(queue, queue.create("clean", metadata={"sop_ref": ref}, by_plane=True), WorkStatus.DONE)
 
-    gated = queue.create("gated", metadata={"sop_ref": ref}, verify=DETERMINISTIC_GATE)
+    gated = queue.create("gated", metadata={"sop_ref": ref}, verify=DETERMINISTIC_GATE, by_plane=True)
     claimed = queue.claim(gated.id, "worker")
     queue.report_result(
         gated.id, claimed.lease_attempt, WorkStatus.DONE,
@@ -368,7 +368,7 @@ def test_a_failed_gate_is_reported_and_kept_out_of_the_rate(library, queue):
 def test_a_passing_gate_lands_in_done_like_any_other_completion(library, queue):
     sop = a_sop(library)
     library.activate(sop.sop_id, 1)
-    gated = queue.create("gated", metadata={"sop_ref": library.get(sop.sop_id).ref},
+    gated = queue.create("gated", by_plane=True, metadata={"sop_ref": library.get(sop.sop_id).ref},
                          verify=DETERMINISTIC_GATE)
     claimed = queue.claim(gated.id, "worker")
     queue.report_result(
@@ -384,7 +384,7 @@ def test_an_instance_behind_an_open_gate_is_still_reported_as_drifted(library, q
     it. Excluding it would hide exactly the items most likely to be stuck."""
     sop = a_sop(library)
     library.activate(sop.sop_id, 1)
-    item = queue.create("gated", metadata={"sop_ref": library.get(sop.sop_id).ref},
+    item = queue.create("gated", by_plane=True, metadata={"sop_ref": library.get(sop.sop_id).ref},
                         verify=JUDGED_GATE)
     finish(queue, item, WorkStatus.DONE)
     library.revise(sop.sop_id, inputs="a changed input")
