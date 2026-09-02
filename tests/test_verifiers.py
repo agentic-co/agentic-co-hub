@@ -34,8 +34,11 @@ HUMAN = {
     "check": "the release owner signs off on the customer-facing wording",
     "max_park_seconds": 604800,
     "on_timeout": "escalate",
-    "escalate_to": "dana",
-    # Who answers the gate. `escalate_to` is where it goes when nobody does.
+    # Deliberately DIFFERENT names. Who answers the gate and where it goes when
+    # nobody does are different questions, and a fixture that answers both with
+    # one name cannot tell a vehicle assigned from the right field from one
+    # assigned from the wrong one — which is how the conflation survived.
+    "escalate_to": "release-owner",
     "verifier": "dana",
 }
 DETERMINISTIC = {
