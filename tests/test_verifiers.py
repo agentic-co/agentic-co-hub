@@ -1101,3 +1101,21 @@ def test_a_router_that_loses_the_create_race_announces_nothing(queue, registry, 
     assert [s["item"] for s in result["skipped"]] == [item.id]
     assert feed(registry, "WorkParked") == []
     assert len(vehicles(queue)) == 1
+
+
+def test_a_human_gate_is_answered_by_the_person_it_names_and_nobody_else(queue):
+    """FIX-L3.4 gave a human gate a `verifier`, and routing honoured it — the
+    vehicle is assigned to that person. `attest` did not: anyone who was not the
+    executor could close it, so the name governed who was OFFERED the work and
+    not who could DECIDE it. Found by the docs pass, which could not truthfully
+    write that the field was enforced."""
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    named = queue.get(item.id).verify["verifier"]
+    check = gate(kind="human", on_timeout="escalate")["check"]
+
+    with pytest.raises(Refusal) as caught:
+        queue.attest(item.id, attestation(check), "some-other-reviewer")
+    assert "is not that person" in caught.value.message
+    assert queue.get(item.id).status is WorkStatus.AWAITING_VERIFY
+
+    assert queue.attest(item.id, attestation(check), named).status is WorkStatus.DONE
