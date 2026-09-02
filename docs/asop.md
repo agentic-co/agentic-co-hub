@@ -103,12 +103,19 @@ ours.
 }
 ```
 
+The field names inside `verify` above (`class`, `cwd`) are the bead runtime's own
+schema, not this repository's. This repository's `validate_gate`
+([`agentco/gates.py`](../agentco/gates.py)) takes `kind`, `check`,
+`max_park_seconds`, `on_timeout`, `escalate_to`, and `verifier`, and refuses
+`class` or `cwd` as unknown fields — so copying this example straight into a
+`work_create` call here gets refused, not accepted.
+
 Every Part-I property has a concrete home:
 
 | Contract | Bead mechanics |
 |---|---|
 | Versioned | `metadata.sop` pins `(asop_id, version)`; the plane's `outcomes_by_version` aggregates results per version |
-| Verified | `metadata.verify` — validated at the **write boundary** (malformed gates are rejected, never silently no-op'd); enforced at the store's DONE flip, so no executor path can self-grade. On this repository's coordination plane a `human`-class gate must additionally name who answers it — the `verifier` field (`agentco/gates.py`) — because without one the routed work item has no assignee and requires no capability, and the queue offers it to the executor: the one party a human gate exists to exclude. A `deterministic` gate must not name one; its executor is its own attester. |
+| Verified | `metadata.verify` — validated at the **write boundary** (malformed gates are rejected, never silently no-op'd); enforced at the store's DONE flip. For `judged` and `human` gates that means no executor path can self-grade. A `deterministic` gate is the deliberate exception: its executor IS its own attester, so its "proof" is a submitted claim about a check the plane never re-runs — a trust floor, not a proof, and every description of attestation has to say so (`docs/connection-harness.md` § Risks). On this repository's coordination plane a `human`-class gate must additionally name who answers it — the `verifier` field (`agentco/gates.py`) — because without one the routed work item has no assignee and requires no capability, and the queue offers it to the executor: the one party a human gate exists to exclude. A `deterministic` gate must not name one; its executor is its own attester. |
 | Self-revising | goal-close auto-writes a plan-vs-actual review; fix-beads carry `metadata.adjudication: good\|bad`; good feeds template revision, bad feeds RCA |
 
 ### The lifecycle around the bead (PPEV)
@@ -122,8 +129,11 @@ Every Part-I property has a concrete home:
    children.
 3. **Execute** — any harness works the bead. Completion is requested, not declared.
 4. **Verify** — the gate runs where the status flips. Two extra statuses make gates
-   first-class: `awaiting_verify` (human gate parked, surfaced to the named person) and
-   `verify_failed` (retryable; **neither status releases downstream `blocked_by`**,
+   first-class: `awaiting_verify` (human gate parked, assigned to the named person —
+   nothing *pushes* it to them unless the opt-in write-back connector,
+   [`docs/writeback.md`](writeback.md), is configured; absent that, reaching them means
+   reading the change feed or polling the queue) and `verify_failed` (retryable;
+   **neither status releases downstream `blocked_by`**,
    killing the momentarily-done race). First failure spawns one sibling fix-bead;
    second failure escalates to a human — never a third autonomous attempt.
 

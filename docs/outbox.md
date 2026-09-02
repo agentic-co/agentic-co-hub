@@ -68,6 +68,18 @@ attempt's outcome. Filing work into somebody else's queue is different in
 kind: it has a consequence for a person who did not ask for it, and the
 cheapest write path on the plane should only ever carry the cheap acts.
 
+Be precise about "reporting an attempt's outcome," because `work_report` is
+the one push verb that isn't free of a precondition. The drainer signs every
+line with the machine's own credential (`AGENTCO_ACTOR`), and `report_result`
+refuses a report from anyone but the current lease holder — no lease, no
+report (`agentco/work.py`). The outbox has no `work_pull` verb, so an L1-only
+harness has no way to take that lease through this path in the first place.
+That leaves `work_report` through the outbox meaning something narrower than
+the other three: it succeeds when the same machine identity already pulled
+the item over L2 (MCP or HTTP) and is now reporting the outcome through the
+cheaper path, not when a harness that has only ever pushed lines tries to
+report work it was never leased.
+
 `attest` joined the set the day its transport shipped. It was the first name on
 the reserved list, and the list works exactly that way: a verb waits for
 somewhere to send it, never for a decision about whether it belongs. A line
