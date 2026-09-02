@@ -21,7 +21,7 @@ Five arms, scored on the same fixed task set:
 | `bare` | the task, nothing else | the floor |
 | `prose` | the procedure as static text, gate withheld | **the control that matters** |
 | `asop` | the procedure, version pinned, gate stated | does the contract beat prose? |
-| `asop_lesson` | the same, plus harvested `common_mistakes` | does the lesson transfer? |
+| `asop_lesson` | the same, plus harvested `common_mistakes` | does the lesson transfer? — and, since Phase 4, the ledger records whether those lessons were **loop-fed** (a `bad` adjudication that `propose()` turned into the entry) or **hand-fed**; pass `--work-store` and the report says which the arm measured |
 | `placebo` | the same, plus a true-but-irrelevant lesson | is it learning, or just tokens? |
 
 `prose` is the arm it is tempting to drop, and dropping it is how this becomes

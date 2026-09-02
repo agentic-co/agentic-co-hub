@@ -58,6 +58,11 @@ class Trial:
     latency_s: Optional[float] = None
     error: Optional[str] = None
     artifact_tail: str = ""
+    # For the lesson arm only: where the lessons it rendered came from —
+    # `{"loop": n, "hand": n}` per `SopLibrary.lesson_provenance`. None when
+    # the run had no work store to ask, which the report says out loud rather
+    # than assuming either answer.
+    lesson_source: Optional[dict] = None
     created_at: str = field(default_factory=_now_iso)
 
     @property

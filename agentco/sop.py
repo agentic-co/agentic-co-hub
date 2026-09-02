@@ -102,6 +102,12 @@ POLICY_LIST_FIELDS = ("common_mistakes", TAGS_FIELD, PROPOSALS_FIELD)
 PROPOSED_KEY = "proposed_in"
 
 
+def lesson_text(item_id: str, adjudicator: object, evidence: object) -> str:
+    """The `common_mistakes` entry a bad adjudication becomes. One formula, so
+    `propose()` writes it and `lesson_provenance()` recognises it."""
+    return f"{evidence} (adjudicated bad on {item_id} by {adjudicator})"
+
+
 class SopError(Exception):
     """Base for every refusal in this module."""
 
@@ -850,7 +856,7 @@ class SopLibrary:
         if pending_bad:
             lessons = list(latest.common_mistakes)
             for entry in pending_bad:
-                lesson = f"{entry['evidence']} (adjudicated bad on {entry['itemId']} by {entry['by']})"
+                lesson = lesson_text(entry["itemId"], entry["by"], entry["evidence"])
                 if lesson not in lessons:
                     lessons.append(lesson)
             if len(lessons) > MAX_COMMON_MISTAKES:
@@ -882,6 +888,54 @@ class SopLibrary:
             record[PROPOSED_KEY] = draft.version
             queue.annotate(item.id, {"adjudication": record})
         return draft
+
+    def lesson_provenance(self, sop_id: str, queue: Queue, version: Optional[int] = None) -> dict:
+        """For one version's lesson channel: which entries the loop wrote, which a hand did.
+
+        A lesson is **loop-fed** when it is the exact entry a `bad` adjudication
+        on an instance of this procedure became through `propose()` — matched
+        on the adjudication record (verdict, item, adjudicator, evidence,
+        consumed by a draft at or before this version), not on the wording
+        alone, so a person typing the same sentence is still a hand. Everything
+        else in `common_mistakes` is **hand-fed**. This is what lets the eval
+        harness say whether the `asop_lesson` arm measured the loop or a
+        person: until the loop closed, every lesson it rendered was hand-fed,
+        and the arm could not tell.
+        """
+        sop = self.get(sop_id, version) if version is not None else self.get(sop_id)
+        if sop is None:
+            history = self.history(sop_id)
+            if not history:
+                raise SopError(f"no SOP {sop_id!r}")
+            if version is not None:
+                raise SopError(f"no SOP {sop_id!r} version {version}")
+            sop = history[-1]
+        loop_entries: dict[str, dict] = {}
+        for item in queue.list():
+            meta = item.metadata or {}
+            ref = meta.get("sop_ref") or {}
+            adjudication = meta.get("adjudication")
+            if ref.get("sop_id") != sop_id or not isinstance(adjudication, dict):
+                continue
+            consumed = adjudication.get(PROPOSED_KEY)
+            if adjudication.get("verdict") != "bad" or consumed is None or consumed > sop.version:
+                continue
+            text = lesson_text(item.id, adjudication.get("by"), adjudication.get("evidence"))
+            loop_entries[text] = {"itemId": item.id, "by": adjudication.get("by"), "proposedIn": consumed}
+        loop, hand = [], []
+        for entry in sop.common_mistakes:
+            if entry in loop_entries:
+                loop.append({"lesson": entry, **loop_entries[entry]})
+            else:
+                hand.append(entry)
+        return {
+            "sopId": sop_id,
+            "version": sop.version,
+            "loop": loop,
+            "hand": hand,
+            "loopFed": bool(loop),
+            "handFed": bool(hand),
+        }
 
     # -- evaluation ------------------------------------------------------
 
