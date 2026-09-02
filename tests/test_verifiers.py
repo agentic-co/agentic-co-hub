@@ -1353,3 +1353,102 @@ def test_attest_refuses_a_stored_human_gate_that_names_nobody(queue):
         queue.attest(item.id, attestation(gate(kind="human", on_timeout="escalate")["check"]),
                      "some-third-party")
     assert "names nobody" in caught.value.message
+
+
+# --------------------------------------------------------------------------- #
+# Third-pass close-out: holes A and B in FIX-L3.16, and the unpinned claims
+# --------------------------------------------------------------------------- #
+
+
+def test_a_vehicle_cannot_be_closed_by_reporting_it_failed_either(queue):
+    """Hole A. The first guard tested DONE alone, and a FAILED report closed the
+    vehicle just as well — routing then owed nothing further and the clock
+    passed the gate. A vehicle reports nothing about the work either way."""
+    item = park(queue, gate=gate(on_timeout="pass"))
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    claimed = queue.claim(vehicle.id, "executor", capabilities=["verify"])
+    with pytest.raises(Refusal) as caught:
+        queue.report_result(vehicle.id, claimed.lease_attempt, WorkStatus.FAILED,
+                            result="could not judge", submitted_by="executor")
+    assert "answers nothing" in caught.value.message
+    assert queue.get(vehicle.id).status is WorkStatus.IN_PROGRESS
+    assert item.id in {verifiers.verifies(v) for v in vehicles(queue)
+                       if v.status not in (WorkStatus.DONE, WorkStatus.FAILED)}
+
+
+def test_a_re_verify_vehicle_cannot_be_closed_by_reporting_it(queue):
+    """Hole B. The guard also required the parent to be `awaiting_verify`; a
+    parent in `verify_failed` with a fix decision is owed a re-verify vehicle,
+    and closing that one is the same starvation by another attempt."""
+    item = park(queue)
+    verifiers.route_open_gates(queue)
+    queue.attest(item.id, attestation(JUDGED["check"], exit_status=1), "reviewer",
+                 capabilities=["verify"])
+    assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
+    verifiers.route_open_gates(queue)
+    [fresh] = [v for v in vehicles(queue) if v.status not in (WorkStatus.DONE, WorkStatus.FAILED)]
+    claimed = queue.claim(fresh.id, "executor", capabilities=["verify"])
+    with pytest.raises(Refusal):
+        queue.report_result(fresh.id, claimed.lease_attempt, WorkStatus.DONE, submitted_by="executor")
+    assert queue.get(fresh.id).status is WorkStatus.IN_PROGRESS
+
+
+def test_a_reaped_vehicle_is_outstanding_again(queue):
+    """M6. A verifier claimed the vehicle and was reaped. Nobody is working it
+    now, which is what outstanding means — reading the fence excluded it because
+    it had once been handed out."""
+    import time as _t
+
+    park(queue)
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    queue.claim(vehicle.id, "reviewer", ttl_seconds=1, capabilities=["verify"])
+    assert verifiers.verifier_status(queue)["outstanding"] == 0, "somebody has it"
+    _t.sleep(1.1)
+    queue.reap_expired_leases()
+    assert verifiers.verifier_status(queue)["outstanding"] == 1, "and now nobody does"
+
+
+def test_a_judged_gates_verifier_narrows_the_offer_and_not_the_verdict(queue):
+    """M13 — pinning the documented decision so a change to it is a decision.
+    `gates.py` says a judged gate's `verifier` "narrows the route": the vehicle
+    is assigned to that node, and any node declaring `verify` that is not the
+    executor may still attest directly. A human gate is the opposite, and that
+    is tested beside it. Changing this must change this test first."""
+    item = park(queue, gate=gate(verifier="dana"))
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    assert vehicle.assigned_agent == "dana"
+    closed = queue.attest(item.id, attestation(gate()["check"]), "another-verify-node",
+                          capabilities=["verify"])
+    assert closed.status is WorkStatus.DONE
+
+
+def test_the_quarantine_grace_boundary_is_inclusive(queue):
+    """M32. Exactly at the grace period is quarantined; one second short is
+    not. Pinned so the boundary is a statement rather than an accident."""
+    from agentco.verifiers import QUARANTINE_GRACE_S
+
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    verifiers.route_open_gates(queue)
+    verifiers.sweep_park_clocks(queue, now=later())
+    escalated_at = datetime.fromisoformat(queue.get(item.id).metadata["verify_escalated"]["resolved_at"])
+    just_short = escalated_at + timedelta(seconds=QUARANTINE_GRACE_S - 1)
+    exactly = escalated_at + timedelta(seconds=QUARANTINE_GRACE_S)
+    assert verifiers.sweep_quarantine(queue, now=just_short)["quarantined"] == []
+    assert len(verifiers.sweep_quarantine(queue, now=exactly)["quarantined"]) == 1
+
+
+def test_routing_is_idempotent_by_inspection_not_by_suppressed_duplicates(queue, capsys):
+    """M26. Convergence via the natural key would still hold if the "already
+    routed" inspection were deleted — but every pass would hit the store's
+    DUPLICATE-SUPPRESSED announcement and fill `skipped`. The docstring says
+    "by inspection, not by catching a duplicate", and this is what pins it: a
+    second pass writes nothing to stderr."""
+    park(queue)
+    verifiers.route_open_gates(queue)
+    capsys.readouterr()
+    result = verifiers.route_open_gates(queue)
+    assert result["created"] == []
+    assert "DUPLICATE-SUPPRESSED" not in capsys.readouterr().err

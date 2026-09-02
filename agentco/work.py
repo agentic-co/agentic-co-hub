@@ -1294,15 +1294,22 @@ class Queue:
 
         def fence(item: WorkItem) -> dict:
             carried = (item.metadata or {}).get("verifies")
-            if carried and status is WorkStatus.DONE:
+            if carried:
+                # ANY terminal report, not just DONE — the first version guarded
+                # DONE alone and a FAILED report closed the vehicle just as well,
+                # with routing then owing nothing further. And a parent in
+                # `verify_failed` is owed a re-verify vehicle, which is the same
+                # vehicle by another attempt; closing it is the same starvation.
                 parent = self.get(carried)
-                if parent is not None and parent.status is WorkStatus.AWAITING_VERIFY:
+                if parent is not None and parent.status in (
+                    WorkStatus.AWAITING_VERIFY, WorkStatus.VERIFY_FAILED
+                ):
                     raise Refusal(
                         code=gates.ATTESTATION_REQUIRED,
                         message=(
-                            f"{item_id} is the vehicle for {carried}, which is still "
-                            f"awaiting a verdict — reporting the vehicle done answers "
-                            f"nothing"
+                            f"{item_id} is the vehicle for {carried}, which still "
+                            f"needs a verifier — reporting the vehicle {status.value} "
+                            f"answers nothing"
                         ),
                         remediation=(
                             f"Attest {carried} with your verdict; the vehicle retires "
