@@ -308,6 +308,19 @@ def test_an_attested_holder_is_marked_as_unverified():
     assert "unverified" in render_repo_block(live, repo="acme/web-platform")
 
 
+def test_the_repo_block_names_every_verb_the_outbox_accepts():
+    """The injected block is the only place a zero-config harness ever learns
+    what it may push. A hand-typed verb list went four verbs stale the first
+    time the outbox grew, hiding `attest` — the verb write-back exists for —
+    from exactly the tier that had no other way to find it."""
+    from agentco.outbox import PUSH_VERBS
+
+    block = render_repo_block([], repo="r")
+    verbs_line = next(line for line in block.split("\n") if line.startswith("Verbs: "))
+    listed = verbs_line[len("Verbs: "):].split(".")[0].split(", ")
+    assert listed == list(PUSH_VERBS)
+
+
 def test_the_repo_block_is_byte_identical_across_runs():
     """No timestamp. Otherwise every scheduled run is a diff, and the file
     becomes noise in every review of a repo that commits it."""

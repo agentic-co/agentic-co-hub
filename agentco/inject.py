@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Union
 
+from agentco.outbox import PUSH_VERBS
+
 BEGIN_MARKER = "<!-- agentco:context:begin -->"
 END_MARKER = "<!-- agentco:context:end -->"
 
@@ -308,8 +310,12 @@ def render_repo_block(
         '"payload":{"repo":"...","prefixes":["dir/sub"],"intent":"implement"},'
         '"agent_label":"<harness name>"}'
     )
+    # The verb list is read from the outbox, not typed here: this block is the
+    # only place an L1 harness ever learns what it may push, and a hand-copied
+    # list went four verbs stale (attest, adjudicate, sop_revise, sop_activate)
+    # the first time the outbox grew.
     lines.append(
-        "Verbs: claim_scope, release_scope, snapshot, work_report. Never set `actor` — "
+        f"Verbs: {', '.join(PUSH_VERBS)}. Never set `actor` — "
         "the drainer signs. See docs/outbox.md."
     )
 

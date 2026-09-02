@@ -130,7 +130,13 @@ how your harness works changes.
 **Early, and usable.** The coordination primitives are implemented and tested: scope
 claims with conflict detection, snapshot pointers with divergence delivered at a cadence
 boundary, a resumable change feed, a work queue with a fenced lease protocol proven across
-twelve real processes, versioned SOPs, an MCP surface, and both injection tiers. See
+twelve real processes, versioned SOPs, an MCP surface, and both injection tiers. On top
+of them, all three ASOP properties now have code behind them: gates with attestation
+(deterministic, judged, human — with park clocks and a named verifier), the revision
+policy an agent cannot break, adjudication with adjudicator ≠ executor enforced,
+plan-vs-actual written at completion, and the lessons pass that drafts the next version.
+The L1 outbox reaches a harness that configured nothing, and a conformance suite
+(`agentco conform --level`) holds HTTP, MCP and the outbox to one semantic core. See
 [`docs/`](docs/) for the design, [`docs/roadmap.md`](docs/roadmap.md) for what is built
 versus planned, and [`docs/known-issues.md`](docs/known-issues.md) for what is broken.
 
@@ -302,11 +308,12 @@ python3 -m agentco gate1          # exit 0 iff the adoption gate is met
 
 ### Before you rely on it
 
-Read [`docs/known-issues.md`](docs/known-issues.md). Twenty defects are open and
-documented, each with a failing test naming the property that should hold. None
-of them lose work or report a wrong result as a right one — those were found and
-fixed. Being told what is broken is the point; a project this young that claims
-none would be lying.
+Read [`docs/known-issues.md`](docs/known-issues.md). Eleven defects are open and
+documented — eight of them with a failing test naming the property that should
+hold (twenty tests, because one defect has seven routes), three recorded without
+one yet. None of them lose work or report a wrong result as a right one — those
+were found and fixed. Being told what is broken is the point; a project this
+young that claims none would be lying.
 
 ## Licence
 

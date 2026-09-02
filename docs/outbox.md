@@ -132,7 +132,7 @@ that carry the format itself:
 To publish from a harness with no AgentCo configuration, append one JSON
 object per line to `.agentco/outbox.jsonl` — a local drainer signs and sends it:
   {"line_id":"<unique>","at":"<iso8601>","verb":"claim_scope","payload":{"repo":"...","prefixes":["dir/sub"],"intent":"implement"},"agent_label":"<harness name>"}
-Verbs: claim_scope, release_scope, snapshot, work_report. Never set `actor` — the drainer signs. See docs/outbox.md.
+Verbs: claim_scope, release_scope, snapshot, work_report, attest, adjudicate, sop_revise, sop_activate. Never set `actor` — the drainer signs. See docs/outbox.md.
 ```
 
 That is enough to write a valid line without reading anything else, which is

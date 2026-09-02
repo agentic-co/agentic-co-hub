@@ -24,6 +24,7 @@ leakguard.toml
 # source file. A store in a published tree is somebody's queue state on the
 # internet.
 work.jsonl
+*.jsonl.lock
 sops.jsonl
 tasks.jsonl
 receipts.jsonl
