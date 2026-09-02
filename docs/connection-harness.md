@@ -200,7 +200,11 @@ so; the moment one of them implies otherwise, the contract is overselling.
 
 ## Not in scope
 
-Rollback and compensation (ASOP v2 excludes it explicitly), dispute arbitration
-beyond escalation, and writing to a system of record — which stays off the table
-entirely, because the whole value proposition is that adopting AgentCo cannot
-damage the system you already trust.
+Rollback and compensation (ASOP v2 excludes it explicitly), and dispute
+arbitration beyond escalation. Writing to a system of record has exactly one
+opt-in, notice-only exception — [`docs/writeback.md`](writeback.md) — off
+until configured, and even configured it can only tell a record its gate is
+waiting, never change a state or close a ticket. Outside that one path,
+writing to a system of record stays off the table, because the whole value
+proposition is that adopting AgentCo cannot damage the system you already
+trust.
