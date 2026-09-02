@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 from agentco import verifiers
+from agentco.errors import Refusal
 from agentco.work import CapabilityError, WorkStatus
 
 JUDGED = {
@@ -173,7 +174,7 @@ def test_the_verdict_closes_the_item_and_retires_the_vehicle(queue):
     verifiers.route_open_gates(queue)
     [vehicle] = vehicles(queue)
 
-    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer")
+    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer", capabilities=["verify"])
     assert queue.get(item.id).status is WorkStatus.DONE
 
     result = verifiers.route_open_gates(queue)
@@ -195,7 +196,7 @@ def test_a_rejected_gate_gets_a_fresh_vehicle_for_the_next_attempt(queue):
     verifiers.route_open_gates(queue)
     [first] = vehicles(queue)
 
-    queue.attest(item.id, attestation(JUDGED["check"], exit_status=1), "reviewer")
+    queue.attest(item.id, attestation(JUDGED["check"], exit_status=1), "reviewer", capabilities=["verify"])
     assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
 
     # The failed item is not awaiting anything, so its vehicle is retired.
@@ -203,7 +204,7 @@ def test_a_rejected_gate_gets_a_fresh_vehicle_for_the_next_attempt(queue):
     assert queue.get(first.id).status is WorkStatus.DONE
 
     # A re-verify parks it again, and THAT gets its own vehicle.
-    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer")
+    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer", capabilities=["verify"])
     assert queue.get(item.id).status is WorkStatus.DONE
 
     keys = {v.natural_key for v in vehicles(queue)}
@@ -216,5 +217,48 @@ def test_a_vehicle_for_a_vanished_parent_is_retired(queue):
     [vehicle] = vehicles(queue)
     # Simulate a store where the parent is not readable by this version: the
     # vehicle must not become permanent work nobody can act on.
-    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer")
+    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer", capabilities=["verify"])
     assert verifiers.route_open_gates(queue)["retired"] == [vehicle.id]
+
+
+# --------------------------------------------------------------------------- #
+# The capability gates the verdict, not just the route
+# --------------------------------------------------------------------------- #
+
+
+def test_a_judged_verdict_from_a_node_that_declares_nothing_is_refused(queue):
+    """Gating the route and leaving the outcome open is a queue that LOOKS routed.
+
+    The vehicle requires `verify` to be claimed. Before this, `attest` checked
+    nothing, so anyone holding the item id could answer the gate and the
+    declaration was decorative — found by reading the L3 section of the adoption
+    guide against the code, which is the cheapest review there is.
+    """
+    item = park(queue)
+    with pytest.raises(Refusal) as caught:
+        queue.attest(item.id, attestation(JUDGED["check"]), "reviewer")
+    assert "declares (no capabilities)" in caught.value.message
+    assert "AGENTCO_CAPABILITIES=verify" in caught.value.remediation
+    assert queue.get(item.id).status is WorkStatus.AWAITING_VERIFY, "a refusal moves nothing"
+
+    closed = queue.attest(item.id, attestation(JUDGED["check"]), "reviewer",
+                          capabilities=["verify"])
+    assert closed.status is WorkStatus.DONE
+
+
+def test_a_human_gate_asks_no_machine_capability_of_a_person(queue):
+    """Symmetry with the vehicle, which gives a human-gated item no `requires`."""
+    item = park(queue, gate=HUMAN)
+    closed = queue.attest(item.id, attestation(HUMAN["check"]), "dana")
+    assert closed.status is WorkStatus.DONE
+
+
+def test_a_deterministic_gate_asks_no_capability_either(queue):
+    """Its executor is its intended attester, and an executor is not an L3 node."""
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    claimed = queue.claim(item.id, "executor")
+    queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE,
+                        attestation=attestation("pytest -q", exit_status=1))
+    assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
+    cleared = queue.attest(item.id, attestation("pytest -q"), "executor")
+    assert cleared.status is WorkStatus.DONE

@@ -595,7 +595,10 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
             )
         if verb == "attest":
             return registry.attest(
-                payload["itemId"], payload["attestation"], agent_label=label
+                payload["itemId"],
+                payload["attestation"],
+                agent_label=label,
+                capabilities=payload.get("capabilities"),
             )
         if verb == "work_report":
             return registry.work_report(

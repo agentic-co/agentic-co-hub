@@ -204,8 +204,11 @@ class _LocalBackend:
     def work_create(self, title: str, **kw) -> dict:
         return json.loads(self.queue.create(title, **kw).to_json())
 
-    def attest(self, item_id: str, attestation: dict, submitted_by: str) -> Optional[dict]:
-        updated = self.queue.attest(item_id, attestation, submitted_by=submitted_by)
+    def attest(self, item_id: str, attestation: dict, submitted_by: str,
+               capabilities=None) -> Optional[dict]:
+        updated = self.queue.attest(
+            item_id, attestation, submitted_by=submitted_by, capabilities=capabilities
+        )
         return json.loads(updated.to_json()) if updated is not None else None
 
     def sop_get(self, sop_id: str, version: Optional[int]) -> Optional[dict]:
@@ -271,8 +274,11 @@ class _RemoteBackend:
             idempotency_key=idempotency_key, attestation=attestation,
         ).get("item")
 
-    def attest(self, item_id: str, attestation: dict, submitted_by: str) -> Optional[dict]:
-        return self.registry.attest(item_id, attestation).get("item")
+    def attest(self, item_id: str, attestation: dict, submitted_by: str,
+               capabilities=None) -> Optional[dict]:
+        return self.registry.attest(
+            item_id, attestation, capabilities=list(capabilities or ()) or None
+        ).get("item")
 
     def work_create(self, title: str, requires=(), blocked_by=(), assigned_agent=None,
                     natural_key=None, source=None, source_id=None, kind=None,
@@ -591,7 +597,16 @@ def create_server(
         runs the command, which makes this a trust floor rather than a proof.
         """
         try:
-            updated = backend.attest(item_id, attestation, submitted_by=who)
+            updated = backend.attest(
+                item_id,
+                attestation,
+                submitted_by=who,
+                # The NODE's declared capabilities, from its own configuration —
+                # not an argument on the tool. A model that could pass this
+                # would be declaring, per call, what the machine it runs on is
+                # set up to do, which is a claim it is in no position to make.
+                capabilities=resolve_capabilities(),
+            )
         except (WorkError, ValueError, Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
         if updated is None:

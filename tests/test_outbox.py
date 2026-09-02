@@ -517,6 +517,7 @@ def test_a_gate_can_be_answered_through_the_zero_config_floor(tmp_path):
         "attest",
         {
             "itemId": filed["id"],
+            "capabilities": ["verify"],
             "attestation": {
                 "check": gate["check"],
                 "exit_status": 0,
@@ -571,6 +572,7 @@ def test_a_judged_gate_cannot_be_closed_from_the_machine_that_executed_it(tmp_pa
     box = Outbox(tmp_path / ".agentco")
     box.push("attest", {
         "itemId": filed["id"],
+        "capabilities": ["verify"],
         "attestation": {
             "check": gate["check"], "exit_status": 0,
             "environment": "same laptop", "at": "2026-09-01T15:00:00+00:00",

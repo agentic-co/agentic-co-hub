@@ -644,7 +644,8 @@ def _attester(work_path: str, item_id: str, who: str, exit_status: int, result_p
     result = {"who": who, "moved": None, "refused": None, "errors": []}
     try:
         barrier.wait(timeout=BARRIER_TIMEOUT_S)
-        item = queue.attest(item_id, _attestation(JUDGED_GATE["check"], exit_status), who)
+        item = queue.attest(item_id, _attestation(JUDGED_GATE["check"], exit_status), who,
+                            capabilities=["verify"])
         result["moved"] = item.status.value if item else None
     except Refusal as exc:
         result["refused"] = exc.code

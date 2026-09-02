@@ -570,7 +570,15 @@ def create_app(
                     http_status=400,
                 )
             try:
-                updated = queue.attest(item_id, attestation, submitted_by=actor)
+                updated = queue.attest(
+                    item_id,
+                    attestation,
+                    submitted_by=actor,
+                    # Self-declared, exactly as `work_pull` takes them. The
+                    # signature decides WHO; the body declares what this node is
+                    # set up to run, which is routing rather than privilege.
+                    capabilities=payload.get("capabilities"),
+                )
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             if updated is None:

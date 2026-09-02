@@ -174,48 +174,52 @@ if pulled["state"] == "leased":
     reg.work_report(item["id"], pulled["attempt"], "done", result="…")
 ```
 
-## L3 — deliberate setup, and what it doesn't do yet
+## L3 — deliberate setup, and where it stops
 
-Read this section before building anything on top of it — it's the one place
-where what's shipped is smaller than what the ladder implies.
+Read this before building on it. What is shipped is smaller than the ladder
+implies, and the boundary moved while this guide was being written.
 
-**What's actually built:** work items can carry `requires`, a list of
-capabilities, checked inside `claim()` under the same lock as the lease CAS.
-Declare what a node can run — `AGENTCO_CAPABILITIES=verify` in its `.mcp.json`
-`env`, or a `capabilities` argument to `work_pull` — and `work_pull` will skip
-any pending item whose `requires` this node doesn't declare. That's real, and
-it's what "capability routing" means today: it governs which **pending** item
-a worker may claim.
+**Declaring the capability.** `AGENTCO_CAPABILITIES=verify` in a node's
+`.mcp.json` `env`, or a `capabilities` argument to `work_pull` and `attest` over
+HTTP. Two things then hold, both enforced under the same lock as the lease CAS:
+a work item carrying `requires: ["verify"]` can only be claimed by a node that
+declares it, and a **judged** gate refuses a verdict from a node that does not.
 
-**What isn't built:** routing a gate to a verifier at all. When a `judged` or
-`human`-gated item is reported `done`, it parks as `awaiting_verify` — but
-`work_pull` never returns items in that status (or `verify_failed`); `ready()`
-only ever considers `pending` items and lapsed leases. Declaring
-`AGENTCO_CAPABILITIES=verify` doesn't put parked items in front of you,
-because nothing surfaces them to any queue. The change feed doesn't either —
-its event kinds are scope claims, releases, conflicts, snapshots, and
-divergence; a work item entering `awaiting_verify` emits none of them. And
-`attest` itself doesn't check capabilities: the only rule it enforces for a
-judged or human gate is that whoever calls it isn't the actor who reported the
-work done. Anyone who knows the item's id and isn't its executor can attest
-it — which is a real property (the executor cannot grade its own homework),
-but it is not the same thing as routing.
+Be precise about what the second buys. Capabilities are asserted by the caller,
+so it is routing hygiene rather than authority — it stops a node answering gates
+it was never configured for, and a node determined to answer one need only
+declare the string. The authority rule for a judged gate is the other one: the
+submitter may not be the actor that reported the work done, and that is derived
+from the signature, so it cannot be self-asserted.
 
-So concretely: nothing today tells an L3-capable node that a gate is waiting
-for it. If you want to close judged or human gates now, the only path is
-knowing the item id out of band — because you filed the work yourself and are
-watching your own store, or because someone tells you — and then calling
-`attest(item_id, attestation)` directly. The routing spine (named owners,
-shared queues, claim deadlines, park-clock defaults, escalation) is on the
-roadmap under "Later," not built — see [`docs/roadmap.md`](roadmap.md) and
-the L3 row in [`docs/connection-harness.md`](connection-harness.md), which
-names this gap the same way.
+**Reaching a verifier at all.** A judged or human gate parks its item as
+`awaiting_verify`, and `work_pull` deliberately never returns items in that
+status — so nothing about the parked item is claimable. `agentco.verifiers`
+closes that with a **vehicle**: a routing pass gives every parked judged gate an
+ordinary work item carrying `requires: ["verify"]`, which a declaring node then
+finds through the queue it already polls. The verdict still travels through
+`attest` against the original item; the vehicle is how the work is found, never
+where the outcome lives.
 
-None of that makes gates useless today. A `deterministic` gate — the
-completing process re-runs its own check and reports an `attestation` in the
-same `work_report` call — works exactly as documented, on all three
-transports, right now. It's specifically the judged/human path, the one that
-needs a party other than the executor, that has no queue to wait in yet.
+Routing is a pass rather than a consequence of reporting, so **something has to
+run it** — the same way the outbox needs a drainer. A vehicle nobody routed is a
+gate nobody can see.
+
+**What is still absent, and matters most for a human gate.** A human gate gets a
+vehicle assigned to the named person, and nothing tells that person it exists.
+The change feed carries no work-queue events at all — its kinds are scope
+claims, releases, conflicts, snapshots and divergence — so no tier can surface a
+parked gate on its own. The missing piece is the substrate, not just the choice
+of channel, and the channel itself is an open decision. Until both land, a human
+gate is a queue entry somebody has to go and look for.
+
+The park clock is likewise declared and not yet enforced: every gate carries
+`max_park_seconds` and an `on_timeout` default, they are validated and stored,
+and nothing acts on the deadline. So do not rely on a gate resolving itself.
+
+None of that makes gates useless today. A `deterministic` gate — the completing
+process re-runs its own check and reports an `attestation` in the same
+`work_report` call — works exactly as documented, on all three transports.
 
 ## Verify it worked
 

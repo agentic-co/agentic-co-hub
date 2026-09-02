@@ -937,6 +937,7 @@ class Queue:
         item_id: str,
         attestation: dict,
         submitted_by: str,
+        capabilities: Optional[Sequence[str]] = None,
     ) -> Optional[WorkItem]:
         """Answer a gate. The only transition out of a verify state.
 
@@ -946,6 +947,20 @@ class Queue:
         lets a green sibling stand in for a red original, and the dependency
         that was waiting on correctness gets released by a different item's
         success.
+
+        `capabilities` is the same self-declared routing list `claim` takes, and
+        a judged gate refuses a verdict from a node that does not declare
+        `verify`. Be precise about what that buys: capabilities are asserted by
+        the caller, so this is **routing hygiene, not authority** — it stops a
+        node answering gates it was never set up for, and a node determined to
+        answer one need only declare the string. The authority check for a
+        judged gate is the separation below, which is derived from the
+        authenticated actor and cannot be self-asserted.
+
+        Without it, though, the capability was decorative: `verifiers` routes a
+        vehicle only a declaring node can claim, while the verdict path stayed
+        open to anyone holding the item id. Gating the route and not the outcome
+        is a queue that looks routed and is not.
 
         For a `judged` or `human` gate the submitter must not be the party that
         executed the work. That is not a policy preference: a judged gate exists
@@ -985,6 +1000,23 @@ class Queue:
                 )
 
             gate = item.verify or {}
+            if gate.get("kind") == "judged":
+                held = frozenset(capabilities or ())
+                if gates.VERIFY_CAPABILITY not in held:
+                    raise Refusal(
+                        code=gates.ATTESTATION_INVALID,
+                        message=(
+                            f"{item.id} has a judged gate and this caller declares "
+                            f"{sorted(held) or '(no capabilities)'}"
+                        ),
+                        remediation=(
+                            f"Declare {gates.VERIFY_CAPABILITY!r} on the node answering "
+                            f"judged gates — `AGENTCO_CAPABILITIES={gates.VERIFY_CAPABILITY}` "
+                            f"for the MCP surface, or the `capabilities` field over HTTP. "
+                            f"The routed vehicle already requires it to be claimed; this "
+                            f"is the same rule reaching the verdict."
+                        ),
+                    )
             executor = (item.metadata or {}).get("lease_report", {}).get("reported_by")
             if gate.get("kind") != "deterministic" and submitted_by and submitted_by == executor:
                 raise Refusal(
