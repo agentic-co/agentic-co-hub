@@ -288,3 +288,104 @@ def sweep_park_clocks(queue: Queue, *, now: Optional[datetime] = None, dry_run: 
         "resolved": resolved,
         "escalated": escalated,
     }
+
+
+# --------------------------------------------------------------------------- #
+# "No verifier configured" — a state, not a silence
+# --------------------------------------------------------------------------- #
+
+
+def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
+    """Is anybody actually answering the gates this queue routes?
+
+    The park clock means gated work no longer parks forever with no verifier —
+    an org that never sets up L3 can still use gates, which is the requirement.
+    It also creates the failure this report exists to catch: with
+    `on_timeout: pass` and nobody verifying, **every gate resolves green on the
+    clock and the system manufactures its own approval at scale.** Each item
+    carries a resolution record saying no check was run, which is exactly the
+    evidence nobody reads one row at a time. So it is reported in aggregate, and
+    loudly.
+
+    `configured` is `None`, never `False`, until this queue has routed a gate at
+    all. "Nobody has answered a gate" and "no gate has ever needed answering"
+    are opposite findings, and a report that renders them the same way will get
+    the wrong one believed — the same rule the L1-conversion metric follows.
+
+    Evidence of a verifier is a vehicle that was CLAIMED, not a node that
+    declared something. Capabilities are self-asserted and a declaration proves
+    only that somebody set an environment variable; a claim is a lease, fenced
+    and recorded, and it means a verifier turned up.
+    """
+    at = now or _now()
+    items = queue.list()
+
+    routed = [i for i in items if is_vehicle(i)]
+    claimed_ever = [i for i in routed if i.lease_attempt > 0]
+    outstanding = [
+        i for i in routed
+        if i.status not in (WorkStatus.DONE, WorkStatus.FAILED) and i.lease_attempt == 0
+    ]
+
+    by_verdict = 0
+    by_default = 0
+    for item in items:
+        if is_vehicle(item) or not item.is_gated:
+            continue
+        if (item.metadata or {}).get(RESOLUTION_KEY):
+            by_default += 1
+        elif item.attestation is not None and item.status in (
+            WorkStatus.DONE, WorkStatus.VERIFY_FAILED
+        ):
+            by_verdict += 1
+
+    oldest = None
+    for item in outstanding:
+        started = _parked_at(item)
+        if started is None:
+            continue
+        age = int((at - started).total_seconds())
+        oldest = age if oldest is None or age > oldest else oldest
+
+    if not routed:
+        configured: Optional[bool] = None
+        verdict = (
+            "no gate has been routed to a verifier yet — nothing to measure. This "
+            "is NOT 'no verifier configured'; the two are opposite findings."
+        )
+    elif claimed_ever:
+        configured = True
+        verdict = (
+            f"{len(claimed_ever)} routed gate(s) have been claimed by a verifier; "
+            f"{len(outstanding)} outstanding."
+        )
+    else:
+        configured = False
+        verdict = (
+            f"{len(routed)} gate(s) routed and none ever claimed. Declaring "
+            f"{VERIFY_CAPABILITY!r} on a node is what makes them claimable — until "
+            f"then every one of them resolves on its park clock instead."
+        )
+
+    warning = None
+    if by_default and not by_verdict:
+        warning = (
+            f"{by_default} gate(s) have been resolved by their park clock and NONE by a "
+            f"verdict. If those gates declare on_timeout='pass', this queue is "
+            f"approving its own work on a timer — the outcomes are real, the "
+            f"verification is not."
+        )
+
+    return {
+        "metric": "VERIFIER-PRESENCE",
+        "configured": configured,
+        "routedGates": len(routed),
+        "claimedEver": len(claimed_ever),
+        "outstanding": len(outstanding),
+        "oldestOutstandingSeconds": oldest,
+        "resolvedByVerdict": by_verdict,
+        "resolvedByDefault": by_default,
+        "capability": VERIFY_CAPABILITY,
+        "verdict": verdict,
+        "warning": warning,
+    }
