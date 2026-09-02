@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from agentco import events, gates
-from agentco.work import Queue, WorkItem, WorkStatus
+from agentco.work import RESOLUTION_KEY, Queue, WorkItem, WorkStatus
 
 # Re-exported from `gates` rather than defined twice. `work.attest` enforces it,
 # and work.py cannot import this module without a cycle.
@@ -235,7 +235,10 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
 # must be able to tell a VERIFIED pass from a pass nobody gave — otherwise the
 # clock quietly manufactures verified work, which is the most expensive lie this
 # system could tell about itself.
-RESOLUTION_KEY = "verify_resolution"
+#
+# Defined by `work` and re-exported here, not declared twice: `resolve_by_default`
+# writes it and `attest` moves it into HISTORY_KEY when a real verdict lands, so
+# the meaning of the key is owned there and read here.
 ESCALATED_KEY = "verify_escalated"
 
 
@@ -414,6 +417,13 @@ def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
     for item in items:
         if is_vehicle(item) or not item.is_gated:
             continue
+        # The top-level resolution record IS the final-transition test: `attest`
+        # displaces it into HISTORY_KEY when somebody answers for real, so it is
+        # present only when the clock had the last word. Before that, an item a
+        # reviewer genuinely overturned counted as resolved-by-default, and a
+        # queue doing real verification warned that it approved its own work on
+        # a timer. One mechanism carries this; a second discriminator here would
+        # be a check no test could prove necessary.
         if (item.metadata or {}).get(RESOLUTION_KEY):
             by_default += 1
         elif item.attestation is not None and item.status in (
