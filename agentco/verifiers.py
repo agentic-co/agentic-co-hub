@@ -102,7 +102,12 @@ def needs_a_verifier(item: WorkItem) -> bool:
     carrying no decision at all is not routed: nothing said to try again, and
     inventing that is how a `stop` becomes another attempt.
     """
-    if is_vehicle(item) or (item.verify or {}).get("kind") not in ROUTED_KINDS:
+    # The gate KIND decides this, and it decides it alone. A vehicle needs no
+    # separate exclusion: a vehicle is never itself gated — the invariant this
+    # module is built on — so it has no kind and falls out here. An explicit
+    # `is_vehicle` guard beside this one looked like defence and was an
+    # equivalent mutant, removable with no test noticing.
+    if (item.verify or {}).get("kind") not in ROUTED_KINDS:
         return False
     if item.status is WorkStatus.AWAITING_VERIFY:
         return True
