@@ -443,12 +443,17 @@ def create_server(
             raise _refuse(exc) from exc
 
     @mcp.tool(name="work_pull")
-    def work_pull(
-        agent: Optional[str] = None,
-        capabilities: Optional[list[str]] = None,
-        ttl_seconds: int = DEFAULT_LEASE_TTL_S,
-    ) -> Optional[dict]:
+    def work_pull(ttl_seconds: int = DEFAULT_LEASE_TTL_S) -> Optional[dict]:
         """Claim the next ready work item this identity can run, with a fenced lease.
+
+        Claims as THIS NODE — never as a name the model supplies. An earlier
+        version took `agent` as a tool argument, and the lease holder is what a
+        judged gate's separation check compares the verifier against, so a model
+        could pull as "ghost-worker", report, and then attest its own work from
+        the same node and pass. Identity is configuration (`AGENTCO_ACTOR`), and
+        so are capabilities (`AGENTCO_CAPABILITIES`): a model is in no position
+        to declare, per call, who the machine it runs on is or what it is set up
+        to do.
 
         `None` means nothing is claimable right now — an empty queue and a
         lost race to another claimant look identical from here, and both are
@@ -461,9 +466,7 @@ def create_server(
         the way this loop does, rather than stopping on the first miss.
         """
         try:
-            return backend.work_pull(
-                agent or backend.actor, resolve_capabilities(capabilities), ttl_seconds
-            )
+            return backend.work_pull(backend.actor, resolve_capabilities(), ttl_seconds)
         except (Refusal, WorkError, RegistryError) as exc:
             raise _refuse(exc) from exc
 

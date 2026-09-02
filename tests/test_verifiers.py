@@ -709,3 +709,65 @@ def test_the_digest_carries_the_origin_so_it_can_be_chased(queue):
     assert row["sourceId"] == "acme/91060"
     assert "ado:acme/91060" in verifiers.render_quarantine(
         verifiers.quarantine_digest(queue, now=much_later))
+
+
+# --------------------------------------------------------------------------- #
+# FIX-L3.1 / FIX-L3.2 — the two criticals from the adversarial review
+# --------------------------------------------------------------------------- #
+
+
+def test_an_empty_submitter_cannot_close_a_gate(queue):
+    """`submitted_by and submitted_by == executor` skipped the separation check
+    for a falsy submitter, so a verdict from nobody passed. No transport produced
+    one; the Queue API did."""
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    for nobody in ("", "   "):
+        with pytest.raises(Refusal) as caught:
+            queue.attest(item.id, attestation(gate(kind="human", on_timeout="escalate")["check"]), nobody)
+        assert "verdict from nobody" in caught.value.remediation
+    assert queue.get(item.id).status is WorkStatus.AWAITING_VERIFY
+
+
+def test_a_clock_only_queue_never_reads_as_configured(queue):
+    """**The critical the review reproduced.** Retiring a vehicle used to go
+    through `report_result`, which advances the fence — and `lease_attempt > 0`
+    was the evidence of a claim. So the exact condition the presence report
+    exists to catch (the clock approving everything) flipped its headline to "a
+    verifier turned up"."""
+    park(queue, gate=gate(on_timeout="pass"))
+    verifiers.route_open_gates(queue)
+    assert verifiers.verifier_status(queue)["configured"] is False
+
+    verifiers.sweep_park_clocks(queue, now=later())
+    verifiers.route_open_gates(queue)  # retires the moot vehicle
+
+    status = verifiers.verifier_status(queue)
+    assert status["configured"] is False, "no verifier ever touched this queue"
+    assert status["claimedEver"] == 0
+    assert status["resolvedByDefault"] == 1
+    assert status["warning"] is not None
+
+
+def test_retiring_a_vehicle_does_not_advance_its_fence(queue):
+    park(queue)
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    assert vehicle.lease_attempt == 0
+    queue.retire(vehicle.id, "moot")
+    retired = queue.get(vehicle.id)
+    assert retired.status is WorkStatus.DONE
+    assert retired.lease_attempt == 0, "it was never handed out, and the count must say so"
+    assert "lease_report" not in retired.metadata
+
+
+def test_retire_refuses_to_take_work_out_of_a_verifiers_hands(queue):
+    """The routing pass's view went stale between its read and its write, and a
+    verifier claimed the vehicle in between. That verifier is working; the pass
+    does not get to close the item under them."""
+    park(queue)
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    queue.claim(vehicle.id, "reviewer", capabilities=["verify"])
+    with pytest.raises(Exception):
+        queue.retire(vehicle.id, "moot")
+    assert queue.get(vehicle.id).leased_by == "reviewer"
