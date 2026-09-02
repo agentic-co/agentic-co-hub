@@ -320,6 +320,41 @@ def test_the_retry_policy_decides_whether_a_failed_gate_is_routed_again(queue):
     assert live_after["stop"] == [], "the policy said stop and the queue kept offering it"
 
 
+def test_a_verify_failed_item_with_no_retry_decision_recorded_routes_nothing(queue):
+    """9ac74ed's claim, never pinned. `needs_a_verifier` reads the retry
+    decision off the record the failure wrote, rather than recomputing it —
+    and an item that reached `verify_failed` with no such record has said
+    nothing about trying again. Every path this store's own API can produce
+    writes one (`attest`, `resolve_by_default`); this is the row from before
+    `verify_retry` existed, or one edited by hand, built directly rather than
+    through either.
+
+    Inventing a decision here is how a `stop` becomes another attempt — the
+    correct read of silence is not-routed, and nothing said so.
+    """
+    item = park(queue)
+    queue._mutate(item.id, lambda i: {"status": WorkStatus.VERIFY_FAILED})
+    assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
+    assert queue.get(item.id).metadata.get(verifiers.RETRY_KEY) is None
+
+    assert verifiers.route_open_gates(queue)["created"] == []
+    assert vehicles(queue) == []
+
+
+def test_a_gate_exactly_at_its_deadline_is_due(queue):
+    """The clock boundary, pinned. `sweep_park_clocks` skips only when
+    `due_at() > now`, so a gate exactly AT its deadline resolves — "the clock
+    just ran out" and "the clock ran out a moment ago" are the same finding to
+    anything reading this pass, and only one of the two ways to write the
+    comparison treats them that way. Dies if the skip condition becomes
+    `>= now`, which would leave the gate parked for one more cycle.
+    """
+    item = park(queue, gate=gate(on_timeout="fail"))
+    deadline = verifiers.due_at(queue.get(item.id))
+    result = verifiers.sweep_park_clocks(queue, now=deadline)
+    assert [r["item"] for r in result["resolved"]] == [item.id]
+
+
 def test_a_quarantined_gate_is_not_re_offered_by_the_next_routing_pass(queue):
     """Quarantine retires the vehicle while the item stays parked, so the item
     still looks like it needs a verifier — and it does. What it does not need is
