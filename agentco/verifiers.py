@@ -392,9 +392,12 @@ def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
 
     routed = [i for i in items if is_vehicle(i)]
     claimed_ever = [i for i in routed if i.lease_attempt > 0]
+    quarantined_parents = {i.id for i in items if is_quarantined(i)}
     outstanding = [
         i for i in routed
-        if i.status not in (WorkStatus.DONE, WorkStatus.FAILED) and i.lease_attempt == 0
+        if i.status not in (WorkStatus.DONE, WorkStatus.FAILED)
+        and i.lease_attempt == 0
+        and verifies(i) not in quarantined_parents
     ]
 
     by_verdict = 0
@@ -459,3 +462,147 @@ def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
         "verdict": verdict,
         "warning": warning,
     }
+
+
+# --------------------------------------------------------------------------- #
+# Quarantine — abandonment degrades to silence, not to queue noise
+# --------------------------------------------------------------------------- #
+
+QUARANTINE_KEY = "verify_quarantined"
+
+# How long an ESCALATED gate may sit before it stops counting as live work.
+# A week, because the thing being waited on is a person, and a person who has
+# not answered in a week is not about to answer on the eighth day because the
+# queue asked again.
+QUARANTINE_GRACE_S = 7 * 24 * 3600
+
+
+def sweep_quarantine(
+    queue: Queue,
+    *,
+    now: Optional[datetime] = None,
+    grace_seconds: int = QUARANTINE_GRACE_S,
+    dry_run: bool = False,
+) -> dict:
+    """Move abandoned gates out of the live set and into a list somebody reads.
+
+    Only an ESCALATING gate can reach here, and that is the whole point: `pass`
+    and `fail` resolve themselves on the clock, so the sole way to stay parked
+    forever is a gate whose declared answer was "ask a person" — and then the
+    person did not answer. That is abandonment, and it is the one case the park
+    clock deliberately does not close, because closing it would be answering the
+    question the gate said a human should answer.
+
+    **Quarantine is not a resolution.** The item stays `awaiting_verify` and
+    keeps blocking everything downstream, because nothing about it has been
+    decided. What changes is that it stops being offered: its vehicle is
+    retired, so a verifier polling the queue is not handed work that has been
+    ignored for a week by somebody else. Abandonment degrades to silence rather
+    than to noise, and the silence has a list.
+
+    Reversible on purpose. An answer arriving after quarantine closes the item
+    exactly as it always would; the flag governs what is OFFERED, never what is
+    permitted.
+    """
+    at = now or _now()
+    quarantined: list[dict] = []
+
+    for item in queue.list():
+        if item.status is not WorkStatus.AWAITING_VERIFY or is_vehicle(item):
+            continue
+        metadata = item.metadata or {}
+        if metadata.get(QUARANTINE_KEY):
+            continue
+        escalated = metadata.get(ESCALATED_KEY)
+        if not escalated:
+            continue
+        try:
+            since = datetime.fromisoformat(escalated["resolved_at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        waited = int((at - since).total_seconds())
+        if waited < grace_seconds:
+            continue
+
+        quarantined.append({
+            "item": item.id,
+            "title": item.title,
+            "to": escalated.get("to"),
+            "abandonedSeconds": waited,
+        })
+        if dry_run:
+            continue
+        queue.annotate(item.id, {QUARANTINE_KEY: {
+            "at": at.isoformat(),
+            "escalated_to": escalated.get("to"),
+            "unanswered_seconds": waited,
+            "note": (
+                "not a resolution — the item is still awaiting a verdict and still "
+                "blocks its dependents. It has stopped being offered."
+            ),
+        }})
+        for vehicle in queue.list():
+            if verifies(vehicle) == item.id and vehicle.status not in (
+                WorkStatus.DONE, WorkStatus.FAILED
+            ):
+                queue.report_result(
+                    vehicle.id, vehicle.lease_attempt, WorkStatus.DONE,
+                    result=(
+                        f"retired by quarantine: unanswered for {waited}s after "
+                        f"escalation. The gate is still open; it is no longer offered."
+                    ),
+                )
+
+    return {"state": "dry-run" if dry_run else "quarantined", "quarantined": quarantined}
+
+
+def is_quarantined(item: WorkItem) -> bool:
+    return bool((item.metadata or {}).get(QUARANTINE_KEY))
+
+
+def quarantine_digest(queue: Queue, *, now: Optional[datetime] = None) -> dict:
+    """Every abandoned gate, oldest first — the list the silence turns into.
+
+    Sorted by how long it has gone unanswered rather than by when it was filed:
+    the reader's question is "what has been ignored longest", and an item that
+    has been waiting a month should not be below one that waited eight days
+    because it was created later.
+    """
+    at = now or _now()
+    rows = []
+    for item in queue.list():
+        if not is_quarantined(item):
+            continue
+        record = (item.metadata or {})[QUARANTINE_KEY]
+        started = _parked_at(item)
+        rows.append({
+            "itemId": item.id,
+            "title": item.title,
+            "escalatedTo": record.get("escalated_to"),
+            "unansweredSeconds": int((at - started).total_seconds()) if started else None,
+            "quarantinedAt": record.get("at"),
+            "check": (item.verify or {}).get("check"),
+            **origin_of(item),
+        })
+    rows.sort(key=lambda r: r["unansweredSeconds"] or 0, reverse=True)
+    return {"stuckGates": rows, "count": len(rows)}
+
+
+def render_quarantine(digest: dict) -> str:
+    """Plain text, leading with the count. Nothing to report says so in one line."""
+    rows = digest["stuckGates"]
+    if not rows:
+        return "Stuck gates: none."
+    lines = [f"Stuck gates: {len(rows)} abandoned after escalation."]
+    for row in rows:
+        days = (row["unansweredSeconds"] or 0) // 86400
+        origin = f"  [{row['source']}:{row['sourceId']}]" if row.get("sourceId") else ""
+        lines.append(f"  - {row['itemId']} {row['title']}{origin}")
+        lines.append(f"      waiting {days}d on {row['escalatedTo'] or '(nobody named)'} — {row['check']}")
+    lines.append(
+        "These still block their dependents. They are no longer offered to verifiers, "
+        "which is why they are here instead of in the queue."
+    )
+    return "\n".join(lines)

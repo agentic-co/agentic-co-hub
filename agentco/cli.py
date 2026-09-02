@@ -67,6 +67,18 @@ def cmd_digest(args) -> int:
     conn = _conn(args)
     collected = divergence.collect(conn)
     text = divergence.render_text(collected)
+
+    # Stuck gates ride the digest that already exists rather than getting a
+    # surface of their own. A second periodic report is a second thing to
+    # remember to read, and the failure mode of an abandoned gate is precisely
+    # that nobody is looking.
+    if args.work_store is not None:
+        from agentco import verifiers
+        from agentco.work import Queue, resolve_work_store
+
+        stuck = verifiers.quarantine_digest(Queue(resolve_work_store(args.work_store)))
+        collected["stuckGates"] = stuck["stuckGates"]
+        text = f"{text}\n\n{verifiers.render_quarantine(stuck)}"
     print(text)
 
     if not args.deliver:
@@ -467,6 +479,9 @@ def cmd_verifiers(args) -> int:
         report["routing"] = verifiers.route_open_gates(queue, conn=conn, dry_run=args.dry_run)
     if args.sweep:
         report["sweep"] = verifiers.sweep_park_clocks(queue, conn=conn, dry_run=args.dry_run)
+    if args.quarantine:
+        report["quarantine"] = verifiers.sweep_quarantine(queue, dry_run=args.dry_run)
+    report["stuck"] = verifiers.quarantine_digest(queue)
 
     if args.json:
         print(json.dumps(report, indent=2))
@@ -481,6 +496,10 @@ def cmd_verifiers(args) -> int:
         print(f"  {st['verdict']}")
         if st["warning"]:
             print(f"  ⚠ {st['warning']}")
+        stuck = report["stuck"]
+        if stuck["count"]:
+            print()
+            print(verifiers.render_quarantine(stuck))
         for key, label in (("routing", "routed"), ("sweep", "swept")):
             if key in report:
                 block = report[key]
@@ -565,6 +584,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_mcp.set_defaults(func=cmd_serve_mcp)
 
     p_digest = sub.add_parser("digest", help="the cadence-boundary divergence digest")
+    p_digest.add_argument(
+        "--work-store",
+        default=None,
+        help="include abandoned gates from this work store in the digest",
+    )
     p_digest.add_argument("--deliver", action="store_true", help="emit events and mark reported")
     p_digest.add_argument("--post", action="store_true", help="also deliver the digest (needs --deliver)")
     p_digest.add_argument("--via", default="webhook", help="delivery sender to use (default: webhook)")
@@ -666,6 +690,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("--work-store", default=None, help="path to the work store")
     p_ver.add_argument("--route", action="store_true", help="give parked judged gates a vehicle")
     p_ver.add_argument("--sweep", action="store_true", help="resolve gates whose park clock expired")
+    p_ver.add_argument(
+        "--quarantine",
+        action="store_true",
+        help="stop offering escalated gates nobody has answered (they stay blocking)",
+    )
     p_ver.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     p_ver.add_argument("--json", action="store_true", help="machine-readable output")
     p_ver.set_defaults(func=cmd_verifiers)

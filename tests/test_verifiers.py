@@ -590,3 +590,122 @@ def test_locally_filed_work_reports_no_origin_rather_than_a_blank_one(queue):
     assert verifiers.origin_of(item) == {
         "sourceKey": None, "source": None, "sourceId": None, "sourceUrl": None
     }
+
+
+# --------------------------------------------------------------------------- #
+# Quarantine
+# --------------------------------------------------------------------------- #
+
+
+def abandoned(queue, days=8, title="nobody answered this"):
+    """An escalated gate that has gone unanswered past the grace period."""
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"), title=title)
+    verifiers.route_open_gates(queue)
+    verifiers.sweep_park_clocks(queue, now=later())
+    return item, later(days * 86400)
+
+
+def test_only_an_escalating_gate_can_be_abandoned(queue):
+    """`pass` and `fail` resolve themselves on the clock. The sole way to stay
+    parked forever is a gate whose declared answer was "ask a person" — and then
+    the person did not. That is the case quarantine is for, and the only one.
+
+    The park sweep is deliberately NOT run first. The earlier version of this
+    test ran it, which resolved both gates out of `awaiting_verify` — so the
+    status filter caught them and the escalation rule was never exercised, and
+    the test passed against a mutation that let any parked gate be quarantined.
+    Here both are still parked and long overdue, so only the escalation record
+    can be the thing that excludes them.
+    """
+    park(queue, gate=gate(on_timeout="pass"), title="would close itself")
+    park(queue, gate=gate(on_timeout="fail"), title="would reject itself")
+    assert verifiers.sweep_quarantine(queue, now=later(30 * 86400))["quarantined"] == []
+    assert [i.status for i in queue.list()].count(WorkStatus.AWAITING_VERIFY) == 2
+
+
+def test_an_unanswered_escalation_is_quarantined_after_the_grace_period(queue):
+    item, much_later = abandoned(queue)
+    assert verifiers.sweep_quarantine(queue, now=later(3 * 86400))["quarantined"] == []
+    result = verifiers.sweep_quarantine(queue, now=much_later)
+    assert [q["item"] for q in result["quarantined"]] == [item.id]
+    assert verifiers.is_quarantined(queue.get(item.id))
+
+
+def test_quarantine_is_not_a_resolution(queue):
+    """**The property that makes this safe.** Nothing has been decided, so the
+    item stays parked and keeps blocking everything downstream. What changes is
+    that it stops being OFFERED."""
+    item, much_later = abandoned(queue)
+    downstream = queue.create("depends on it", blocked_by=[item.id])
+    verifiers.sweep_quarantine(queue, now=much_later)
+
+    still = queue.get(item.id)
+    assert still.status is WorkStatus.AWAITING_VERIFY
+    assert still.attestation is None
+    assert "verify_resolution" not in still.metadata, "the clock did not close this"
+    assert downstream.id not in {i.id for i in queue.ready()}
+
+
+def test_a_quarantined_gate_stops_being_offered_to_verifiers(queue):
+    """A verifier polling the queue must not be handed work another person has
+    ignored for a week. That is the difference between silence and noise."""
+    item, much_later = abandoned(queue)
+    [vehicle] = [v for v in vehicles(queue) if verifiers.verifies(v) == item.id]
+    assert vehicle.status is not WorkStatus.DONE
+
+    verifiers.sweep_quarantine(queue, now=much_later)
+    assert queue.get(vehicle.id).status is WorkStatus.DONE
+    assert "no longer offered" in queue.get(vehicle.id).result
+    assert verifiers.verifier_status(queue, now=much_later)["outstanding"] == 0
+
+
+def test_an_answer_after_quarantine_still_closes_the_item(queue):
+    """Reversible on purpose: the flag governs what is offered, never what is
+    permitted. A reviewer who comes back from leave is not locked out."""
+    item, much_later = abandoned(queue)
+    verifiers.sweep_quarantine(queue, now=much_later)
+    closed = queue.attest(item.id, attestation(gate(kind="human", on_timeout="escalate")["check"]), "dana")
+    assert closed.status is WorkStatus.DONE
+
+
+def test_quarantine_is_idempotent(queue):
+    item, much_later = abandoned(queue)
+    assert len(verifiers.sweep_quarantine(queue, now=much_later)["quarantined"]) == 1
+    for _ in range(3):
+        assert verifiers.sweep_quarantine(queue, now=much_later)["quarantined"] == []
+    del item
+
+
+def test_the_digest_leads_with_the_count_and_sorts_by_neglect(queue):
+    """The reader's question is "what has been ignored longest", so an item
+    waiting a month must not sit below one waiting eight days because it was
+    filed later."""
+    assert "none" in verifiers.render_quarantine(verifiers.quarantine_digest(queue))
+
+    old_item, _ = abandoned(queue, title="ignored for ages")
+    new_item, _ = abandoned(queue, title="ignored recently")
+    queue.annotate(old_item.id, {"verify_parked_at":
+                                 (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()})
+    much_later = later(9 * 86400)
+    verifiers.sweep_quarantine(queue, now=much_later)
+
+    digest = verifiers.quarantine_digest(queue, now=much_later)
+    assert digest["count"] == 2
+    assert [r["itemId"] for r in digest["stuckGates"]] == [old_item.id, new_item.id]
+    text = verifiers.render_quarantine(digest)
+    assert text.startswith("Stuck gates: 2")
+    assert "still block their dependents" in text
+
+
+def test_the_digest_carries_the_origin_so_it_can_be_chased(queue):
+    item = queue.create("fix the retry path", source="ado", source_id="acme/91060",
+                        verify=gate(kind="human", on_timeout="escalate"))
+    claimed = queue.claim(item.id, "executor")
+    queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE)
+    verifiers.sweep_park_clocks(queue, now=later())
+    much_later = later(9 * 86400)
+    verifiers.sweep_quarantine(queue, now=much_later)
+    [row] = verifiers.quarantine_digest(queue, now=much_later)["stuckGates"]
+    assert row["sourceId"] == "acme/91060"
+    assert "ado:acme/91060" in verifiers.render_quarantine(
+        verifiers.quarantine_digest(queue, now=much_later))
