@@ -689,6 +689,56 @@ def test_the_oldest_outstanding_gate_is_reported(queue):
     assert status["oldestOutstandingSeconds"] >= 3600
 
 
+def test_outstanding_excludes_a_quarantined_parents_vehicle(queue):
+    """c9c7b49's claim, never pinned. Annotating the parent quarantined
+    directly, rather than going through `sweep_quarantine` — which also
+    retires the vehicle, and would let the DONE/FAILED filter alone carry this
+    test whether or not the quarantine clause exists — isolates the thing
+    actually being tested: `verifies(i) not in quarantined_parents`. Dies if
+    that clause is removed; the vehicle is still live, unclaimed, and would
+    otherwise count.
+    """
+    item = park(queue, gate=gate(on_timeout="escalate"))
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    assert vehicle.status is WorkStatus.PENDING and vehicle.lease_attempt == 0
+
+    queue.annotate(item.id, {verifiers.QUARANTINE_KEY: {
+        "at": later().isoformat(), "escalated_to": "dana", "unanswered_seconds": 999999,
+    }})
+
+    assert verifiers.verifier_status(queue)["outstanding"] == 0
+
+
+def test_a_deterministic_self_attestation_is_not_counted_as_a_verdict(queue):
+    """F6. The old discriminator was `item.attestation is not None` — but a
+    deterministic gate's executor attaches its own attestation to its own
+    report, with no separation and no call to `attest`, which is nothing a
+    verifier did. Three judged gates the clock closed alone, plus one
+    deterministic gate that passed its own re-run, used to report
+    `resolvedByVerdict=1` and suppress the warning that nothing but the clock
+    was resolving the judged ones.
+    """
+    for n in range(3):
+        park(queue, gate=gate(on_timeout="pass"), title=f"judged-{n}")
+    verifiers.sweep_park_clocks(queue, now=later())
+
+    deterministic_item = queue.create("ship it", verify=DETERMINISTIC)
+    claimed = queue.claim(deterministic_item.id, "executor")
+    queue.report_result(
+        deterministic_item.id, claimed.lease_attempt, WorkStatus.DONE,
+        attestation=attestation(DETERMINISTIC["check"]),
+    )
+
+    status = verifiers.verifier_status(queue)
+    assert status["resolvedByDefault"] == 3
+    assert status["resolvedByVerdict"] == 0, (
+        "a deterministic self-attestation is not a verdict from anybody "
+        "entitled to grade somebody else's work"
+    )
+    assert "approving its own work on a timer" in status["warning"]
+
+
 # --------------------------------------------------------------------------- #
 # The change feed carries work-queue events at all
 # --------------------------------------------------------------------------- #

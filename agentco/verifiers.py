@@ -530,6 +530,20 @@ def sweep_park_clocks(
 # "No verifier configured" — a state, not a silence
 # --------------------------------------------------------------------------- #
 
+# The field `work.attest` writes when a real verdict lands — set only on the
+# path a judged or human gate takes, never by `report_result`'s deterministic
+# self-attestation. That is the discriminator this report needs, and
+# `item.attestation is not None` is not it: a deterministic gate's executor
+# attaches its own attestation to its own report, with no separation and no
+# call to `attest` at all, and counting that as "a verifier turned up" is how
+# three judged gates the clock closed alone, plus one deterministic gate that
+# passed its own re-run, reported one verdict and suppressed the warning that
+# nothing but the clock was resolving them. Not re-exported from `work` the
+# way `RESOLUTION_KEY` is above — the two agree by convention rather than by
+# import for now; if that drifts, export it there and read it here, not guess
+# the string again.
+VERDICT_KEY = "verify_verdict"
+
 
 def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
     """Is anybody actually answering the gates this queue routes?
@@ -586,9 +600,12 @@ def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
         # be a check no test could prove necessary.
         if (item.metadata or {}).get(RESOLUTION_KEY):
             by_default += 1
-        elif item.attestation is not None and item.status in (
-            WorkStatus.DONE, WorkStatus.VERIFY_FAILED
-        ):
+        # `VERDICT_KEY`, never "an attestation is sitting on this item" — a
+        # deterministic gate's executor attaches its own attestation to its
+        # own report, and that is not a verdict from anybody entitled to grade
+        # somebody else's work. Only `attest` writes this key, and `attest` is
+        # exactly the path a deterministic gate never takes.
+        elif (item.metadata or {}).get(VERDICT_KEY):
             by_verdict += 1
 
     oldest = None
