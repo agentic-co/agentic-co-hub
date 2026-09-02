@@ -490,7 +490,7 @@ def sweep_park_clocks(
                 continue  # already handed over; the digest keeps surfacing it
             escalated.append({"item": item.id, "to": gate.get("escalate_to"), "waited": waited})
             if not dry_run:
-                queue.annotate(item.id, {ESCALATED_KEY: {**record, "to": gate.get("escalate_to")}})
+                queue.annotate(item.id, {ESCALATED_KEY: {**record, "to": gate.get("escalate_to")}}, by_plane=True)
                 if conn is not None:
                     events.append(
                         conn,
@@ -749,7 +749,7 @@ def sweep_quarantine(
                 "not a resolution — the item is still awaiting a verdict and still "
                 "blocks its dependents. It has stopped being offered."
             ),
-        }})
+        }}, by_plane=True)
         for vehicle in queue.list():
             if verifies(vehicle) == item.id and vehicle.status not in (
                 WorkStatus.DONE, WorkStatus.FAILED

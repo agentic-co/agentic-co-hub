@@ -388,12 +388,17 @@ def executors_of(item: "WorkItem") -> list[str]:
     """
     found: list[str] = []
     meta = item.metadata or {}
-    for candidate in (
+    candidates = [
         item.leased_by,
         (meta.get("lease_report") or {}).get("reported_by"),
         (item.attestation or {}).get("submitted_by")
         if (item.verify or {}).get("kind") == "deterministic" else None,
-    ):
+        # Every holder the item ever had. A first holder whose lease lapsed and
+        # was reaped did work on it too — for idempotent work the second poller
+        # reports what the first one did — and must not get to grade it.
+        *(entry.get("agent") for entry in (meta.get("claims") or []) if isinstance(entry, dict)),
+    ]
+    for candidate in candidates:
         if isinstance(candidate, str) and candidate and candidate not in found:
             found.append(candidate)
     return found
@@ -1459,6 +1464,38 @@ class Queue:
                     message=f"adjudication must be an object, got {type(adjudication).__name__}",
                     remediation="Send {\"verdict\": \"good\"|\"bad\", \"evidence\": \"...\"}.",
                 )
+            stray = sorted(set(adjudication) - {"verdict", "evidence"})
+            if stray:
+                # Refused, not ignored: a rider naming `by` must not be read
+                # back as a tag under that name having been recorded.
+                raise Refusal(
+                    code=ADJUDICATION_INVALID,
+                    message=f"adjudication rider carries {stray}; it takes verdict and evidence only",
+                    remediation=(
+                        "Remove them. The adjudicator is the party submitting this "
+                        "attestation — the transport authenticated it — and nothing in "
+                        "the rider may say otherwise."
+                    ),
+                )
+            if (current.verify or {}).get("kind") == "deterministic":
+                # On a deterministic gate the attester IS an executor the moment
+                # the attestation lands, so the rider could only ever be
+                # self-adjudication — refused before anything is written, rather
+                # than landing the verdict and refusing the tag after.
+                raise Refusal(
+                    code=ADJUDICATION_SELF,
+                    message=(
+                        f"{item_id} has a deterministic gate; attesting it makes "
+                        f"{submitted_by!r} an executor, so the rider would be "
+                        f"self-adjudication"
+                    ),
+                    remediation=(
+                        "Attest without the rider. A deterministic gate's attester "
+                        "grades the check, not the divergence; somebody who did not "
+                        "run the work adjudicates it separately."
+                    ),
+                    http_status=403,
+                )
             adjudication_record(
                 current, adjudication.get("verdict"), adjudication.get("evidence"), submitted_by
             )
@@ -1864,13 +1901,21 @@ class Queue:
 
         return self._mutate(item_id, fence)
 
-    def annotate(self, item_id: str, metadata: dict) -> Optional[WorkItem]:
+    def annotate(self, item_id: str, metadata: dict, *, by_plane: bool = False) -> Optional[WorkItem]:
         """Merge keys into an item's metadata, changing nothing else.
 
         Deliberately narrow. It cannot touch status, lease, blockers or the
         gate — a general `update` is how a gate becomes editable by whoever
         holds the item, which is the tautology `attest` refuses one layer up.
+
+        Nor the plane-owned keys, unless the caller IS the plane (`by_plane`,
+        a Python keyword argument no transport reads off a payload): an
+        `annotate` that could write `lease_report` would erase the recorded
+        executor, and one that could write `adjudication` would forge the tag
+        — the same holes `create` closes, reopened one method over.
         """
+        if not by_plane:
+            reject_reserved(metadata)
 
         def merge(item: WorkItem) -> dict:
             return {"metadata": {**(item.metadata or {}), **metadata}}

@@ -866,6 +866,7 @@ def create_app(
         """
 
         def work(actor: str, payload: dict) -> dict:
+            _reject_author_in_body(payload)
             try:
                 draft = library.propose(
                     sop_id, queue,
