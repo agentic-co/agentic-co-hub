@@ -206,8 +206,9 @@ def test_the_suite_never_touches_the_operators_stores(tmp_path, monkeypatch):
     result = compare("work", transports=("mcp", "http"))
     assert all(r["conforms"] for r in result["transports"].values())
     assert not live.exists() and not (tmp_path / "live-work.jsonl").exists() and not (tmp_path / "live-sops.jsonl").exists()
-    assert cli.main(["conform", "--level", "L3", "--json"]) == 0
-    assert not live.exists()
+    for level in ("L2", "L3"):   # L2 runs the budget probe, which opens an MCP server of its own
+        assert cli.main(["conform", "--level", level, "--json"]) == 0
+        assert not live.exists(), level
     # ...and the environment is handed back as it was.
     import os
     assert os.environ["AGENTCO_DB"] == str(live) and os.environ["AGENTCO_REGISTRY_URL"] == "http://127.0.0.1:9"
@@ -262,3 +263,37 @@ def test_instantiate_carries_its_gate_over_http(monkeypatch):
     monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_the_gate)
     result = compare("procedure", transports=("http",))["transports"]["http"]
     assert not result["conforms"], "a human step's instance lost its gate and nobody noticed"
+
+
+def test_the_lease_length_requires_and_instance_metadata_are_conformed(monkeypatch):
+    """Second review, mutants N5/N6/N8: ttlSeconds, `requires` and instantiate
+    metadata were never sent. They are now, and a transport dropping any of
+    them is caught."""
+    real = conformance._http
+
+    def http_with_a_one_second_lease(world, s):
+        if s["verb"] == "work_pull" and s["args"].get("ttl_seconds"):
+            s = {**s, "args": {**s["args"], "ttl_seconds": 1}}
+        return real(world, s)
+
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_with_a_one_second_lease)
+    result = compare("work", transports=("http",))["transports"]["http"]
+    assert any("lease_ttl_s" in d for d in result["diffs"]), result["diffs"]
+
+    def http_that_drops_requires(world, s):
+        if s["verb"] == "work_create":
+            s = {**s, "args": {k: v for k, v in s["args"].items() if k != "requires"}}
+        return real(world, s)
+
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_requires)
+    result = compare("work", transports=("http",))["transports"]["http"]
+    assert any(".requires" in d for d in result["diffs"]), result["diffs"]
+
+    def http_that_drops_instance_metadata(world, s):
+        if s["verb"] == "sop_instantiate":
+            s = {**s, "args": {k: v for k, v in s["args"].items() if k != "metadata"}}
+        return real(world, s)
+
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_instance_metadata)
+    result = compare("procedure", transports=("http",))["transports"]["http"]
+    assert any("other_metadata" in d for d in result["diffs"]), result["diffs"]

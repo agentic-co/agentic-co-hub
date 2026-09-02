@@ -657,7 +657,13 @@ def _mcp_budget() -> dict:
 
     from agentco.mcp_server import create_server
 
-    with tempfile.TemporaryDirectory(prefix="agentco-conform-budget-") as tmp:
+    from agentco.conformance import STORE_ENV_VARS, _environment
+
+    # Pinned like the scenarios: `create_server` honours AGENTCO_REGISTRY_URL and
+    # AGENTCO_DB before its arguments, and the second party watched this probe
+    # migrate the operator's database while every scenario stayed in /tmp.
+    with tempfile.TemporaryDirectory(prefix="agentco-conform-budget-") as tmp, \
+            _environment(**{k: None for k in STORE_ENV_VARS}):
         server = create_server(db_path=f"{tmp}/r.sqlite3", work_store=f"{tmp}/work.jsonl",
                                sop_store=f"{tmp}/sops.jsonl", actor="conform")
         tools = list(server._tool_manager.list_tools())
