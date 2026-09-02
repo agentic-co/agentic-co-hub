@@ -391,3 +391,81 @@ def test_an_item_parked_before_the_clock_existed_still_gets_one(queue):
     queue.annotate(item.id, {"verify_parked_at": None})
     assert verifiers.due_at(queue.get(item.id)) is not None
     assert len(verifiers.sweep_park_clocks(queue, now=later())["resolved"]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# "No verifier configured" is a state you can read, not a silence
+# --------------------------------------------------------------------------- #
+
+
+def test_nothing_routed_yet_reports_none_and_not_no(queue):
+    """Opposite findings. "Nobody has answered a gate" and "no gate has ever
+    needed answering" rendered the same way is how the wrong one gets believed —
+    the rule the L1-conversion metric already follows."""
+    status = verifiers.verifier_status(queue)
+    assert status["configured"] is None
+    assert "NOT 'no verifier configured'" in status["verdict"]
+    assert status["warning"] is None
+
+
+def test_gates_routed_and_never_claimed_reports_no_verifier(queue):
+    park(queue, gate=gate(on_timeout="fail"), title="a")
+    verifiers.route_open_gates(queue)
+    status = verifiers.verifier_status(queue)
+    assert status["configured"] is False
+    assert status["routedGates"] == 1 and status["claimedEver"] == 0
+    assert "none ever claimed" in status["verdict"]
+
+
+def test_evidence_of_a_verifier_is_a_claim_and_not_a_declaration(queue):
+    """A declaration proves somebody set an environment variable. A claim is a
+    lease — fenced, recorded — and means a verifier actually turned up."""
+    park(queue, gate=gate(on_timeout="fail"))
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    assert verifiers.verifier_status(queue)["configured"] is False
+
+    queue.claim(vehicle.id, "reviewer", capabilities=["verify"])
+    status = verifiers.verifier_status(queue)
+    assert status["configured"] is True
+    assert status["claimedEver"] == 1
+
+
+def test_a_queue_approving_itself_on_a_timer_says_so_loudly(queue):
+    """**The failure the park clock creates.** With `on_timeout: pass` and nobody
+    verifying, every gate resolves green on the clock and the system
+    manufactures its own approval at scale. Each item carries a record saying no
+    check was run — which is exactly the evidence nobody reads one row at a
+    time, so it is reported in aggregate."""
+    for n in range(3):
+        park(queue, gate=gate(on_timeout="pass"), title=f"item-{n}")
+    verifiers.route_open_gates(queue)
+    verifiers.sweep_park_clocks(queue, now=later())
+
+    status = verifiers.verifier_status(queue)
+    assert status["resolvedByDefault"] == 3
+    assert status["resolvedByVerdict"] == 0
+    assert "approving its own work on a timer" in status["warning"]
+
+
+def test_one_real_verdict_clears_the_warning(queue):
+    """The warning is about a queue with NO verification happening, not about any
+    single default. An org that verifies most gates and lets some lapse is doing
+    the normal thing."""
+    defaulted = park(queue, gate=gate(on_timeout="pass"), title="lapsed")
+    verified = park(queue, gate=gate(on_timeout="pass"), title="checked")
+    verifiers.sweep_park_clocks(queue, now=later())
+    assert queue.get(defaulted.id).metadata["verify_resolution"]["by"] == "park-clock"
+    del verified
+
+    fresh = park(queue, gate=gate(on_timeout="pass"), title="answered")
+    queue.attest(fresh.id, attestation(gate()["check"]), "reviewer", capabilities=["verify"])
+    assert verifiers.verifier_status(queue)["warning"] is None
+
+
+def test_the_oldest_outstanding_gate_is_reported(queue):
+    park(queue, gate=gate(on_timeout="fail"))
+    verifiers.route_open_gates(queue)
+    status = verifiers.verifier_status(queue, now=later(3600))
+    assert status["outstanding"] == 1
+    assert status["oldestOutstandingSeconds"] >= 3600

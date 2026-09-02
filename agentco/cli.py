@@ -441,6 +441,55 @@ def _drain_text(result: dict) -> str:
     return "\n".join(lines)
 
 
+def cmd_verifiers(args) -> int:
+    """The L3 operator surface: who is answering gates, and what is overdue.
+
+    Read-only unless asked. `--route` gives parked judged gates a claimable
+    vehicle and `--sweep` resolves gates whose clock has run out — both are
+    passes rather than side effects of anything else, so something has to run
+    them, and this is that something.
+
+    Exit status carries the one finding worth waking up for: a queue resolving
+    gates on the clock with NO verdicts behind any of them is approving its own
+    work on a timer. Everything else is information and exits 0, because a
+    monitor that goes red on ordinary state is a monitor people mute.
+    """
+    from agentco import verifiers
+    from agentco.work import Queue, resolve_work_store
+
+    queue = Queue(resolve_work_store(args.work_store))
+    report = {"status": verifiers.verifier_status(queue)}
+    if args.route:
+        report["routing"] = verifiers.route_open_gates(queue, dry_run=args.dry_run)
+    if args.sweep:
+        report["sweep"] = verifiers.sweep_park_clocks(queue, dry_run=args.dry_run)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        st = report["status"]
+        # `—` and `no` are different findings: nothing routed yet, versus routed
+        # and nobody came.
+        configured = {None: "—", True: "yes", False: "NO"}[st["configured"]]
+        print(f"verifier configured: {configured}")
+        print(f"  routed {st['routedGates']}, claimed {st['claimedEver']}, outstanding {st['outstanding']}")
+        print(f"  resolved by verdict {st['resolvedByVerdict']}, by park clock {st['resolvedByDefault']}")
+        print(f"  {st['verdict']}")
+        if st["warning"]:
+            print(f"  ⚠ {st['warning']}")
+        for key, label in (("routing", "routed"), ("sweep", "swept")):
+            if key in report:
+                block = report[key]
+                if key == "routing":
+                    print(f"  {label}: {len(block['created'])} new vehicle(s), "
+                          f"{len(block['retired'])} retired")
+                else:
+                    print(f"  {label}: {len(block['resolved'])} resolved by default, "
+                          f"{len(block['escalated'])} escalated")
+
+    return 1 if report["status"]["warning"] else 0
+
+
 def cmd_keygen(args) -> int:
     """Mint a shared secret for one actor and print the key-file line.
 
@@ -577,6 +626,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_drain.add_argument("--json", action="store_true", help="machine-readable output")
     p_drain.set_defaults(func=cmd_drain)
+
+    p_ver = sub.add_parser(
+        "verifiers",
+        help="L3: who is answering gates, what is overdue, and route/sweep them",
+    )
+    p_ver.add_argument("--work-store", default=None, help="path to the work store")
+    p_ver.add_argument("--route", action="store_true", help="give parked judged gates a vehicle")
+    p_ver.add_argument("--sweep", action="store_true", help="resolve gates whose park clock expired")
+    p_ver.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
+    p_ver.add_argument("--json", action="store_true", help="machine-readable output")
+    p_ver.set_defaults(func=cmd_verifiers)
 
     p_key = sub.add_parser("keygen", help="mint a shared secret for one actor")
     p_key.add_argument("actor")
