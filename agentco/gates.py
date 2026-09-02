@@ -16,7 +16,21 @@ check* (`docs/decisions/0002-participation-ladder.md`):
   `judged` — needs a route different from the executor's, so it becomes a
       verify work item claimable only by a worker declaring the `verify`
       capability.
-  `human` — goes to the routing spine.
+  `human` — goes to the routing spine, addressed to the person named in
+      `verifier`.
+
+**`verifier` and `escalate_to` answer different questions, so they are
+different fields.** `verifier` is who is supposed to answer the gate;
+`escalate_to` is where the decision goes when the clock runs out and nobody
+did. They are often the same person and they are never the same question — and
+L3 conflated them, which is how a human gate that resolved on its own clock got
+routed to nobody at all: `escalate_to` is refused unless `on_timeout` is
+`escalate`, so a human gate declaring `pass` or `fail` produced a work item
+with no assignee and no required capability, offered to the executor by
+`ready()`. A human gate therefore MUST name a verifier. A `deterministic` gate
+must not: its executor is its attester, and a name there would be a field
+nothing reads. A `judged` gate may, which narrows the route from "any node
+declaring `verify`" to one of them.
 
 **A malformed gate is refused at the write boundary, never stored.** This is
 the whole reason validation lives here rather than at the point of use: a gate
@@ -58,7 +72,7 @@ VERIFY_CAPABILITY = "verify"
 # one that hands the decision to somebody.
 ON_TIMEOUT = ("pass", "fail", "escalate")
 
-GATE_FIELDS = ("kind", "check", "max_park_seconds", "on_timeout", "escalate_to")
+GATE_FIELDS = ("kind", "check", "max_park_seconds", "on_timeout", "escalate_to", "verifier")
 REQUIRED_GATE_FIELDS = ("kind", "check", "max_park_seconds", "on_timeout")
 
 ATTESTATION_FIELDS = ("check", "exit_status", "environment", "at", "submitted_by")
@@ -186,12 +200,35 @@ def validate_gate(payload: Any) -> dict:
             "readers of this gate would otherwise disagree about what it means.",
         )
 
+    verifier = payload.get("verifier")
+    named = isinstance(verifier, str) and verifier.strip()
+    if kind == "human" and not named:
+        _refuse(
+            GATE_INVALID,
+            "a human gate must name the person who answers it (verifier)",
+            "Set verifier to whoever is expected to sign this off. Without it "
+            "the routed work item has no assignee and requires no capability, "
+            "so the queue offers it to the executor — which is the one party a "
+            "human gate exists to exclude. escalate_to is not a substitute: it "
+            "names where the decision goes when nobody answers, and it cannot "
+            "even be declared unless on_timeout is 'escalate'.",
+        )
+    if kind == "deterministic" and verifier not in (None, ""):
+        _refuse(
+            GATE_INVALID,
+            "verifier is set on a deterministic gate, so nothing would ever read it",
+            "Drop it. A deterministic check is re-run by the process that "
+            "completed the work, and that process is its attester — naming "
+            "somebody else here promises a review that never happens.",
+        )
+
     return {
         "kind": kind,
         "check": check.strip(),
         "max_park_seconds": park,
         "on_timeout": on_timeout,
         "escalate_to": escalate_to.strip() if isinstance(escalate_to, str) else None,
+        "verifier": verifier.strip() if named else None,
     }
 
 

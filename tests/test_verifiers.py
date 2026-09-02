@@ -20,7 +20,7 @@ import pytest
 
 from agentco import verifiers
 from agentco.errors import Refusal
-from agentco.work import CapabilityError, WorkStatus
+from agentco.work import BlockedError, CapabilityError, WorkStatus
 
 JUDGED = {
     "kind": "judged",
@@ -35,6 +35,8 @@ HUMAN = {
     "max_park_seconds": 604800,
     "on_timeout": "escalate",
     "escalate_to": "dana",
+    # Who answers the gate. `escalate_to` is where it goes when nobody does.
+    "verifier": "dana",
 }
 DETERMINISTIC = {
     "kind": "deterministic",
@@ -141,6 +143,30 @@ def test_a_human_gate_gets_a_vehicle_assigned_to_the_named_person(queue):
     assert vehicle.assigned_agent == "dana"
     assert vehicle.requires == [], "a person does not declare a machine capability"
     assert verifiers.verifies(vehicle) == item.id
+
+
+def test_a_human_gate_is_offered_to_the_person_it_names_and_to_nobody_else(queue):
+    """FIX-L3.4. A human vehicle used to be assigned to `escalate_to`, and
+    `validate_gate` refuses `escalate_to` unless `on_timeout` is `escalate` — so
+    every human gate that resolved on its own clock produced a vehicle with
+    `assigned_agent=None` and `requires=[]`. `ready()` offered it to the
+    executor, who claimed it with no capabilities and reported it done.
+
+    Dies if the vehicle is assigned from anything but the gate's own `verifier`.
+    """
+    for on_timeout in ("pass", "fail", "escalate"):
+        item = park(queue, gate=gate(kind="human", on_timeout=on_timeout),
+                    title=f"a person answers this ({on_timeout})")
+        verifiers.route_open_gates(queue)
+        [vehicle] = [v for v in vehicles(queue) if verifiers.verifies(v) == item.id]
+
+        assert vehicle.assigned_agent == "dana", (
+            f"on_timeout={on_timeout!r} produced a vehicle nobody owns"
+        )
+        with pytest.raises(BlockedError):
+            queue.claim(vehicle.id, "executor")
+        assert vehicle.id not in {i.id for i in queue.ready("executor")}
+        assert queue.claim(vehicle.id, "dana") is not None
 
 
 def test_routing_is_idempotent(queue):
@@ -277,6 +303,8 @@ def gate(kind="judged", on_timeout="fail", **over):
     base = {"kind": kind, "check": f"the {kind} criteria", "on_timeout": on_timeout, **SHORT}
     if on_timeout == "escalate":
         base["escalate_to"] = "dana"
+    if kind == "human":
+        base["verifier"] = "dana"
     return {**base, **over}
 
 

@@ -147,7 +147,14 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
             "verifies": item.id,
             "kind": gate["kind"],
             "requires": [VERIFY_CAPABILITY] if gate["kind"] == "judged" else [],
-            "assigned_agent": gate.get("escalate_to") if gate["kind"] == "human" else None,
+            # The gate's own `verifier`, never its `escalate_to`. Those answer
+            # different questions — who answers this, versus where it goes when
+            # nobody does — and assigning from the second gave a human gate
+            # declaring `pass` or `fail` a vehicle with no assignee at all,
+            # because `escalate_to` cannot be declared on those. `gates` makes
+            # `verifier` mandatory for a human gate, so this is never None
+            # there; for a judged gate it is optional and narrows the route.
+            "assigned_agent": gate.get("verifier"),
             "naturalKey": vehicle_key(item),
         }
         created.append(plan)
