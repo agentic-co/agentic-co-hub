@@ -320,6 +320,22 @@ class WorkItem:
 
 
 
+# Metadata keys the plane writes about an item and reads back as fact. A caller
+# who can set them on create can forge what the plane believes: `verifies` makes
+# an ordinary item pass for a routing vehicle (so the real one is never filed and
+# the gate resolves on its clock unseen), `claims` makes a queue nobody verified
+# read as configured, `lease_report` invents an executor. Reserved at the write
+# boundary, because the alternative — trusting every reader to re-derive what
+# every writer might have lied about — is not a boundary.
+RESERVED_METADATA_KEYS = frozenset({
+    "verifies", "claims", "lease_report", "verify_parked_at", "verify_resolution",
+    "verify_history", "verify_escalated", "verify_quarantined", "verify_retry",
+    "verify_verdict", "natural_key_conflict",
+})
+# And the natural-key namespace the routing pass uses for vehicles.
+RESERVED_KEY_PREFIX = "verify:"
+
+
 def build_item(
     title: str,
     *,
@@ -334,8 +350,14 @@ def build_item(
     period: Optional[str] = None,
     metadata: Optional[dict] = None,
     verify: Optional[dict] = None,
+    by_plane: bool = False,
 ) -> WorkItem:
     """Derive the natural key, validate the gate, and return the new item.
+
+    `by_plane` is how the routing pass files a vehicle — it is the one writer
+    entitled to the reserved metadata keys and the `verify:` key namespace. It
+    is a Python keyword argument and never a wire field: no transport reads it
+    off a payload, so a caller cannot ask for it.
 
     Shared by both `create` implementations on purpose. There are two write
     paths for storage reasons and there is exactly one rule for what a new item
@@ -344,6 +366,33 @@ def build_item(
     next deployment happens to use. Everything here refuses BEFORE any store is
     touched, so a refused create leaves the store byte-identical.
     """
+    if not by_plane:
+        forged = sorted(RESERVED_METADATA_KEYS & set(metadata or {}))
+        if forged:
+            raise Refusal(
+                code="metadata_reserved",
+                message=f"metadata sets plane-owned key(s) {forged}",
+                remediation=(
+                    "Remove them. These keys are written by AgentCo about an item "
+                    "and read back as fact — a caller who could set `verifies` would "
+                    "make an ordinary item pass for a routing vehicle, so the real "
+                    "one is never filed and the gate resolves on its clock with no "
+                    "verifier ever seeing it. Put your own data under keys of your "
+                    "own."
+                ),
+            )
+        if isinstance(natural_key, str) and natural_key.startswith(RESERVED_KEY_PREFIX):
+            raise Refusal(
+                code="natural_key_reserved",
+                message=f"natural key {natural_key!r} is in the routing pass's namespace",
+                remediation=(
+                    f"Keys beginning {RESERVED_KEY_PREFIX!r} name verification "
+                    f"vehicles and are filed by the plane. Filing one yourself "
+                    f"pre-empts the real vehicle for that item — the routing pass "
+                    f"sees the key, believes the gate is routed, and never files "
+                    f"the one a verifier could actually claim."
+                ),
+            )
     return WorkItem(
         id=f"w-{uuid.uuid4().hex[:8]}",
         title=title,
@@ -534,6 +583,7 @@ class Queue:
         period: Optional[str] = None,
         metadata: Optional[dict] = None,
         verify: Optional[dict] = None,
+        by_plane: bool = False,
     ) -> WorkItem:
         """Create one item. A duplicate natural key is a LOUD no-op.
 
@@ -566,6 +616,7 @@ class Queue:
             period=period,
             metadata=metadata,
             verify=verify,
+            by_plane=by_plane,
         )
         key = item.natural_key
 
@@ -1242,6 +1293,25 @@ class Queue:
                 return current
 
         def fence(item: WorkItem) -> dict:
+            carried = (item.metadata or {}).get("verifies")
+            if carried and status is WorkStatus.DONE:
+                parent = self.get(carried)
+                if parent is not None and parent.status is WorkStatus.AWAITING_VERIFY:
+                    raise Refusal(
+                        code=gates.ATTESTATION_REQUIRED,
+                        message=(
+                            f"{item_id} is the vehicle for {carried}, which is still "
+                            f"awaiting a verdict — reporting the vehicle done answers "
+                            f"nothing"
+                        ),
+                        remediation=(
+                            f"Attest {carried} with your verdict; the vehicle retires "
+                            f"itself once the item moves. A vehicle that could be closed "
+                            f"by reporting it is one the executor could close on the "
+                            f"way past, and the gate would then resolve on its clock "
+                            f"with nobody having looked."
+                        ),
+                    )
             if item.lease_attempt != attempt:
                 raise LeaseError(
                     f"refusing result for {item_id}: reported against lease "
