@@ -91,9 +91,47 @@ def test_an_escalation_with_no_destination_is_refused(queue):
         queue.create("ship it", verify=dict(JUDGED, escalate_to=None))
 
 
+def test_a_human_gate_with_nobody_named_to_answer_it_is_refused(queue):
+    """FIX-L3.4. `escalate_to` was doing double duty as the verifier, and it
+    cannot be declared unless `on_timeout` is `escalate` — so a human gate that
+    resolved on its own clock named nobody, and L3 routed it to a work item with
+    no assignee and no required capability that `ready()` handed to the executor.
+
+    Refused at the write boundary rather than patched at the routing pass: a gate
+    nobody can answer is malformed, and the rule for a malformed gate here is
+    that it never reaches storage.
+    """
+    human = {"kind": "human", "check": "the owner signs off",
+             "max_park_seconds": 900, "on_timeout": "fail"}
+    with pytest.raises(Refusal) as caught:
+        queue.create("ship it", verify=human)
+    assert "must name the person who answers it" in caught.value.message
+    assert "escalate_to is not a substitute" in caught.value.remediation
+
+    named = queue.create("ship it", verify=dict(human, verifier="dana"))
+    assert named.verify["verifier"] == "dana"
+    assert named.verify["escalate_to"] is None, "who answers is not where it escalates"
+
+
+def test_a_deterministic_gate_may_not_name_a_verifier(queue):
+    """Its executor is its attester. A name here promises a review that never
+    happens — the same rule `escalate_to` follows on a gate that never escalates."""
+    with pytest.raises(Refusal) as caught:
+        queue.create("ship it", verify=dict(DETERMINISTIC, verifier="dana"))
+    assert "nothing would ever read it" in caught.value.message
+
+
+def test_a_judged_gate_may_narrow_its_route_to_one_verifier(queue):
+    """Optional there, because a judged gate is already routed by capability.
+    Naming somebody narrows it from "any node declaring verify" to one of them."""
+    item = queue.create("ship it", verify=dict(JUDGED, verifier="reviewer-a"))
+    assert item.verify["verifier"] == "reviewer-a"
+    assert queue.create("ship it too", verify=JUDGED).verify["verifier"] is None
+
+
 def test_a_stored_gate_is_normalised(queue):
     item = queue.create("ship it", verify=DETERMINISTIC)
-    assert item.verify == dict(DETERMINISTIC, escalate_to=None)
+    assert item.verify == dict(DETERMINISTIC, escalate_to=None, verifier=None)
     assert queue.get(item.id).verify == item.verify
     assert item.is_gated
 
