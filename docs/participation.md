@@ -190,7 +190,10 @@ so it is routing hygiene rather than authority — it stops a node answering gat
 it was never configured for, and a node determined to answer one need only
 declare the string. The authority rule for a judged gate is the other one: the
 submitter may not be the actor that reported the work done, and that is derived
-from the signature, so it cannot be self-asserted.
+from the signature, so it cannot be self-asserted. That claim rests on a report
+being derived the same way: `work_report` (MCP) and its HTTP equivalent refuse a
+report from anyone but the lease holder, so "the actor that reported the work
+done" names one real party rather than whoever's body claimed to be it.
 
 **Reaching a verifier at all.** A judged or human gate parks its item as
 `awaiting_verify`, and `work_pull` deliberately never returns items in that
