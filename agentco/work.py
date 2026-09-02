@@ -64,7 +64,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
-from agentco import gates
+from agentco import gates, policy
 from agentco.errors import Refusal
 from agentco.filelock import lock_exclusive, unlock
 from agentco.keys import derive_natural_key, natural_key_of
@@ -790,9 +790,16 @@ def build_item(
 class Queue:
     """A JSONL work store with an advisory lock around every mutation."""
 
-    def __init__(self, path: Path | str = "work.jsonl"):
+    def __init__(self, path: Path | str = "work.jsonl", verifiers: Optional[Sequence[str]] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # The operator's declared verifiers (`AGENTCO_VERIFIERS`). Declared,
+        # the `verify` capability is bound to these identities on every claim
+        # and every verdict; undeclared, it stays self-asserted and the status
+        # report says so. Injectable for tests.
+        self.verifiers: frozenset[str] = (
+            frozenset(verifiers) if verifiers is not None else policy.verifiers_from_env()
+        )
         # Raw BYTES, not str — a line that failed to decode has no faithful
         # string form. Read by a health check, and carried through every
         # write so a quarantined line is preserved rather than deleted.
@@ -1156,7 +1163,7 @@ class Queue:
         are unaffected: nothing is required, so nothing can be missing.
         """
         at = now or _now()
-        held = frozenset(capabilities or ())
+        held, unbound = policy.bind_capabilities(agent, capabilities, self.verifiers)
         # From the RAW rows, not from `_read_all()`. `_read_all` drops any row
         # this version cannot model — a newer writer's unknown status value, a
         # missing field — and a dropped row is invisible to `done_ids`. So a
@@ -1184,6 +1191,15 @@ class Queue:
             # holds it right now", which may also be true.
             missing = [r for r in item.requires if r not in held]
             if missing:
+                if unbound and policy.VERIFY_CAPABILITY in missing:
+                    raise CapabilityError(
+                        f"cannot claim {item_id} for {agent!r}: it requires "
+                        f"{policy.VERIFY_CAPABILITY!r}, which this worker declares — but "
+                        f"the operator has bound that capability to "
+                        f"{sorted(self.verifiers)} and {agent!r} is not among them. "
+                        f"Declaring the word is not being the verifier. Add the actor to "
+                        f"{policy.VERIFIERS_ENV_VAR}, or route the gate to one who is."
+                    )
                 raise CapabilityError(
                     f"cannot claim {item_id} for {agent!r}: it requires "
                     f"{', '.join(item.requires)} but this worker declares "
@@ -1536,7 +1552,22 @@ class Queue:
 
             gate = item.verify or {}
             if gate.get("kind") == "judged":
-                held = frozenset(capabilities or ())
+                held, unbound = policy.bind_capabilities(submitted_by, capabilities, self.verifiers)
+                if unbound:
+                    raise Refusal(
+                        code=gates.ATTESTATION_INVALID,
+                        message=(
+                            f"{item.id} has a judged gate; {submitted_by!r} declares "
+                            f"{gates.VERIFY_CAPABILITY!r} but the operator bound it to "
+                            f"{sorted(self.verifiers)}"
+                        ),
+                        remediation=(
+                            f"A verdict on a judged gate comes from a declared verifier. "
+                            f"Add {submitted_by!r} to {policy.VERIFIERS_ENV_VAR} if they are "
+                            f"one; otherwise the gate waits for somebody who is. Declaring "
+                            f"the capability was never the authority — this is."
+                        ),
+                    )
                 if gates.VERIFY_CAPABILITY not in held:
                     raise Refusal(
                         code=gates.ATTESTATION_INVALID,

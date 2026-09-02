@@ -172,6 +172,7 @@ export AGENTCO_REGISTRY_DB=~/.agentco/registry.sqlite3
 export AGENTCO_WORK_STORE=~/.agentco/work.jsonl
 export AGENTCO_REGISTRY_KEYS=~/.agentco/keys.json
 export AGENTCO_HUMANS=you            # the actors the revision policy exempts; everyone else is an agent
+export AGENTCO_VERIFIERS=you         # who may answer judged gates; unset, `verify` is self-asserted
 
 python3 -m agentco keygen you > ~/.agentco/keys.json   # then chmod 600
 python3 -m agentco serve --port 8787                   # loopback by default

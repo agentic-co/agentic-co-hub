@@ -220,6 +220,7 @@ def create_app(
     sop_store: Optional[str] = None,
     humans: Optional[Iterable[str]] = None,
     protected_tags: Optional[Iterable[str]] = None,
+    verifiers: Optional[Iterable[str]] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -242,6 +243,12 @@ def create_app(
     queue = open_queue(work_store)
     library = open_sop_library(sop_store)
     declared_humans = frozenset(humans) if humans is not None else policy.humans_from_env()
+    if verifiers is not None:
+        # The `verify` capability is bound to these identities on claim and
+        # verdict (agentco/policy.py `bind_capabilities`); unset, the queue read
+        # AGENTCO_VERIFIERS itself, and empty means self-asserted, said aloud by
+        # `agentco verifiers`.
+        queue.verifiers = frozenset(verifiers)
     if protected_tags is not None:
         library.protected_tags = policy.DEFAULT_PROTECTED_TAGS | frozenset(
             t.lower() for t in protected_tags

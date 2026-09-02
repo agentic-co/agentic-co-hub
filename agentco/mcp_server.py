@@ -699,6 +699,9 @@ def create_server(
             # thing here that does refuse, and it fails closed — so a harness
             # must be able to see what it has declared without pulling anything.
             "capabilities": resolve_capabilities(),
+            # Whether the `verify` capability above means anything: bound to the
+            # operator's declared verifiers, or self-asserted.
+            "verifiers": sorted(policy.verifiers_from_env()) or "undeclared (verify is self-asserted)",
             **backend.describe(),
             "scope": {"minSegments": scope.MIN_SEGMENTS, "intents": list(scope.INTENTS)},
             "eventKinds": list(events_module.KINDS),
