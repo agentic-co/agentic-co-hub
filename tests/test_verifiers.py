@@ -209,44 +209,106 @@ def test_the_verdict_closes_the_item_and_retires_the_vehicle(queue):
     assert result["retired"] == [vehicle.id]
     retired = queue.get(vehicle.id)
     assert retired.status is WorkStatus.DONE
-    assert "no longer awaiting a verdict" in retired.result
+    assert "no longer waiting on a verdict" in retired.result
     assert retired.attestation is None, "the evidence belongs to the item, not the vehicle"
 
 
 def test_a_rejected_gate_gets_a_fresh_vehicle_for_the_next_attempt(queue):
-    """Dies if the natural key ignores the failure count.
+    """FIX-L3.5. The title was always the property; the assertion was its
+    opposite — it pinned exactly one key, the FIRST attempt's, and passed.
 
-    The second attempt would then be suppressed as a duplicate of the closed
-    first one, and the item would sit in `verify_failed` with nothing routed to
-    it — a stall indistinguishable from nobody caring.
+    `route_open_gates` routed `awaiting_verify` and nothing else, and nothing
+    returns a rejected item there. So a verdict-fail retired the vehicle, no
+    second one was ever created, and the item sat in `verify_failed` with
+    nothing routed to it — while `vehicle_key`'s docstring described the
+    re-verify vehicle keyed on the failure count that never happened. Per the
+    ASOP re-verify invariant a failed unit keeps blocking until ITS OWN gate
+    runs again and passes, and that needs a route.
     """
     item = park(queue)
     verifiers.route_open_gates(queue)
     [first] = vehicles(queue)
+    assert first.natural_key == f"verify:{item.id}:0"
 
-    queue.attest(item.id, attestation(JUDGED["check"], exit_status=1), "reviewer", capabilities=["verify"])
+    queue.attest(item.id, attestation(JUDGED["check"], exit_status=1), "reviewer",
+                 capabilities=["verify"])
     assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
+    assert queue.get(item.id).metadata["verify_retry"]["decision"] == "fix"
 
-    # The failed item is not awaiting anything, so its vehicle is retired.
-    verifiers.route_open_gates(queue)
-    assert queue.get(first.id).status is WorkStatus.DONE
+    result = verifiers.route_open_gates(queue)
+    assert [c["verifies"] for c in result["created"]] == [item.id]
+    assert result["retired"] == [first.id], "the answered attempt's vehicle is moot"
 
-    # A re-verify parks it again, and THAT gets its own vehicle.
-    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer", capabilities=["verify"])
-    assert queue.get(item.id).status is WorkStatus.DONE
+    live = [v for v in vehicles(queue) if v.status is not WorkStatus.DONE]
+    assert [v.natural_key for v in live] == [f"verify:{item.id}:1"]
+    assert live[0].metadata["attempt"] == 1, "somebody already said no once, and it shows"
+    assert queue.claim(live[0].id, "reviewer", capabilities=["verify"]) is not None
 
-    keys = {v.natural_key for v in vehicles(queue)}
-    assert keys == {f"verify:{item.id}:0"}, keys
+    # And it stays at one. The pass runs on a cadence.
+    assert verifiers.route_open_gates(queue)["created"] == []
 
 
-def test_a_vehicle_for_a_vanished_parent_is_retired(queue):
+def test_the_retry_policy_decides_whether_a_failed_gate_is_routed_again(queue):
+    """One fix, then a human, then never again autonomously — `gates.retry_decision`
+    already says so, and re-routing a `stop` item would be the queue overruling
+    the policy it recorded one line earlier. An agent regenerating a fix for a
+    check it does not understand is the exact behaviour that policy halts."""
     item = park(queue)
-    verifiers.route_open_gates(queue)
-    [vehicle] = vehicles(queue)
-    # Simulate a store where the parent is not readable by this version: the
-    # vehicle must not become permanent work nobody can act on.
-    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer", capabilities=["verify"])
-    assert verifiers.route_open_gates(queue)["retired"] == [vehicle.id]
+    live_after = {}
+    for decision in ("fix", "escalate", "stop"):
+        queue.attest(item.id, attestation(JUDGED["check"], exit_status=1), "reviewer",
+                     capabilities=["verify"])
+        assert queue.get(item.id).metadata["verify_retry"]["decision"] == decision
+        verifiers.route_open_gates(queue)
+        live_after[decision] = sorted(
+            v.natural_key for v in vehicles(queue)
+            if v.status not in (WorkStatus.DONE, WorkStatus.FAILED)
+        )
+
+    assert live_after["fix"] == [f"verify:{item.id}:1"]
+    assert live_after["escalate"] == [f"verify:{item.id}:2"]
+    assert live_after["stop"] == [], "the policy said stop and the queue kept offering it"
+
+
+def test_a_quarantined_gate_is_not_re_offered_by_the_next_routing_pass(queue):
+    """Quarantine retires the vehicle while the item stays parked, so the item
+    still looks like it needs a verifier — and it does. What it does not need is
+    to be handed back to the queue five minutes later, which is the whole of
+    what quarantine buys.
+
+    Dies if the routing pass stops asking whether this attempt was already
+    routed. The natural key would still suppress the duplicate item, so the
+    damage is quieter than a second vehicle: a pass that reports work it did not
+    do, every five minutes, forever.
+    """
+    item, much_later = abandoned(queue)
+    verifiers.sweep_quarantine(queue, now=much_later)
+    [vehicle] = [v for v in vehicles(queue) if verifiers.verifies(v) == item.id]
+    assert vehicle.status is WorkStatus.DONE
+
+    assert verifiers.route_open_gates(queue)["created"] == []
+    assert len(vehicles(queue)) == 1
+
+
+def test_a_vehicle_whose_parent_this_store_does_not_have_is_retired(queue):
+    """Dies if the retire loop only tests the parent's STATUS. A parent that is
+    not in the store at all — deleted, or a row this version cannot model, which
+    `_read_all` drops — makes `parent` None, and every status test on None is
+    False. The vehicle becomes permanent work nobody can act on and every pass
+    walks past it.
+
+    The previous version of this test ATTESTED the parent rather than removing
+    it, so the parent was present throughout and the case its name describes was
+    never exercised. Deleting the `parent is None` arm left it green.
+    """
+    ghost = queue.create(
+        "Verify: an item this store does not have",
+        natural_key="verify:w-00000000:0",
+        requires=[verifiers.VERIFY_CAPABILITY],
+        metadata={verifiers.VEHICLE_MARKER: "w-00000000"},
+    )
+    assert verifiers.route_open_gates(queue)["retired"] == [ghost.id]
+    assert queue.get(ghost.id).status is WorkStatus.DONE
 
 
 # --------------------------------------------------------------------------- #
@@ -628,6 +690,24 @@ def test_the_passes_work_without_a_registry_and_emit_nothing(queue):
     park(queue, gate=gate(kind="human", on_timeout="escalate"))
     assert len(verifiers.route_open_gates(queue)["created"]) == 1
     assert len(verifiers.sweep_park_clocks(queue, now=later())["escalated"]) == 1
+
+
+def test_routing_a_re_verify_announces_no_new_park(queue, registry):
+    """A rejected gate is owed a route and is NOT parked. Its clock is not
+    running — `sweep_park_clocks` skips `verify_failed` deliberately — so a
+    consumer handed `WorkParked` would start timing a wait that is not
+    happening, and every surface reading the feed would show the item as a gate
+    nobody has looked at. Somebody has, and said no.
+    """
+    item = park(queue)
+    verifiers.route_open_gates(queue, conn=registry)
+    assert len(feed(registry, "WorkParked")) == 1
+
+    queue.attest(item.id, attestation(JUDGED["check"], exit_status=1), "reviewer",
+                 capabilities=["verify"])
+    result = verifiers.route_open_gates(queue, conn=registry)
+    assert [c["verifies"] for c in result["created"]] == [item.id], "the re-verify is routed"
+    assert len(feed(registry, "WorkParked")) == 1, "and it is not a park"
 
 
 def test_events_are_not_re_emitted_on_every_pass(queue, registry):
