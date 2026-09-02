@@ -283,3 +283,122 @@ def test_a_transient_failure_persists_what_already_landed_then_stops(conn):
     assert [n["sourceId"] for n in seen] == ["acme/2"], (
         "a retry must redeliver only the event that actually failed"
     )
+
+
+# --------------------------------------------------------------------------- #
+# F4 — a 4xx is not uniformly permanent
+# --------------------------------------------------------------------------- #
+
+
+def test_401_403_408_429_are_retried_not_dead_lettered(conn):
+    """`_is_permanent_failure` used to treat every 4xx as the caller's fault
+    forever, and four of them are the opposite case. 408 (timeout) and 429
+    (rate limited) are the network's fault today, not the ticket's fault
+    ever; 401 and 403 are the operator's to fix — rotate the token, grant
+    access — and then they want the SAME notice replayed, not one silently
+    dropped into a dead-letter file next to tickets that no longer exist.
+
+    A mutant that made `_is_permanent_failure` "all 4xx are permanent" dies
+    here: each of these would be dead-lettered and the pass would report
+    success instead of raising with the notice still owed a retry.
+    """
+    for status in (401, 403, 408, 429):
+        parked(conn, source_id=f"acme/{status}")
+
+        def flaky(notice, status=status):
+            raise writeback.WritebackFailed(status, f"http {status}")
+
+        writeback.register_writer("flaky", flaky)
+        with pytest.raises(writeback.WritebackFailed):
+            writeback.run(conn, via="flaky")
+        assert not writeback._deadletter_path().exists(), (
+            f"{status} was dead-lettered; it must be retried instead"
+        )
+
+        seen = collector()
+        assert writeback.run(conn, via="test")["sent"] == 1
+        assert seen[0]["sourceId"] == f"acme/{status}"
+
+
+def test_other_4xx_statuses_besides_400_are_also_permanent(conn):
+    """Pins the other side of `TRANSIENT_4XX`. A mutant that narrowed
+    `_is_permanent_failure` to recognise only 400 — the status every other
+    test in this file happens to use — would treat 404 as transient and stop
+    the pass instead of dead-lettering it and moving on.
+    """
+    parked(conn, source_id="acme/1")
+    parked(conn, source_id="acme/2")
+
+    def flaky(notice):
+        if notice["sourceId"] == "acme/1":
+            raise writeback.WritebackFailed(404, "ticket acme/1 was never valid")
+
+    writeback.register_writer("flaky", flaky)
+    result = writeback.run(conn, via="flaky")
+
+    assert result["sent"] == 1 and result["deadlettered"] == 1
+    assert [n["sourceId"] for n in result["notices"]] == ["acme/2"]
+
+
+# --------------------------------------------------------------------------- #
+# F5 — an unwritable dead-letter path must not re-open the poison loop
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unwritable_deadletter_path_persists_the_cursor_and_raises(conn, tmp_path, monkeypatch):
+    """The dead-letter write is what turns "permanent failure" into "handled".
+    Before this fix, IT raising inside the except block happened before the
+    cursor was ever persisted, so the run died, the cursor never moved past
+    the event before the poison one, and — because the write is retried
+    unconditionally on the next run — the same crash repeated forever with no
+    record of which notice caused it. This falls through to the transient
+    contract instead: the cursor still advances only to the event before the
+    poison one, so a fixed path retries it rather than skipping it, and the
+    raised error names both the notice and the path that refused it.
+    """
+    parked(conn, source_id="acme/1")
+    parked(conn, source_id="acme/2")
+
+    trap = tmp_path / "deadletter-is-a-directory"
+    trap.mkdir()
+    monkeypatch.setenv(writeback.DEADLETTER_ENV_VAR, str(trap))
+
+    def flaky(notice):
+        if notice["sourceId"] == "acme/2":
+            raise writeback.WritebackFailed(400, "ticket acme/2 was deleted")
+
+    writeback.register_writer("flaky", flaky)
+    with pytest.raises(writeback.WritebackFailed) as caught:
+        writeback.run(conn, via="flaky")
+    assert "acme/2" in str(caught.value)
+    assert writeback.read_cursor() is not None, "acme/1 was handled and must not be lost"
+
+    # Fix the path and retry: the poison event is redelivered, not skipped —
+    # the transient contract, which is exactly what this fell through to.
+    monkeypatch.setenv(writeback.DEADLETTER_ENV_VAR, str(tmp_path / "writeback.deadletter.jsonl"))
+    seen = collector()
+    assert writeback.run(conn, via="test")["sent"] == 1
+    assert [n["sourceId"] for n in seen] == ["acme/2"]
+
+
+def test_deadletter_records_are_appended_across_separate_runs(conn):
+    """A mutant that opened the dead-letter file with `"w"` instead of `"a"`
+    would lose every record but the last. Two permanent failures across two
+    separate runs must both survive in the file — the docstring's promise
+    that it is "appended, never overwritten", pinned rather than taken on
+    faith.
+    """
+    parked(conn, source_id="acme/1")
+
+    def always_permanent(notice):
+        raise writeback.WritebackFailed(404, "not found")
+
+    writeback.register_writer("flaky", always_permanent)
+    writeback.run(conn, via="flaky")
+
+    parked(conn, source_id="acme/2")
+    writeback.run(conn, via="flaky")
+
+    deadletter_path = writeback._deadletter_path()
+    lines = [json.loads(line) for line in deadletter_path.read_text("utf-8").splitlines()]
+    assert [line["notice"]["sourceId"] for line in lines] == ["acme/1", "acme/2"]

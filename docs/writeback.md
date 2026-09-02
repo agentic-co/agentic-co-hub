@@ -65,18 +65,27 @@ re-read from the beginning would put the same comment on the same ticket every
 five minutes, which is how a channel becomes one people filter.
 
 **A poison event does not stall the pass, or erase the cursor.** A notice
-that fails to deliver splits two ways. A **permanent** failure — the writer
-raises `WritebackFailed` with a 4xx status, because the ticket was deleted or
-the URL never existed — is not going to succeed on the next identical POST,
-so it is appended to a dead-letter file instead of retried forever, and the
-pass continues past it: the events after it still get their notice. A
-**transient** failure (5xx, unreachable, or anything the writer raises that
-carries no 4xx status) stops the pass, but the cursor is persisted up to the
-last event actually handled before the exception propagates — so the next
-run retries starting at the event that failed, not at the beginning. The
-dead-letter file lives at `~/.agentco/writeback.deadletter.jsonl` unless
-`AGENTCO_WRITEBACK_DEADLETTER` says otherwise, one JSON object per line:
-`{"notice": {...}, "status": 400, "detail": "..."}`.
+that fails to deliver splits two ways, and not by 4xx-versus-everything-else —
+four 4xx statuses are the exception. A **permanent** failure — the writer
+raises `WritebackFailed` with a 4xx status other than 401, 403, 408 or 429,
+because the ticket was deleted or the URL never existed — is not going to
+succeed on the next identical POST, so it is appended to a dead-letter file
+instead of retried forever, and the pass continues past it: the events after
+it still get their notice. A **transient** failure — 5xx, unreachable, a
+401/403/408/429, or anything else the writer raises with no 4xx status —
+stops the pass, but the cursor is persisted up to the last event actually
+handled before the exception propagates — so the next run retries starting at
+the event that failed, not at the beginning. 401 and 403 are the operator's to
+fix (rotate the token, grant access) and then they want the same notice
+replayed, not permanently dropped next to a ticket that no longer exists; 408
+and 429 say the endpoint is asking to be asked again, not that anything about
+this notice is wrong. The dead-letter file lives at
+`~/.agentco/writeback.deadletter.jsonl` unless `AGENTCO_WRITEBACK_DEADLETTER`
+says otherwise, one JSON object per line: `{"notice": {...}, "status": 400,
+"detail": "..."}`. If that path itself cannot be written, the failure that
+caused the dead-letter is treated as transient instead — cursor persisted, the
+run raises naming the unwritable path — rather than silently drop the notice
+that triggered it.
 
 ## Running it
 
