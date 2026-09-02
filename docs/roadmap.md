@@ -29,10 +29,18 @@ in exactly the place it should have, the connectors.
 | Scheduling with reservations + silent-schedule audit | ✅ | ⏳ | Catches "this has not run in ten days" |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
-| MCP surface | ✅ | ✅ | 10 tools of a stated 12, stdio, thin wrappers over the same core |
+| MCP surface | ✅ | ✅ | 12 tools of a stated 12 — the ceiling is binding; a byte budget over the schemas is published beside the count |
 | Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
 | Session-hook injection (tier 3) | ✅ | ✅ | Fail-open per dependency; byte-identical uninstall |
 | Outbox + drainer + receipts (L1) | 🆕 | ✅ | `.agentco/outbox.jsonl` plus `agentco drain`; appending a line needs no package on the writer's side. The tier-1 splice carries the instructions, the tier-3 session block carries the receipts — see [`docs/outbox.md`](outbox.md) |
+| Gates + attestation (`verify` payload, `awaiting_verify` / `verify_failed`) | 🆕 | ✅ | Validated at the write boundary; neither status releases `blocked_by` — proven across processes by a real poller; the plane stores the claim and never runs the check |
+| Judged/human verifiers (L3) — routing, park clocks, quarantine digest | 🆕 | ✅ | `verify` counts only for `AGENTCO_VERIFIERS` once declared; a human gate names who answers it; a default is never a verdict |
+| Revision policy | 🆕 | ✅ | Protected tags freeze a step against agents; class ratchets toward human only; no undoing a human. HTTP 403 `revision_policy:<rule>`, proven by mutation |
+| Adjudication + plan-vs-actual + revision proposals | 🆕 | ✅ | Adjudicator ≠ executor enforced on every transport; `metadata.plan_vs_actual` written at completion; `agentco lessons --propose` drafts, never activates |
+| Decomposition bounds enforced at create | 🆕 | ✅ | Seven children, three deep, repair beside; HTTP 422 `decomposition_bound` |
+| Write-back to an external record | 🆕 | ✅ | Opt-in, notice-only, off until configured — see [`docs/writeback.md`](writeback.md) |
+| Conformance suite (`agentco conform --level`) | 🆕 | ✅ | One semantic core, four transports; found six drifts on its first two runs, all fixed |
+| ASOP eval harness (`evals/`) | 🆕 | ✅ | Two claims, two kinds of evidence; lesson provenance tells a loop-fed lesson from a hand-fed one. Not shipped in the wheel |
 
 ### How AgentCo reaches a harness at all
 
@@ -158,9 +166,12 @@ Two registries, both following the same shape:
 
 ## Next — the core
 
-- HTTP surface over one semantic core, with a conformance suite.
+- ~~HTTP surface over one semantic core, with a conformance suite.~~ Built — `agentco/conformance.py`, `agentco conform --level`.
 - Identity beyond HMAC (OIDC), for organisations that want it.
 - Change-feed subscriptions with webhook auth.
+- The lease proof catching up with the protocol: attempt-advance on report and reap,
+  the reaper's in-lock liveness re-check and `assigned_agent` enforcement are
+  single-process tested only (see below).
 
 ## Later — review delivery
 
@@ -178,12 +189,12 @@ when their sections come up — recorded here so the attribution survives:
   and SOP objects, so a Tier-1 CLAUDE.md splice stays cheap at scale.
 - **A uniform, deterministic addressing scheme** for snapshot URIs (their `viking://`
   filesystem convention) — browsable and debuggable beats opaque strings.
-- **Session-end auto-extraction** as the shape of the deliberately-absent improvement
-  loop: auto-proposing SOP revisions from failed work items rather than waiting for a
-  human to notice the pattern.
+- **Session-end auto-extraction** as the shape of the improvement loop. *Since
+  adopted, in a different shape:* the loop is adjudication → `plan_vs_actual` →
+  `agentco lessons --propose`, driven by a deliberate pass rather than by session end.
 - *(from the LifeOS review, same date)* **Definition-of-done at `work_create`** — LifeOS's
-  ISA discipline articulates the ideal state before work starts; SOPs version procedures
-  but nothing forces acceptance criteria onto a work item at creation.
+  ISA discipline articulates the ideal state before work starts. *Since adopted:* the
+  `verify` payload on `work_create` is that definition, validated at the write boundary.
 - *(LifeOS)* **`pai-freshness-v1`-style frontmatter** (`last_updated`/`last_reviewed`) as
   cheap staleness metadata for SOPs and docs, complementing Snapshot's artifact staleness.
 - *(LifeOS)* **Tiered effort routing** as the template for review-routing capacity
@@ -256,9 +267,9 @@ belonging to the one that did.
 
 ## Known issues
 
-Twenty open defects, each with a failing test naming the property that should
-hold: [`docs/known-issues.md`](known-issues.md). None of them lose work or
-report a wrong result as a right one — those were fixed.
+Eleven open defects — eight with a failing test naming the property that should
+hold, three recorded without one yet: [`docs/known-issues.md`](known-issues.md).
+None of them lose work or report a wrong result as a right one — those were fixed.
 
 ## The adoption gate
 
