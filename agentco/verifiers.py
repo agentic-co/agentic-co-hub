@@ -76,6 +76,29 @@ def verifies(item: WorkItem) -> Optional[str]:
     return (item.metadata or {}).get(VEHICLE_MARKER)
 
 
+
+def origin_of(item: WorkItem) -> dict:
+    """Where this work came from, if anywhere. `ext|<source>|<source_id>`.
+
+    Read off the natural key rather than a field of its own, because that is
+    where the external connectors already put it — `keys.external_key` is what
+    mirrors an ADO or Jira record onto the queue, and inventing a parallel
+    `source` column would give two answers to one question. An item filed
+    locally has no external key and therefore no origin, which is the correct
+    answer and not a missing value.
+    """
+    key = item.natural_key or ""
+    parts = key.split("|")
+    if len(parts) != 3 or parts[0] != "ext":
+        return {"sourceKey": None, "source": None, "sourceId": None, "sourceUrl": None}
+    return {
+        "sourceKey": key,
+        "source": parts[1],
+        "sourceId": parts[2],
+        "sourceUrl": (item.metadata or {}).get("url"),
+    }
+
+
 def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
     """Give every parked judged or human gate a vehicle, and retire moot ones.
 
@@ -165,6 +188,7 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
                     "assignedTo": plan["assigned_agent"],
                     "requires": plan["requires"],
                     "dueAt": deadline.isoformat() if deadline else None,
+                    **origin_of(item),
                 },
             )
 
@@ -316,6 +340,7 @@ def sweep_park_clocks(
                             "waitedSeconds": waited,
                             "declaredSeconds": int(gate["max_park_seconds"]),
                             "check": gate.get("check"),
+                            **origin_of(item),
                         },
                     )
             continue

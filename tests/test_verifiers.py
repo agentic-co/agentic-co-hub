@@ -531,14 +531,13 @@ def test_an_escalation_reaches_the_feed_with_who_and_how_long(queue, registry):
     verifiers.sweep_park_clocks(queue, now=later(), conn=registry)
 
     [event] = feed(registry, "GateEscalated")
-    assert event["payload"] == {
-        "itemId": item.id,
-        "title": item.title,
-        "to": "dana",
-        "waitedSeconds": 120,
-        "declaredSeconds": 60,
-        "check": gate(kind="human", on_timeout="escalate")["check"],
-    }
+    payload = event["payload"]
+    assert payload["itemId"] == item.id and payload["to"] == "dana"
+    assert payload["waitedSeconds"] == 120 and payload["declaredSeconds"] == 60
+    assert payload["check"] == gate(kind="human", on_timeout="escalate")["check"]
+    # Filed locally, so there is no external record to write back to. Absent is
+    # the right answer here, not a gap.
+    assert payload["sourceKey"] is None
 
 
 def test_the_passes_work_without_a_registry_and_emit_nothing(queue):
@@ -560,3 +559,34 @@ def test_events_are_not_re_emitted_on_every_pass(queue, registry):
         verifiers.sweep_park_clocks(queue, now=later(), conn=registry)
     assert len(feed(registry, "WorkParked")) == 1
     assert len(feed(registry, "GateEscalated")) == 1
+
+
+def test_an_event_for_mirrored_work_carries_its_origin(queue, registry):
+    """What makes the write-back connector possible at all.
+
+    The origin is read off the natural key, which is where `keys.external_key`
+    already puts it when a connector mirrors an ADO or Jira record. A parallel
+    `source` column would be a second answer to one question.
+    """
+    item = queue.create(
+        "fix the retry path",
+        source="ado",
+        source_id="acme/91060",
+        verify=gate(kind="human", on_timeout="escalate"),
+        metadata={"url": "https://dev.example.com/acme/_workitems/edit/91060"},
+    )
+    claimed = queue.claim(item.id, "executor")
+    queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE)
+    verifiers.route_open_gates(queue, conn=registry)
+
+    [event] = feed(registry, "WorkParked")
+    assert event["payload"]["source"] == "ado"
+    assert event["payload"]["sourceId"] == "acme/91060"
+    assert event["payload"]["sourceUrl"].endswith("/91060")
+
+
+def test_locally_filed_work_reports_no_origin_rather_than_a_blank_one(queue):
+    item = queue.create("filed here, belongs here")
+    assert verifiers.origin_of(item) == {
+        "sourceKey": None, "source": None, "sourceId": None, "sourceUrl": None
+    }

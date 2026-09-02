@@ -494,6 +494,34 @@ def cmd_verifiers(args) -> int:
     return 1 if report["status"]["warning"] else 0
 
 
+def cmd_writeback(args) -> int:
+    """Tell each origin its gate is parked. Off unless configured, and says so.
+
+    Exit 0 when there is nothing configured: this is an optional path, and a
+    cron that goes red because a feature is switched off teaches its owner to
+    ignore the alert. Non-zero is for a delivery that was attempted and failed.
+    """
+    from agentco import writeback
+
+    conn = _conn(args)
+    try:
+        report = writeback.run(conn, via=args.via, dry_run=args.dry_run)
+    except writeback.WritebackFailed as exc:
+        print(f"write-back failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    if report["state"] == "not-configured":
+        print(f"write-back: off — {report['detail']}")
+        return 0
+    print(f"write-back ({report['via']}): {report['sent']} notice(s), {report['skipped']} skipped")
+    for notice in report["notices"]:
+        print(f"  {notice['kind']:<15} {notice['source']}:{notice['sourceId']}  {notice['title']}")
+    return 0
+
+
 def cmd_keygen(args) -> int:
     """Mint a shared secret for one actor and print the key-file line.
 
@@ -641,6 +669,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_ver.add_argument("--dry-run", action="store_true", help="report what would change, change nothing")
     p_ver.add_argument("--json", action="store_true", help="machine-readable output")
     p_ver.set_defaults(func=cmd_verifiers)
+
+    p_wb = sub.add_parser("writeback", help="notify originating records that a gate is parked")
+    p_wb.add_argument("--via", default="webhook", help="registered writer name (default: webhook)")
+    p_wb.add_argument("--dry-run", action="store_true", help="print notices, send nothing")
+    p_wb.add_argument("--json", action="store_true", help="machine-readable output")
+    p_wb.set_defaults(func=cmd_writeback)
 
     p_key = sub.add_parser("keygen", help="mint a shared secret for one actor")
     p_key.add_argument("actor")
