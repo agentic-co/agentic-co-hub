@@ -180,6 +180,16 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
     would fill with reports of the routing working correctly. The natural key
     stays as the backstop for two passes racing.
 
+    **A gate this version cannot route is reported, not guessed at.** `verifier`
+    is mandatory on a `human` gate at the write boundary (`validate_gate`), but
+    that boundary is younger than some of the rows already in the store — a
+    human gate filed before FIX-L3.4 has no `verifier`, `needs_a_verifier`
+    still calls it owed a route because it only reads the gate KIND, and
+    routing it the way a well-formed one is routed would assign a vehicle from
+    `None`: no assignee, no required capability, offered to the executor by
+    `ready()`. Reported in `malformed` and left alone instead — there is no
+    field on that gate safe to invent a route from.
+
     **Losing a race is an ordinary answer, not an error.** The queue moves
     between this pass's `list()` and each of its writes, and every such loss is
     per-item: a verifier claimed one vehicle, another router filed one first.
@@ -195,11 +205,35 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
     created: list[dict] = []
     retired: list[str] = []
     skipped: list[dict] = []
+    malformed: list[dict] = []
 
     for item in items:
         if not needs_a_verifier(item):
             continue
         gate = item.verify or {}
+        # `validate_gate` has refused an unnamed human gate at the write
+        # boundary since FIX-L3.4, but that boundary did not exist for
+        # whatever was already in the store the day it shipped. A human gate
+        # stored before then has no `verifier`, and `needs_a_verifier` above
+        # cannot tell — it reads the KIND, and the kind is still `human`. Left
+        # unchecked here, the plan below would assign from `gate.get("verifier")`
+        # (`None`) and hand `ready()` a vehicle with no assignee and no
+        # required capability: exactly the FIX-L3.4 hole, reopened by a row
+        # instead of a field mapping. There is no field on this gate safe to
+        # route from, so it is reported and left alone rather than guessed at.
+        verifier = gate.get("verifier")
+        if gate.get("kind") == "human" and not (isinstance(verifier, str) and verifier.strip()):
+            malformed.append({
+                "item": item.id,
+                "reason": (
+                    f"human gate on {item.id} names no verifier — it predates "
+                    f"validate_gate's write-boundary check (or was written "
+                    f"around it) and cannot be routed to anyone. Fix the "
+                    f"stored gate directly; there is no safe default to route "
+                    f"it to."
+                ),
+            })
+            continue
         existing = routed_for.get(item.id)
         if existing is not None and existing.natural_key == vehicle_key(item):
             # This attempt is already routed — live, or closed because it was
@@ -337,6 +371,7 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
         "created": created,
         "retired": retired,
         "skipped": skipped,
+        "malformed": malformed,
         "capability": VERIFY_CAPABILITY,
     }
 

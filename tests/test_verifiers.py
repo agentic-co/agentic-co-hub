@@ -193,6 +193,32 @@ def test_a_human_gate_is_offered_to_the_person_it_names_and_to_nobody_else(queue
         assert queue.claim(vehicle.id, "dana") is not None
 
 
+def test_a_stored_human_gate_with_no_verifier_is_reported_not_routed(queue):
+    """F3, the reviewer's second reproduction. `validate_gate` has refused an
+    unnamed human gate at the write boundary since FIX-L3.4, but that boundary
+    is younger than some of the rows a store can already hold — this pins the
+    row that predates it, built by editing the gate directly rather than
+    through `create`, which would refuse it.
+
+    `needs_a_verifier` cannot tell: it reads the gate's KIND, and the kind is
+    still `human`. Routed the way a well-formed one is, the vehicle would be
+    assigned from `gate.get('verifier')` (`None`) — no assignee, no required
+    capability, `ready()` offering it to the executor. That is the exact
+    FIX-L3.4 hole, reopened by a row instead of a field mapping. Dies if
+    `route_open_gates` stops checking `verifier` before routing a human gate.
+    """
+    item = park(queue, gate=HUMAN)
+    queue._mutate(item.id, lambda i: {"verify": {**i.verify, "verifier": None}})
+    assert queue.get(item.id).verify["verifier"] is None
+
+    result = verifiers.route_open_gates(queue)
+    assert result["created"] == []
+    assert vehicles(queue) == []
+    [entry] = result["malformed"]
+    assert entry["item"] == item.id
+    assert "no verifier" in entry["reason"]
+
+
 def test_routing_is_idempotent(queue):
     """It runs on a cadence, so a second pass must be a no-op — and quietly.
 
