@@ -991,9 +991,14 @@ def test_a_report_on_an_unclaimed_vehicle_is_not_evidence_of_a_verifier(queue):
     park(queue)
     verifiers.route_open_gates(queue)
     [vehicle] = vehicles(queue)
-    queue.report_result(vehicle.id, 0, WorkStatus.DONE, result="closed by nobody")
-    assert queue.get(vehicle.id).lease_attempt == 1, "the fence moved..."
-    assert verifiers.verifier_status(queue)["claimedEver"] == 0, "...and nobody claimed"
+    with pytest.raises(Exception):
+        queue.report_result(vehicle.id, 0, WorkStatus.DONE, result="closed by nobody")
+    # Since FIX-L3.10 a report needs a lease, so the fence cannot move without a
+    # claim any more and the two definitions agree on every reachable store.
+    # The claims record is still the one read, because it is the fact and the
+    # fence is an inference — and inferences are what broke last time.
+    assert queue.get(vehicle.id).lease_attempt == 0
+    assert verifiers.verifier_status(queue)["claimedEver"] == 0
 
 
 def test_a_verifier_that_claimed_and_was_reaped_still_counts(queue):

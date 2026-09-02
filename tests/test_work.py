@@ -468,3 +468,73 @@ def test_the_store_survives_a_write_that_raises(jsonl_queue, monkeypatch):
     with pytest.raises(OSError):
         jsonl_queue.create("y")
     assert jsonl_queue.path.read_bytes() == before
+
+
+# --------------------------------------------------------------------------- #
+# A report needs a lease, and the reporter must hold it (FIX-L3.10 / FIX-L3.11)
+# --------------------------------------------------------------------------- #
+
+JUDGED_GATE = {
+    "kind": "judged",
+    "check": "a reviewer confirms the rollback ran",
+    "max_park_seconds": 3600,
+    "on_timeout": "escalate",
+    "escalate_to": "release-owner",
+}
+
+
+def test_an_item_nobody_holds_cannot_be_reported(queue):
+    """**The re-review's critical.** An unclaimed item accepted a report at
+    attempt 0, parked with an executor of None, and the judged-gate separation
+    check compared the verifier against nothing — so the party that reported
+    could verify its own report. A report ends the lease it was issued under;
+    no lease, no report."""
+    item = queue.create("never claimed", verify=JUDGED_GATE)
+    with pytest.raises(LeaseError) as exc:
+        queue.report_result(item.id, 0, WorkStatus.DONE, submitted_by="alice")
+    assert "nobody holds it" in str(exc.value)
+    stored = queue.get(item.id)
+    assert stored.status is WorkStatus.PENDING and stored.lease_attempt == 0
+
+
+def test_a_reaped_item_cannot_be_reported_until_reclaimed(queue):
+    """The variant: claim, lapse, reap → pending at attempt 2 with no holder.
+    Reporting at attempt 2 is the same hole with a higher number."""
+    import time as _t
+
+    item = queue.create("lapsed", verify=JUDGED_GATE)
+    queue.claim(item.id, "alice", ttl_seconds=1)
+    _t.sleep(1.1)
+    assert [r.id for r in queue.reap_expired_leases()] == [item.id]
+    reaped = queue.get(item.id)
+    with pytest.raises(LeaseError):
+        queue.report_result(item.id, reaped.lease_attempt, WorkStatus.DONE, submitted_by="alice")
+
+
+def test_a_lapsed_but_unreaped_lease_still_reports(queue):
+    """Self-healing is preserved: expiry is evaluated on read, and a holder whose
+    lease lapsed a second ago but was not reaped is still the holder of record.
+    Refusing them would make the reaper load-bearing, which the protocol says it
+    must never be."""
+    import time as _t
+
+    item = queue.create("slow but honest")
+    claimed = queue.claim(item.id, "alice", ttl_seconds=1)
+    _t.sleep(1.1)
+    done = queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE, submitted_by="alice")
+    assert done.status is WorkStatus.DONE
+
+
+def test_only_the_holder_may_report_an_item(queue):
+    """The attempt number is public to every actor, so knowing it cannot be what
+    makes a report legitimate. Bob reporting Alice's item was recorded as
+    Alice's completion — and Bob could then verify it."""
+    item = queue.create("alice's", verify=JUDGED_GATE)
+    claimed = queue.claim(item.id, "alice")
+    with pytest.raises(LeaseError) as exc:
+        queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE, submitted_by="bob")
+    assert "held by 'alice'" in str(exc.value)
+    assert queue.get(item.id).leased_by == "alice", "nothing moved"
+    assert queue.report_result(
+        item.id, claimed.lease_attempt, WorkStatus.DONE, submitted_by="alice"
+    ).status is WorkStatus.AWAITING_VERIFY

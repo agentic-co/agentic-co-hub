@@ -1062,7 +1062,33 @@ class Queue:
                             f"is the same rule reaching the verdict."
                         ),
                     )
+            executor_now = (item.metadata or {}).get("lease_report", {}).get("reported_by")
+            if gate.get("kind") != "deterministic" and not executor_now:
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=(
+                        f"{item.id} has a {gate.get('kind')!r} gate and no recorded "
+                        f"executor, so there is nobody to keep the verifier separate from"
+                    ),
+                    remediation=(
+                        "This item reached a verify state without a lease-holder's "
+                        "report — a store written by an earlier version, or a row "
+                        "edited by hand. Re-claim and re-report it under a real lease; "
+                        "a separation check against nobody is no check."
+                    ),
+                )
             named = gate.get("verifier")
+            if gate.get("kind") == "human" and not named:
+                raise Refusal(
+                    code=gates.ATTESTATION_INVALID,
+                    message=f"{item.id}'s human gate names nobody to answer it",
+                    remediation=(
+                        "Gates written since the `verifier` field existed cannot be "
+                        "stored this way; this one predates it. Revise the item's gate "
+                        "to name who signs off before anyone attests — the write "
+                        "boundary is not the only boundary."
+                    ),
+                )
             if gate.get("kind") == "human" and named and submitted_by != named:
                 raise Refusal(
                     code=gates.ATTESTATION_INVALID,
@@ -1176,9 +1202,18 @@ class Queue:
         FAILED needs no gate. A gate answers "is this work correct", and a
         worker reporting its own failure is not making that claim.
 
-        `submitted_by` is the authenticated actor as the transport knows it. It
-        falls back to the lease holder, which was authenticated at claim time —
-        never to anything the body says.
+        `submitted_by` is the authenticated actor as the transport knows it, and
+        when given it must BE the lease holder — the attempt number is readable
+        by any actor, so knowing it cannot be what makes a report legitimate. A
+        report from a non-holder is refused rather than recorded against the
+        holder's name. When absent (in-process callers), the holder is taken as
+        the reporter; the holder was authenticated at claim time.
+
+        A report also needs a lease to end. An unclaimed item accepted a report
+        at attempt 0, landed `awaiting_verify` with an executor of None, and the
+        judged-gate separation check — which compares the verifier against the
+        executor — compared against nothing and matched nobody. The party that
+        reported could then verify its own report. So: no lease, no report.
         """
         if status not in TERMINAL:
             raise ValueError(
@@ -1214,6 +1249,22 @@ class Queue:
                     f"{item.lease_attempt} (holder {item.leased_by!r}). The "
                     f"lease this result came from is no longer current — the "
                     f"work was superseded, not lost."
+                )
+            if item.leased_by is None:
+                raise LeaseError(
+                    f"refusing result for {item_id}: nobody holds it. A report ends "
+                    f"the lease it was issued under, and there is none — an item "
+                    f"that was never claimed (or was reaped) has no executor, and a "
+                    f"completion with no executor is one the separation check on a "
+                    f"judged gate can never see. Claim it first."
+                )
+            if submitted_by is not None and submitted_by != item.leased_by:
+                raise LeaseError(
+                    f"refusing result for {item_id}: {submitted_by!r} is reporting "
+                    f"an item held by {item.leased_by!r}. The fence number is public; "
+                    f"the lease is not transferable by knowing it. Only the holder "
+                    f"reports, or the recorded executor is somebody who never did "
+                    f"the work."
                 )
             if item.status in SETTLED:
                 extra = (
