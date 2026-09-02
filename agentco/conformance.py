@@ -23,8 +23,8 @@ the unit tests. This asks only whether each transport is the core.
 
 from __future__ import annotations
 
-import copy
 import json
+import logging
 import os
 import tempfile
 import time
@@ -38,16 +38,28 @@ from agentco.outbox import PUSH_VERBS, Outbox, drain, registry_publisher
 from agentco.publish import Registry, RegistryError
 from agentco.refusals import classify
 from agentco.sop import SopLibrary
-from agentco.work import Queue, WorkStatus
+from agentco.work import CapabilityError, Queue, parse_terminal_status, unknown_item
 
-TRANSPORTS = ("http", "mcp", "outbox")
+TRANSPORTS = ("http", "mcp", "mcp-remote", "outbox")
+
+#: Everything the plane reads from the environment to find a store or a
+#: registry. Every run pins all of them to "unset" so the scenarios can only
+#: ever touch the temporary stores the World was built on — the second party
+#: on P5.V ran `conform` with AGENTCO_DB set and watched it write 29 items into
+#: the operator's live database. Never again, by construction.
+STORE_ENV_VARS = (
+    "AGENTCO_DB", "AGENTCO_REGISTRY_DB", "AGENTCO_WORK_STORE", "AGENTCO_SOP_STORE",
+    "AGENTCO_REGISTRY_URL", "AGENTCO_SECRET", "AGENTCO_REGISTRY_KEYS", "AGENTCO_ACTOR",
+    "AGENTCO_CAPABILITIES", "AGENTCO_HUMANS", "AGENTCO_VERIFIERS", "AGENTCO_PROTECTED_TAGS",
+    "AGENTCO_OUTBOX", "AGENTCO_AGENT_LABEL",
+)
 
 #: The verbs a scenario may use. Every transport carries a subset; the core
 #: carries all of them, which is what makes the core the reference.
 VERBS = (
     "claim_scope", "release_scope", "snapshot",
     "work_create", "work_pull", "work_report", "attest", "adjudicate",
-    "sop_create", "sop_revise", "sop_activate", "sop_instantiate",
+    "sop_create", "sop_revise", "sop_activate", "sop_instantiate", "sop_propose",
 )
 
 #: What each transport carries, as the ladder documents it. HTTP carries every
@@ -60,6 +72,13 @@ CARRIES: dict[str, frozenset[str]] = {
     "core": frozenset(VERBS),
     "http": frozenset(VERBS),
     "mcp": frozenset({
+        "claim_scope", "release_scope", "snapshot",
+        "work_create", "work_pull", "work_report", "attest",
+        "sop_revise", "sop_activate",
+    }),
+    # The same tools, proxied to the registry over HTTP: a fourth relay with
+    # its own field mapping (`_RemoteBackend`), conformed like the other three.
+    "mcp-remote": frozenset({
         "claim_scope", "release_scope", "snapshot",
         "work_create", "work_pull", "work_report", "attest",
         "sop_revise", "sop_activate",
@@ -116,6 +135,9 @@ SCENARIOS: dict[str, dict] = {
         "steps": [
             step("operator", "work_create", save="t1", title="export the ledger"),
             step("alice", "work_pull", save="pull1"),
+            step("alice", "work_report", item="@t1", attempt="@pull1.attempt", status="in_progress"),
+            step("alice", "work_report", item="@t1", attempt="@pull1.attempt", status="nonsense"),
+            step("alice", "work_report", item="w-deadbeef", attempt=1, status="done"),
             step("alice", "work_report", item="@t1", attempt="@pull1.attempt", status="done", result="exported"),
             step("bob", "work_report", item="@t1", attempt="@pull1.attempt", status="done", result="again"),
             step("alice", "work_pull", save="pull2"),
@@ -127,9 +149,11 @@ SCENARIOS: dict[str, dict] = {
             step("alice", "work_pull", save="pull1", capabilities=[]),
             step("alice", "work_report", item="@g1", attempt="@pull1.attempt", status="done"),
             step("alice", "attest", item="@g1", attestation=_attestation(JUDGED["check"]), capabilities=["verify"]),
+            step("bob", "attest", item="w-deadbeef", attestation=_attestation(JUDGED["check"]), capabilities=["verify"]),
             step("bob", "attest", item="@g1", attestation=_attestation(JUDGED["check"]), capabilities=["verify"],
                  adjudication={"verdict": "good", "evidence": "step 2 was redundant"}),
             step("carol", "adjudicate", item="@g1", verdict="bad", evidence="a second opinion"),
+            step("carol", "adjudicate", item="w-deadbeef", verdict="bad", evidence="nothing"),
         ],
     },
     "deterministic-gate": {
@@ -167,8 +191,32 @@ SCENARIOS: dict[str, dict] = {
             step("alice", "sop_revise", sop="@pay", changes={"purpose": "skip approval"}),
             step("carol", "sop_revise", sop="@pay", changes={"purpose": "pay, with approval"}),
             step("alice", "sop_activate", sop="@pay", version=2),
+            step("carol", "sop_activate", sop="@pay", version=0),
+            step("carol", "sop_activate", sop="sop-deadbeef", version=1),
             step("operator", "sop_instantiate", save="i1", sop="@deploy"),
             step("operator", "sop_instantiate", save="i2", sop="@pay"),
+            step("operator", "sop_instantiate", save="i3", sop="@pay", verify={
+                "kind": "human", "check": "the owner signs off", "verifier": "carol",
+                "max_park_seconds": 86400, "on_timeout": "escalate", "escalate_to": "carol"}),
+        ],
+    },
+    "lessons": {
+        "humans": ["carol"],
+        "steps": [
+            step("carol", "sop_create", save="export", title="export", purpose="export the ledger",
+                 definition_of_done="matches the fixture", common_mistakes=["typed by a person"]),
+            step("carol", "sop_activate", sop="@export", version=1),
+            step("operator", "sop_instantiate", save="i1", sop="@export"),
+            step("alice", "work_pull", save="pull1"),
+            step("alice", "work_report", item="@i1", attempt="@pull1.attempt", status="done", result="skipped the diff"),
+            step("carol", "adjudicate", item="@i1", verdict="bad", evidence="skipped the diff and reported done"),
+            step("operator", "sop_instantiate", save="i2", sop="@export"),
+            step("alice", "work_pull", save="pull2"),
+            step("alice", "work_report", item="@i2", attempt="@pull2.attempt", status="done"),
+            step("carol", "adjudicate", item="@i2", verdict="good", evidence="the diff is redundant"),
+            step("alice", "sop_propose", sop="@export"),
+            step("alice", "sop_propose", sop="@export"),
+            step("alice", "sop_propose", sop="sop-deadbeef"),
         ],
     },
     "decomposition": {
@@ -278,26 +326,32 @@ class World:
             ))
         return self._client
 
-    def server(self, actor: str):
-        if actor not in self._servers:
+    def server(self, actor: str, remote: bool = False):
+        key = (actor, remote)
+        if key not in self._servers:
             from agentco.mcp_server import create_server
 
-            self._servers[actor] = create_server(
-                db_path=self.db_path, work_store=self.work_path, sop_store=self.sop_path, actor=actor,
-            )
-        return self._servers[actor]
+            if remote:
+                self._servers[key] = create_server(registry=_LoopbackRegistry(actor, self.client))
+            else:
+                self._servers[key] = create_server(
+                    db_path=self.db_path, work_store=self.work_path, sop_store=self.sop_path, actor=actor,
+                )
+        return self._servers[key]
 
-    def tool(self, actor: str, name: str) -> Callable:
-        return self.server(actor)._tool_manager.get_tool(name).fn
+    def tool(self, actor: str, name: str, remote: bool = False) -> Callable:
+        return self.server(actor, remote)._tool_manager.get_tool(name).fn
 
     def outbox(self, actor: str) -> Outbox:
         return Outbox(self.root / "outbox" / actor / ".agentco")
 
     def env(self) -> dict[str, Optional[str]]:
-        return {
-            "AGENTCO_HUMANS": ",".join(sorted(self.humans)) or None,
-            "AGENTCO_VERIFIERS": ",".join(sorted(self.verifiers)) or None,
-        }
+        """The whole store-finding environment, pinned: unset everything, then
+        the operator declarations this scenario makes."""
+        pinned: dict[str, Optional[str]] = {name: None for name in STORE_ENV_VARS}
+        pinned["AGENTCO_HUMANS"] = ",".join(sorted(self.humans)) or None
+        pinned["AGENTCO_VERIFIERS"] = ",".join(sorted(self.verifiers)) or None
+        return pinned
 
     # -- labels ---------------------------------------------------------------
 
@@ -318,6 +372,16 @@ class World:
         if isinstance(value, list):
             return [self.resolve(v) for v in value]
         return value
+
+    def relabel(self, text: Any) -> Any:
+        """Replace every identifier the script named inside free text — lesson
+        and proposal lines carry the item id they came from."""
+        if not isinstance(text, str):
+            return text
+        for label, ident in self.labels.items():
+            if isinstance(ident, str) and ident:
+                text = text.replace(ident, f"@{label}")
+        return text
 
     def label_of(self, identifier: Any) -> Any:
         for label, ident in self.labels.items():
@@ -371,10 +435,13 @@ def _core(world: World, s: dict) -> dict:
             )
             return _ok(**_save(world, s, item.id, {"id": item.id}))
         if verb == "work_pull":
+            # Exactly the HTTP handler's loop: a misroute is skipped, anything
+            # else the queue refuses is refused. A core that swallowed more than
+            # the handler would hide a transport that swallowed less.
             for candidate in world.queue.ready(agent=actor):
                 try:
                     leased = world.queue.claim(candidate.id, actor, capabilities=a.get("capabilities"))
-                except Exception:  # noqa: BLE001 - a poller moves past a misroute
+                except CapabilityError:
                     continue
                 if leased is not None:
                     return _ok(state="leased", **_save(world, s, leased.id,
@@ -382,17 +449,26 @@ def _core(world: World, s: dict) -> dict:
             return {"state": "empty"}
         if verb == "work_report":
             out = world.queue.report_result(
-                a["item"], int(a["attempt"]), WorkStatus(a["status"]), result=a.get("result"),
+                a["item"], int(a["attempt"]), parse_terminal_status(a["status"]), result=a.get("result"),
                 attestation=a.get("attestation"), submitted_by=actor,
             )
+            if out is None:
+                raise unknown_item(a["item"], "fence this report against")
             return _ok(landed=out.status.value)
         if verb == "attest":
             out = world.queue.attest(a["item"], a["attestation"], submitted_by=actor,
                                      capabilities=a.get("capabilities"), adjudication=a.get("adjudication"))
+            if out is None:
+                raise unknown_item(a["item"], "attest against")
             return _ok(landed=out.status.value)
         if verb == "adjudicate":
-            world.queue.adjudicate(a["item"], a["verdict"], a["evidence"], adjudicator=actor)
+            out = world.queue.adjudicate(a["item"], a["verdict"], a["evidence"], adjudicator=actor)
+            if out is None:
+                raise unknown_item(a["item"], "adjudicate")
             return _ok()
+        if verb == "sop_propose":
+            draft = world.library.propose(a["sop"], world.queue, author=actor, author_kind=kind)
+            return _ok(drafted=draft.version if draft is not None else None)
         if verb == "sop_create":
             body = {k: v for k, v in a.items() if k != "title"}
             sop = world.library.create(a["title"], author=actor, author_kind=kind, **body)
@@ -464,17 +540,20 @@ def _http(world: World, s: dict) -> dict:
             fields = {k: v for k, v in a.items() if k != "sop"}
             out = reg.sop_instantiate(a["sop"], **fields)
             return _ok(**_save(world, s, out["item"]["id"], {"id": out["item"]["id"]}))
+        if verb == "sop_propose":
+            out = reg._call("POST", f"/sops/{a['sop']}/propose", {})
+            return _ok(drafted=(out.get("sop") or {}).get("version"))
     except RegistryError as exc:
         payload = exc.payload if isinstance(exc.payload, dict) else {}
         return _refused(payload.get("code") or f"http_{exc.status}")
     raise ConformanceError(f"http does not perform {verb!r}")
 
 
-def _mcp(world: World, s: dict) -> dict:
+def _mcp(world: World, s: dict, remote: bool = False) -> dict:
     actor, verb, a = s["actor"], s["verb"], world.resolve(s["args"])
     caps = a.get("capabilities")
     env = {**world.env(), "AGENTCO_CAPABILITIES": ",".join(caps) if caps else None}
-    tool = lambda name: world.tool(actor, name)  # noqa: E731
+    tool = lambda name: world.tool(actor, name, remote)  # noqa: E731
     with _environment(**env):
         try:
             if verb == "claim_scope":
@@ -511,6 +590,10 @@ def _mcp(world: World, s: dict) -> dict:
         except Exception as exc:  # noqa: BLE001 - ToolError carries the code first
             return _refused(_code_of(str(exc)))
     raise ConformanceError(f"mcp does not perform {verb!r}")
+
+
+def _mcp_remote(world: World, s: dict) -> dict:
+    return _mcp(world, s, remote=True)
 
 
 def _outbox(world: World, s: dict) -> dict:
@@ -572,7 +655,7 @@ def _save(world: World, s: dict, identifier: Any, produced: Any) -> dict:
 
 
 DRIVERS: dict[str, Callable[[World, dict], dict]] = {
-    "core": _core, "http": _http, "mcp": _mcp, "outbox": _outbox,
+    "core": _core, "http": _http, "mcp": _mcp, "mcp-remote": _mcp_remote, "outbox": _outbox,
 }
 
 
@@ -587,25 +670,41 @@ def photograph(world: World) -> dict:
     for item in sorted(world.queue.list(), key=lambda i: i.created_at):
         meta = item.metadata or {}
         adjudication = meta.get("adjudication") or {}
+        report = meta.get("lease_report") or {}
+        attestation = item.attestation or {}
+        review = meta.get("plan_vs_actual") or {}
         items.append({
             "item": world.label_of(item.id),
             "title": item.title,
             "status": item.status.value,
+            "result": world.relabel(item.result),
             "requires": list(item.requires),
             "blocked_by": sorted(world.label_of(b) for b in item.blocked_by),
             "leased_by": item.leased_by,
-            "executor": (meta.get("lease_report") or {}).get("reported_by"),
-            "gate": (item.verify or {}).get("kind"),
-            "attested_by": (item.attestation or {}).get("submitted_by"),
-            "attest_exit": (item.attestation or {}).get("exit_status"),
+            "lease_attempt": item.lease_attempt,
+            "claims": [c.get("agent") for c in (meta.get("claims") or [])],
+            "executor": report.get("reported_by"),
+            "report": {"attempt": report.get("attempt"), "status": report.get("status")} if report else None,
+            "gate": item.verify,
+            "attestation": {k: attestation.get(k) for k in ("submitted_by", "exit_status", "check", "environment", "at")}
+            if attestation else None,
             "verify_failures": item.verify_failures,
-            "adjudication": {"verdict": adjudication.get("verdict"), "by": adjudication.get("by")}
+            "verify_resolution": meta.get("verify_resolution"),
+            "adjudication": {k: adjudication.get(k) for k in ("verdict", "by", "evidence", "executors", "proposed_in")}
             if adjudication else None,
             "sop": world.label_of((meta.get("sop_ref") or {}).get("sop_id")) if meta.get("sop_ref") else None,
             "sop_version": (meta.get("sop_ref") or {}).get("version"),
-            "review_flags": (meta.get("plan_vs_actual") or {}).get("flags"),
+            "sop_plan": meta.get("sop_plan"),
+            "review": {k: review.get(k) for k in ("flags", "plan", "verdict")} | {
+                "actual": {k: v for k, v in (review.get("actual") or {}).items()
+                           if k not in ("filed_at", "reported_at")}
+            } if review else None,
             "parent": world.label_of(meta["parent"]) if meta.get("parent") else None,
             "repairs": world.label_of(meta["repairs"]) if meta.get("repairs") else None,
+            "other_metadata": sorted(k for k in meta if k not in (
+                "lease_report", "claims", "adjudication", "sop_ref", "sop_plan", "plan_vs_actual",
+                "parent", "repairs", "verify_resolution", "verify_parked_at", "verify_retry",
+            )),
         })
     sops = []
     for sop_id in sorted({s.sop_id for s in world.library._read_all()}, key=lambda i: world.label_of(i)):
@@ -615,15 +714,14 @@ def photograph(world: World) -> dict:
                 "version": version.version,
                 "status": version.status.value,
                 "title": version.title,
-                "purpose": version.purpose,
-                "definition_of_done": version.definition_of_done,
-                "common_mistakes": list(version.common_mistakes),
-                "proposals": list(version.proposals),
+                **{field: getattr(version, field) for field in (
+                    "purpose", "trigger", "entry_check", "inputs", "definition_of_done",
+                    "validation", "write_back", "next_sop", "executor", "author", "author_kind",
+                    "superseded_by",
+                )},
+                "common_mistakes": [world.relabel(m) for m in version.common_mistakes],
+                "proposals": [world.relabel(p) for p in version.proposals],
                 "tags": list(version.tags),
-                "executor": version.executor,
-                "author": version.author,
-                "author_kind": version.author_kind,
-                "superseded_by": version.superseded_by,
             })
     feed = []
     for event in events.read(world.conn, limit=1000)["events"]:
@@ -632,13 +730,12 @@ def photograph(world: World) -> dict:
             "kind": event["kind"],
             "actor": event["actor"],
             "repo": event.get("repo"),
-            "prefixes": payload.get("prefixes"),
-            "intent": payload.get("intent"),
-            "holder": payload.get("holder"),
-            "withHolder": payload.get("withHolder"),
-            "artifactUri": payload.get("artifactUri"),
-            "purpose": payload.get("purpose"),
-            "action": payload.get("action"),
+            "lease": world.label_of(payload.get("leaseUid")) if payload.get("leaseUid") else None,
+            "payload": sorted(payload),
+            **{k: payload.get(k) for k in (
+                "prefixes", "intent", "holder", "holderAttested", "withHolder", "myIntent", "theirIntent",
+                "overlaps", "artifactUri", "purpose", "action", "resolution", "hashKind",
+            )},
         })
     return {"items": items, "sops": sops, "events": feed}
 
@@ -656,7 +753,9 @@ def run_scenario(name: str, transport: str, root: Optional[Path] = None) -> dict
     """
     scenario = SCENARIOS[name]
     carries = CARRIES[transport]
-    with tempfile.TemporaryDirectory(prefix=f"agentco-conform-{name}-{transport}-") as tmp:
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # the wire is not the finding
+    with tempfile.TemporaryDirectory(prefix=f"agentco-conform-{name}-{transport}-") as tmp, \
+            _environment(**{k: None for k in STORE_ENV_VARS}):
         world = World(Path(root or tmp), scenario.get("humans", []), scenario.get("verifiers", []))
         outcomes = []
         with _environment(**world.env()):

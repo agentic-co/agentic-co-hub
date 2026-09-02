@@ -39,6 +39,7 @@ def test_every_transport_carries_something_in_the_scenarios_that_concern_it():
                     exercised[transport].add(outcome["step"].split(" ", 1)[1])
     assert exercised["outbox"] == set(PUSH_VERBS), exercised["outbox"] ^ set(PUSH_VERBS)
     assert exercised["mcp"] == set(CARRIES["mcp"]), exercised["mcp"] ^ set(CARRIES["mcp"])
+    assert exercised["mcp-remote"] == set(CARRIES["mcp-remote"])
     assert exercised["http"] == set(CARRIES["http"]), exercised["http"] ^ set(CARRIES["http"])
 
 
@@ -184,3 +185,80 @@ def test_the_budget_is_held_by_conform_not_only_by_the_test_suite(monkeypatch, c
     assert cli.main(["conform", "--level", "L2", "--json"]) == 1
     out = _json.loads(capsys.readouterr().out)
     assert any("13 MCP tools" in m for m in out["missing"]) and any("13000 bytes" in m for m in out["missing"])
+
+
+# --------------------------------------------------------------------------- #
+# second-party findings on P5.V (max-p5v, e710ebc)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_suite_never_touches_the_operators_stores(tmp_path, monkeypatch):
+    """Finding 1: with AGENTCO_DB set, `conform` wrote 29 items into the live
+    database. Every store-finding variable is unset for the run now."""
+    live = tmp_path / "live.sqlite3"
+    monkeypatch.setenv("AGENTCO_DB", str(live))
+    monkeypatch.setenv("AGENTCO_REGISTRY_DB", str(tmp_path / "live-registry.sqlite3"))
+    monkeypatch.setenv("AGENTCO_WORK_STORE", str(tmp_path / "live-work.jsonl"))
+    monkeypatch.setenv("AGENTCO_SOP_STORE", str(tmp_path / "live-sops.jsonl"))
+    monkeypatch.setenv("AGENTCO_REGISTRY_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("AGENTCO_SECRET", "not-a-registry")
+    monkeypatch.setenv("AGENTCO_ACTOR", "somebody-else")
+    result = compare("work", transports=("mcp", "http"))
+    assert all(r["conforms"] for r in result["transports"].values())
+    assert not live.exists() and not (tmp_path / "live-work.jsonl").exists() and not (tmp_path / "live-sops.jsonl").exists()
+    assert cli.main(["conform", "--level", "L3", "--json"]) == 0
+    assert not live.exists()
+    # ...and the environment is handed back as it was.
+    import os
+    assert os.environ["AGENTCO_DB"] == str(live) and os.environ["AGENTCO_REGISTRY_URL"] == "http://127.0.0.1:9"
+
+
+def test_the_wrong_inputs_are_sent_and_agree_everywhere():
+    """Finding 2: no scenario sent an unknown id, a non-terminal status or a
+    version below one — and the transports disagreed on all three."""
+    for name in ("work", "judged-gate", "procedure"):
+        report = compare(name)
+        for transport, result in report["transports"].items():
+            assert result["conforms"], f"{name}/{transport}: " + "\n".join(result["diffs"])
+    outcomes = {o["step"] + "#" + str(i): o for i, o in enumerate(run_scenario("work", "mcp")["outcomes"])}
+    codes = [o["code"] for o in outcomes.values() if o["state"] == "refused"]
+    assert "not_terminal" in codes and "work_item_unknown" in codes and "work_conflict" in codes
+
+
+def test_the_photograph_sees_the_result_and_the_attestation_body(monkeypatch):
+    """Finding 4 / mutants I and J: a transport that dropped `result` or rewrote
+    the attestation's environment passed, because neither was photographed."""
+    real = conformance._http
+
+    def http_that_loses_the_result(world, s):
+        if s["verb"] == "work_report":
+            s = {**s, "args": {k: v for k, v in s["args"].items() if k != "result"}}
+        return real(world, s)
+
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_loses_the_result)
+    result = compare("work", transports=("http",))["transports"]["http"]
+    assert any(".result:" in d for d in result["diffs"]), result["diffs"]
+
+    def http_that_rewrites_the_environment(world, s):
+        if s["verb"] == "attest":
+            s = {**s, "args": {**s["args"], "attestation": {**s["args"]["attestation"], "environment": "elsewhere"}}}
+        return real(world, s)
+
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_rewrites_the_environment)
+    result = compare("judged-gate", transports=("http",))["transports"]["http"]
+    assert any("attestation.environment" in d for d in result["diffs"]), result["diffs"]
+
+
+def test_instantiate_carries_its_gate_over_http(monkeypatch):
+    """Mutant C: HTTP `sop_instantiate` dropping `verify` survived because no
+    scenario instantiated with a gate. The procedure scenario does now."""
+    real = conformance._http
+
+    def http_that_drops_the_gate(world, s):
+        if s["verb"] == "sop_instantiate":
+            s = {**s, "args": {k: v for k, v in s["args"].items() if k != "verify"}}
+        return real(world, s)
+
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_the_gate)
+    result = compare("procedure", transports=("http",))["transports"]["http"]
+    assert not result["conforms"], "a human step's instance lost its gate and nobody noticed"

@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
 from agentco import policy
+from agentco.errors import Refusal
 from agentco.filelock import lock_exclusive, unlock
 from agentco.work import PLAN_KEY, Queue, WorkItem, WorkStatus, reject_reserved
 
@@ -565,6 +566,13 @@ class SopLibrary:
         could simply re-activate the version from before the human removed it.
         """
         reviser_kind = author_kind or policy.AGENT
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise Refusal(
+                code="version_required",
+                message="activate names a specific version",
+                remediation="Send {\"version\": N} — the version you mean to make active.",
+                http_status=400,
+            )
         with self._locked():
             all_sops = self._read_all()
             target = None

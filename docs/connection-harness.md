@@ -291,14 +291,23 @@ divergence risk.
   step the transport carries performed through it; the world is photographed
   after each run — items, procedure versions, the event feed, identifiers
   replaced by labels — and the photographs and every step's outcome (success,
-  or a refusal with the same code) must match. Nine scenarios cover scope,
-  work, both gate kinds, adjudication, procedures under the policy,
-  decomposition and verifier binding; every push verb and every MCP tool is
-  exercised by at least one. Any difference is named by scenario, step and
-  transport. The suite found two on its first run and both are fixed: MCP
-  rendered `revision_policy:protected` as `revision_policy`, and an outbox
-  receipt for `sop_revise` did not say which version it drafted. The refusal
-  mapping is now one module (`agentco/refusals.py`) shared by HTTP and MCP.
+  or a refusal with the same code) must match. Four transports: HTTP, MCP in
+  local mode, MCP in remote mode (the proxy has its own field mapping), and the
+  outbox. Ten scenarios cover scope, work, both gate kinds, adjudication,
+  procedures under the policy, the lessons pass, decomposition and verifier
+  binding — with the wrong inputs sent on purpose: unknown ids, a non-terminal
+  status, a version below one. Every push verb and every MCP tool is exercised
+  by at least one. Any difference is named by scenario, step and transport.
+  Every variable the plane reads to find a store or a registry is unset for the
+  run, so the suite can only ever touch its own temporary stores. It found six
+  drifts on its first two runs and all are fixed: MCP rendered
+  `revision_policy:protected` as `revision_policy`; an outbox receipt for
+  `sop_revise` did not say which version it drafted; MCP in remote mode
+  collapsed every registry refusal into `invalid_request`; an unknown item id,
+  a non-terminal status and a version below one each drew a different answer
+  from each surface. The rules now live once — `agentco/refusals.py` for the
+  mapping, `work.parse_terminal_status`, `work.unknown_item`, and
+  `SopLibrary.activate` for the inputs — and every surface calls them.
 - **Per-level conformance tests** a harness owner can run themselves — built:
   `agentco conform --level L1|L2|L3` runs the scenarios for the transports that
   level relies on against fresh temporary stores and exits non-zero listing
