@@ -1316,3 +1316,40 @@ def test_a_vehicle_still_retires_once_its_item_has_a_verdict(queue):
     queue.report_result(vehicle.id, queue.get(vehicle.id).lease_attempt, WorkStatus.DONE,
                         result="answered", submitted_by="reviewer")
     assert queue.get(vehicle.id).status is WorkStatus.DONE
+
+
+# --------------------------------------------------------------------------- #
+# M47 — the attest-side guards for rows a report could never have produced
+# --------------------------------------------------------------------------- #
+
+
+def test_attest_refuses_a_routed_gate_with_no_recorded_executor(queue):
+    """A store written before FIX-L3.10 could hold an `awaiting_verify` item with
+    no `lease_report` — a report accepted at attempt 0 by nobody. The separation
+    check compares against that executor, and against None it compares against
+    nobody. The refusal existed and had no test: the third review's M47 patched
+    it out and 736 tests stayed green."""
+    item = queue.create("legacy row", verify=JUDGED)
+    queue._mutate(item.id, lambda i: {"status": WorkStatus.AWAITING_VERIFY,
+                                      "metadata": {k: v for k, v in (i.metadata or {}).items()
+                                                   if k != "lease_report"}})
+    stored = queue.get(item.id)
+    assert stored.status is WorkStatus.AWAITING_VERIFY and "lease_report" not in stored.metadata
+
+    with pytest.raises(Refusal) as caught:
+        queue.attest(item.id, attestation(JUDGED["check"]), "reviewer", capabilities=["verify"])
+    assert "no recorded executor" in caught.value.message
+    assert queue.get(item.id).status is WorkStatus.AWAITING_VERIFY
+
+
+def test_attest_refuses_a_stored_human_gate_that_names_nobody(queue):
+    """The read-side twin of FIX-L3.4. `validate_gate` now requires `verifier`
+    on a human gate, but a row written before that rule has none, and the named-
+    person check is skipped when there is no name — so anyone not the executor
+    could close it. Refused, naming the fix."""
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    queue._mutate(item.id, lambda i: {"verify": {**i.verify, "verifier": None}})
+    with pytest.raises(Refusal) as caught:
+        queue.attest(item.id, attestation(gate(kind="human", on_timeout="escalate")["check"]),
+                     "some-third-party")
+    assert "names nobody" in caught.value.message

@@ -382,3 +382,28 @@ def test_nothing_the_tools_do_writes_to_stdout(mcp, capsys):
 
     captured = capsys.readouterr()
     assert captured.out == "", f"something wrote to stdout: {captured.out!r}"
+
+
+# --------------------------------------------------------------------------- #
+# FIX-L3.11 on MCP — a second node cannot report the first node's item
+# --------------------------------------------------------------------------- #
+
+
+def test_a_second_node_cannot_report_an_item_the_first_node_holds(mcp):
+    """Over MCP the reporter is the node, so the check that the reporter holds the
+    lease is the check that one node cannot finish another's work at its fence.
+    Two servers on one store, as two machines on one registry would be."""
+    stores = tool(mcp, "whoami")()["stores"]
+    other = create_server(
+        db_path=stores["registryDb"],
+        work_store=stores["workStore"],
+        sop_store=stores["sopStore"],
+        actor="kofi",
+    )
+    created = tool(mcp, "work_create")(title="dana's item")
+    pulled = tool(mcp, "work_pull")()
+    assert pulled["id"] == created["id"] and pulled["leased_by"] == "dana"
+
+    with pytest.raises(ToolError) as caught:
+        tool(other, "work_report")(item_id=created["id"], attempt=pulled["lease_attempt"], status="done")
+    assert "held by 'dana'" in str(caught.value)
