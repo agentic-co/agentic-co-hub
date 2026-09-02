@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from agentco import auth, cli
 from agentco.app import create_app
+from agentco.errors import Refusal
 from agentco.policy import AGENT, HUMAN, RevisionPolicyError
 from agentco.sop import MAX_COMMON_MISTAKES, PROPOSED_KEY, SopError, SopStatus
 from agentco.work import WorkStatus
@@ -435,3 +436,11 @@ def test_the_cli_pass_honours_the_operators_declaration(tmp_path, capsys, monkey
     assert cli.main(args) == 0
     drafted = json.loads(capsys.readouterr().out)["sops"][0]["drafted"]
     assert drafted["author"] == "dana" and drafted["author_kind"] == HUMAN
+
+
+def test_an_item_that_never_ran_the_procedure_cannot_feed_its_lessons(library, queue):
+    """The attack the second party ran, end to end: refused at the first step."""
+    sop = procedure(library)
+    with pytest.raises(Refusal):
+        queue.create("mallory's item", metadata={"sop_ref": sop.ref})
+    assert library.proposals(sop.sop_id, queue)["pending"] == 0

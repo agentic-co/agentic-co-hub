@@ -63,7 +63,7 @@ def attestation(check="a reviewer reads the diff", exit_status=0):
 
 
 def test_a_reviewer_tags_a_divergence_with_evidence(queue):
-    item = executed(queue, metadata={"sop_ref": {"sop_id": "sop-1", "version": 3}})
+    item = executed(queue, metadata={"sop_ref": {"sop_id": "sop-1", "version": 3}}, by_plane=True)
     tagged = queue.adjudicate(item.id, "good", "step 3 says 'restart'; the log shows a reload sufficed",
                               adjudicator="dana")
     record = tagged.metadata["adjudication"]
@@ -491,3 +491,13 @@ def test_annotate_cannot_forge_or_erase_plane_owned_keys(queue):
     tagged = queue.annotate(item.id, {"verify_escalated": {"to": "dana"}}, by_plane=True)
     assert tagged.metadata["verify_escalated"] == {"to": "dana"}
     assert queue.annotate(item.id, {"note": "ordinary keys are fine"}).metadata["note"]
+
+
+def test_the_pin_cannot_be_forged_at_create(queue):
+    """Second party on P4.V: with `sop_ref` settable, any agent+reviewer pair
+    could pin an item to a procedure it never ran, adjudicate it bad, and feed
+    that procedure's lesson channel through the pass."""
+    with pytest.raises(Refusal) as caught:
+        queue.create("never ran it", metadata={"sop_ref": {"sop_id": "sop-victim", "version": 1}})
+    assert caught.value.code == "metadata_reserved"
+    assert queue.list() == []
