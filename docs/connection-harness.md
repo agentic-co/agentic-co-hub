@@ -30,7 +30,8 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | `verify` capability, judged routing, park clocks, quarantine digest | built (`agentco verifiers --route --sweep --quarantine`) | L3 |
 | Write-back to an external system of record | built, opt-in ([`docs/writeback.md`](writeback.md)) | — |
 | **Revision policy** — three rules an agent revision obeys, on `revise` and `activate` | built ([`agentco/policy.py`](../agentco/policy.py)) | — |
-| **Adjudication tagging, plan-vs-actual, revision proposals** | **absent** | — |
+| **Adjudication tagging** — `good`/`bad`, adjudicator ≠ executor | built (`Queue.adjudicate`) | — |
+| **Plan-vs-actual, revision proposals** | **absent** | — |
 | **`sop_revise` / `sop_activate` on MCP** | HTTP only; reserved in the outbox push set | L2 |
 | Conformance suite | absent | all |
 
@@ -183,8 +184,21 @@ systems — needs the rails before it needs the loop.
   nothing. The class and the tags are load-bearing, not labels: `instantiate`
   refuses an instance of a human or protected step that does not carry a
   `human` gate, on every transport.
-- **Adjudication tagging** (`good` / `bad`) with the adjudicator's identity and
-  pointed evidence. **Adjudicator ≠ executor**, enforced, not documented.
+- **Adjudication tagging** — built. `metadata.adjudication` on a work item:
+  `good` / `bad`, the adjudicator's identity, pointed evidence, the executors
+  it was checked against, and the pinned `sop_ref` so P4.3 can route it to the
+  procedure. **Adjudicator ≠ executor, enforced, not documented**: the
+  adjudicator is the authenticated actor on every transport, compared against
+  every identity the plane recorded as having executed the item — the lease
+  holder, the holder who reported it, and on a deterministic gate the
+  attester — none of which a caller can set. An unexecuted item has no
+  divergence to judge and is refused; a second adjudication is a dispute and is
+  refused rather than overwritten (ASOP v2 routes disputes to escalation). The
+  key is reserved at create, so it cannot be forged into an item. Transports:
+  `POST /work/{id}/adjudicate`; an `adjudication` rider on `attest` over HTTP,
+  MCP and the outbox — which is how it reaches the primary surface without a
+  thirteenth tool; and the `adjudicate` outbox verb. Refusals write nothing;
+  a rider the executor offers refuses the whole `attest` call.
 - **Plan-vs-actual review** generated at the moment of completion, while the
   context still exists.
 - **Revision proposals** accumulating against the template — good adjudications

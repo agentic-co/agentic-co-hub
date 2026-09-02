@@ -344,9 +344,149 @@ RESERVED_METADATA_KEYS = frozenset({
     "verifies", "claims", "lease_report", "verify_parked_at", "verify_resolution",
     "verify_history", "verify_escalated", "verify_quarantined", "verify_retry",
     "verify_verdict", "natural_key_conflict",
+    # Written only by `Queue.adjudicate`, which is where the adjudicator ≠
+    # executor rule lives. A caller who could set it on create would be an
+    # executor grading its own divergence, with the plane's name on the tag.
+    "adjudication",
 })
 # And the natural-key namespace the routing pass uses for vehicles.
 RESERVED_KEY_PREFIX = "verify:"
+
+
+# --------------------------------------------------------------------------- #
+# Adjudication — the tag on a divergence, and who may write it
+# --------------------------------------------------------------------------- #
+
+#: `metadata.adjudication`: the record that judges a divergence — execution
+#: departed from the procedure — as `good` (the procedure was wrong; feeds the
+#: next version) or `bad` (the execution took a shortcut; feeds root-cause).
+#: An adjudication, not a confession: the party that tags is never the party
+#: whose fault a `bad` tag would admit (asop.md § 3).
+ADJUDICATION_KEY = "adjudication"
+ADJUDICATION_VERDICTS = ("good", "bad")
+
+ADJUDICATION_INVALID = "adjudication_invalid"
+ADJUDICATION_SELF = "adjudication_self"
+ADJUDICATION_EXISTS = "adjudication_exists"
+ADJUDICATION_UNEXECUTED = "adjudication_unexecuted"
+
+
+def executors_of(item: "WorkItem") -> list[str]:
+    """Every identity that executed this item, as the plane recorded it.
+
+    The lease holder while it is held; the holder who reported it (the lease
+    is released on report, so `leased_by` alone forgets the executor the
+    moment the work is done); and, on a deterministic gate, whoever attested —
+    there the executor IS the attester by design. Derived from records the
+    plane wrote, never from anything a caller could set.
+    """
+    found: list[str] = []
+    meta = item.metadata or {}
+    for candidate in (
+        item.leased_by,
+        (meta.get("lease_report") or {}).get("reported_by"),
+        (item.attestation or {}).get("submitted_by")
+        if (item.verify or {}).get("kind") == "deterministic" else None,
+    ):
+        if isinstance(candidate, str) and candidate and candidate not in found:
+            found.append(candidate)
+    return found
+
+
+def adjudication_record(
+    item: "WorkItem", verdict: object, evidence: object, adjudicator: object
+) -> dict:
+    """Validate an adjudication against the item it judges. Refuses; never repairs.
+
+    Every refusal here fires BEFORE any store is touched, so a refused
+    adjudication — like a refused create or a refused revision — leaves the
+    item byte-identical. The self check compares against `executors_of`, which
+    is derived from what the plane recorded and cannot be self-asserted; that
+    is what makes "adjudicator ≠ executor" enforced rather than documented.
+    """
+    if not isinstance(adjudicator, str) or not adjudicator.strip():
+        raise Refusal(
+            code=ADJUDICATION_INVALID,
+            message="adjudicate needs an authenticated adjudicator and got none",
+            remediation=(
+                "The adjudicator is the actor the transport authenticated. An "
+                "empty one would pass the separation check by never equalling "
+                "anything, which is a judgement from nobody."
+            ),
+        )
+    if verdict not in ADJUDICATION_VERDICTS:
+        raise Refusal(
+            code=ADJUDICATION_INVALID,
+            message=f"adjudication verdict must be one of {list(ADJUDICATION_VERDICTS)}, got {verdict!r}",
+            remediation=(
+                "`good` means the procedure was wrong and the deviation should "
+                "feed its next version; `bad` means the execution took a "
+                "shortcut and the deviation feeds root-cause. There is no third "
+                "value, because a divergence nobody can classify is one nobody "
+                "has looked at."
+            ),
+        )
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise Refusal(
+            code=ADJUDICATION_INVALID,
+            message="adjudication needs pointed evidence and got none",
+            remediation=(
+                "Name what you looked at — a diff, a log line, a transcript "
+                "location, a number. A tag without evidence is an opinion with "
+                "the plane's name on it, and the next version of the procedure "
+                "would be revised on it."
+            ),
+        )
+    executors = executors_of(item)
+    if not executors:
+        raise Refusal(
+            code=ADJUDICATION_UNEXECUTED,
+            message=f"{item.id} has never been executed, so there is no divergence to judge",
+            remediation=(
+                "Adjudication judges an execution against its procedure. This "
+                "item was never claimed (or was reaped before it was reported); "
+                "there is nobody whose work the tag would be about."
+            ),
+        )
+    if adjudicator in executors:
+        raise Refusal(
+            code=ADJUDICATION_SELF,
+            message=(
+                f"{adjudicator!r} executed {item.id} and may not adjudicate it "
+                f"(executors: {executors})"
+            ),
+            remediation=(
+                "An adjudication is not a confession. Whoever tags a divergence "
+                "must be a different party from the executor whose fault a "
+                "`bad` tag would admit — route it to a reviewer, or to the "
+                "verifier who answered the gate."
+            ),
+            http_status=403,
+        )
+    if (item.metadata or {}).get(ADJUDICATION_KEY):
+        prior = item.metadata[ADJUDICATION_KEY]
+        raise Refusal(
+            code=ADJUDICATION_EXISTS,
+            message=(
+                f"{item.id} is already adjudicated {prior.get('verdict')!r} by "
+                f"{prior.get('by')!r}"
+            ),
+            remediation=(
+                "An adjudication is immutable once written — the next version "
+                "of the procedure may already have been revised on it. A "
+                "disagreement between adjudicators is a dispute, and ASOP v2 "
+                "routes disputes to escalation, not to overwriting."
+            ),
+            http_status=409,
+        )
+    return {
+        "verdict": verdict,
+        "by": adjudicator,
+        "evidence": evidence.strip(),
+        "at": _iso(_now()),
+        "executors": executors,
+        "sop_ref": (item.metadata or {}).get("sop_ref"),
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1179,8 +1319,17 @@ class Queue:
         attestation: dict,
         submitted_by: str,
         capabilities: Optional[Sequence[str]] = None,
+        adjudication: Optional[dict] = None,
     ) -> Optional[WorkItem]:
         """Answer a gate. The only transition out of a verify state.
+
+        `adjudication` — `{verdict, evidence}` — rides along when the verifier
+        is also judging the divergence they saw, and is written by
+        `adjudicate()` under the same rules, with the submitter as adjudicator.
+        It is validated BEFORE the verdict is applied, so an executor re-running
+        a deterministic gate who offers one is refused whole: nothing lands,
+        and the remediation says to attest without it. Riding here is what
+        puts adjudication on the MCP surface without a thirteenth tool.
 
         **A verdict displaces the park clock's record of there being none.** An
         item the clock failed and a verifier then passed used to close DONE
@@ -1237,6 +1386,16 @@ class Queue:
         current = self.get(item_id)
         if current is None:
             return None
+        if adjudication is not None:
+            if not isinstance(adjudication, dict):
+                raise Refusal(
+                    code=ADJUDICATION_INVALID,
+                    message=f"adjudication must be an object, got {type(adjudication).__name__}",
+                    remediation="Send {\"verdict\": \"good\"|\"bad\", \"evidence\": \"...\"}.",
+                )
+            adjudication_record(
+                current, adjudication.get("verdict"), adjudication.get("evidence"), submitted_by
+            )
 
         def verdict(item: WorkItem) -> dict:
             if not item.is_gated:
@@ -1386,7 +1545,60 @@ class Queue:
                 "metadata": metadata,
             }
 
-        return self._mutate(item_id, verdict)
+        attested = self._mutate(item_id, verdict)
+        if attested is not None and adjudication is not None:
+            return self.adjudicate(
+                item_id, adjudication.get("verdict"), adjudication.get("evidence"),
+                adjudicator=submitted_by,
+            )
+        return attested
+
+    def adjudicate(
+        self,
+        item_id: str,
+        verdict: object,
+        evidence: object,
+        *,
+        adjudicator: object,
+    ) -> Optional[WorkItem]:
+        """Tag a divergence `good` or `bad`, as somebody who did not execute it.
+
+        The third ASOP property's first record. `good` says the procedure was
+        wrong and the deviation feeds its next version; `bad` says the
+        execution took a shortcut and the deviation feeds root-cause. Either way
+        the tag carries the adjudicator's identity and pointed evidence, and
+        **the adjudicator is never the executor** — compared against every
+        identity the plane recorded as having executed the item, none of which
+        a caller can set. Immutable once written; a disagreement is a dispute
+        and escalates rather than overwrites.
+
+        `adjudicator` is the actor the transport authenticated, never a body
+        field: HTTP passes the signed actor, MCP the process identity, the
+        outbox the drainer's machine credential — which means, as with a judged
+        gate, an adjudication relayed from the machine that executed the work
+        is refused as self-adjudication. That is the rule working.
+        """
+        current = self.get(item_id)
+        if current is None:
+            raw_rows, _ = self._read_raw()
+            if any(r.get("id") == item_id for r in raw_rows):
+                raise WorkError(
+                    f"work item {item_id} exists but its stored row is not "
+                    f"readable by this version, so it cannot be adjudicated. "
+                    f"The row is preserved on disk. Upgrade, or repair the row."
+                )
+            return None
+        # Validated on the read, and again inside the lock: the first refuses
+        # before anything is touched, the second holds if the item moved.
+        adjudication_record(current, verdict, evidence, adjudicator)
+
+        def tag(item: WorkItem) -> dict:
+            record = adjudication_record(item, verdict, evidence, adjudicator)
+            metadata = dict(item.metadata or {})
+            metadata[ADJUDICATION_KEY] = record
+            return {"metadata": metadata}
+
+        return self._mutate(item_id, tag)
 
     def report_result(
         self,

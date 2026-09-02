@@ -80,6 +80,9 @@ def test_the_push_set_carries_reports_and_not_filings():
         "snapshot",
         "work_report",
         "attest",
+        # Same test as attest: a statement about work somebody did, from
+        # somebody who did not do it. Joined the day its endpoint shipped (P4.1).
+        "adjudicate",
     }
 
 

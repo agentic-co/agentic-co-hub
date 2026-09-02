@@ -85,6 +85,13 @@ PUSH_VERBS: tuple[str, ...] = (
     # answering a judged gate through the zero-config floor is exactly the
     # participant L1 exists for.
     "attest",
+    # Same test, same day-it-shipped rule. Judging a divergence is a statement
+    # about work somebody did, from somebody who did not do it — and the
+    # drainer signing with the machine credential means an adjudication relayed
+    # from the executing machine is refused as self-adjudication, exactly as a
+    # judged gate's attestation is. The reviewer is somewhere else, or it is
+    # not a review.
+    "adjudicate",
 )
 
 # Reserved for the push set, blocked on their transport rather than on a
@@ -599,6 +606,14 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
                 payload["attestation"],
                 agent_label=label,
                 capabilities=payload.get("capabilities"),
+                adjudication=payload.get("adjudication"),
+            )
+        if verb == "adjudicate":
+            return registry.adjudicate(
+                payload["itemId"],
+                payload["verdict"],
+                payload["evidence"],
+                agent_label=label,
             )
         if verb == "work_report":
             return registry.work_report(
