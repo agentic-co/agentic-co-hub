@@ -161,17 +161,31 @@ def write_cursor(cursor: str) -> None:
     path.write_text(cursor, encoding="utf-8")
 
 
-def _is_permanent_failure(exc: BaseException) -> bool:
-    """A 4xx is the caller's fault forever, not the network's fault today.
+# Four 4xx statuses that are not this caller's fault forever, so they are
+# excluded from `_is_permanent_failure` rather than dead-lettered with the
+# rest of the class. 408 and 429 are the network's fault today — a timeout or
+# a rate limit says try again later, not that the ticket is gone. 401 and 403
+# are the operator's to fix (rotate the token, grant access) and then they
+# want the notice replayed, not silently dropped because the credential that
+# was wrong at the time got dead-lettered along with tickets that no longer
+# exist.
+TRANSIENT_4XX = frozenset({401, 403, 408, 429})
 
-    The ticket was deleted, the URL was never valid, the token doesn't have
-    access — retrying the same POST does not fix any of those. `status` is
-    only ever set by `WritebackFailed`; any other exception has no verdict to
-    give and is treated as transient, which is the safer default when we
-    cannot tell.
+
+def _is_permanent_failure(exc: BaseException) -> bool:
+    """A 4xx is the caller's fault forever, not the network's fault today —
+    except the four in `TRANSIENT_4XX`, which are exactly the opposite case.
+
+    The ticket was deleted, the URL was never valid — retrying the same POST
+    does not fix either of those, so the rest of the 4xx range is permanent.
+    `status` is only ever set by `WritebackFailed`; any other exception has no
+    verdict to give and is treated as transient, which is the safer default
+    when we cannot tell.
     """
     status = getattr(exc, "status", None)
-    return isinstance(status, int) and 400 <= status < 500
+    if not isinstance(status, int):
+        return False
+    return 400 <= status < 500 and status not in TRANSIENT_4XX
 
 
 def _deadletter_path() -> Path:
@@ -215,18 +229,27 @@ def run(
     delivery failure is retried on the next run instead of being skipped by a
     watermark that moved regardless.
 
-    A writer exception splits two ways. A **permanent** failure (4xx — the
-    ticket was deleted, the URL never existed) cannot be fixed by sending the
-    same POST again, so that one notice is dead-lettered (`_write_deadletter`)
-    and the pass moves on to the events after it. A **transient** failure
-    (5xx, unreachable, or anything else we cannot classify) stops the pass —
-    but the cursor is persisted up to the last event actually handled BEFORE
-    the exception propagates, so the next run retries the poison event
-    instead of everything from the beginning. Persisting before re-raising is
-    the fix: previously the only write happened after the whole loop, so an
-    exception on the second of three events left the cursor at `None`
-    forever and re-sent the first notice on every subsequent run, without
-    ever reaching the third.
+    A writer exception splits two ways. A **permanent** failure (4xx, other
+    than the four in `TRANSIENT_4XX` — the ticket was deleted, the URL never
+    existed) cannot be fixed by sending the same POST again, so that one
+    notice is dead-lettered (`_write_deadletter`) and the pass moves on to the
+    events after it. A **transient** failure (5xx, unreachable, a 401/403/
+    408/429, or anything else we cannot classify) stops the pass — but the
+    cursor is persisted up to the last event actually handled BEFORE the
+    exception propagates, so the next run retries the poison event instead of
+    everything from the beginning. Persisting before re-raising is the fix:
+    previously the only write happened after the whole loop, so an exception
+    on the second of three events left the cursor at `None` forever and
+    re-sent the first notice on every subsequent run, without ever reaching
+    the third.
+
+    A dead-letter write can itself fail — an unwritable directory, a full
+    disk. That must not be silent about the notice it was trying to record:
+    it falls through to the same transient handling (cursor persisted up to
+    the event before this one, so the poison event is retried rather than
+    skipped) and raises a `WritebackFailed` naming the dead-letter path,
+    rather than let the write's own `OSError`, unannotated, be the only trace
+    that a permanent failure went unrecorded.
     """
     configured = via in _WRITERS or writeback_url() is not None
     if not configured:
@@ -264,7 +287,32 @@ def run(
                 writer(notice)
             except Exception as exc:
                 if _is_permanent_failure(exc):
-                    _write_deadletter(notice, exc)
+                    try:
+                        _write_deadletter(notice, exc)
+                    except OSError as deadletter_exc:
+                        # The dead-letter write is what turns "permanent
+                        # failure" into "handled". If IT fails too — an
+                        # unwritable directory, a full disk — the notice is
+                        # now neither delivered nor recorded, and raising
+                        # `deadletter_exc` bare would be silent about that:
+                        # the caller sees an OSError with no notice attached
+                        # and no reason to suspect the poison event is still
+                        # sitting there un-dead-lettered. So this falls
+                        # through to exactly the transient handling below —
+                        # persist the cursor up to the event before this one,
+                        # so the next run retries rather than skips it — and
+                        # raises a fresh error that names both the notice and
+                        # the path that could not take it, rather than let a
+                        # second WritebackFailed on the SAME event masquerade
+                        # as the writer's original failure.
+                        if cursor and cursor != start:
+                            write_cursor(cursor)
+                        raise WritebackFailed(
+                            None,
+                            f"permanent failure on {notice.get('sourceId')!r} "
+                            f"could not be dead-lettered to "
+                            f"{_deadletter_path()}: {deadletter_exc}",
+                        ) from deadletter_exc
                     deadlettered.append(notice)
                     # Per EVENT, from its seq — see the comment below. A
                     # permanent failure is handled, just not delivered, so it
