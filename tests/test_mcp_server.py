@@ -58,9 +58,9 @@ def tool(mcp, name):
 
 def test_tool_count_is_capped_at_twelve(mcp):
     """0002-participation-ladder.md moved the ceiling from nine to twelve to
-    make room for `attest`, `sop_revise`, and `sop_activate` — reserved names,
-    none built yet. A thirteenth tool must fail this, not slip in because
-    nobody counted."""
+    make room for `attest`, `sop_revise`, and `sop_activate` — all three now
+    built, so the ceiling is binding. A thirteenth tool must fail this, not
+    slip in because nobody counted."""
     names = sorted(t.name for t in mcp._tool_manager.list_tools())
     assert len(names) <= 12, f"{len(names)} tools registered: {names}"
 
@@ -89,11 +89,15 @@ def test_the_implemented_tools_are_the_ones_the_design_names(mcp):
         # neither created nor satisfied over any transport — the property the
         # whole contract rests on was reachable in-process only.
         "attest",
+        # Landed with Phase 4 (P4.4): the shared-learning WRITE path on the
+        # primary surface, behind the revision policy. Twelve of twelve.
+        "sop_revise",
+        "sop_activate",
     }
     names = {t.name for t in mcp._tool_manager.list_tools()}
     assert names == expected
 
-    reserved = {"sop_revise", "sop_activate"}
+    reserved: set[str] = set()  # every name the ADR reserved has shipped
     already_registered = reserved & names
     assert not already_registered, (
         f"{already_registered} has shipped: add it to `expected` above AND "
@@ -113,9 +117,9 @@ def test_the_implemented_tools_are_the_ones_the_design_names(mcp):
 # condition is that the COUNT stops measuring context cost if the bytes grow
 # underneath it, so a raise has to name what was added; a raise to make a red
 # test green would be the exact failure the budget exists to catch. 12,500
-# leaves room for the two reserved verbs at roughly the observed per-tool cost
-# and nothing more: at twelve tools this budget is close to binding, which is
-# the intent.
+# left room for the two then-reserved verbs at roughly the observed per-tool
+# cost and nothing more. With `sop_revise` and `sop_activate` landed (Phase 4)
+# the twelve tools measure 12,407 bytes: 93 to spare. Binding, as intended.
 TOOL_SCHEMA_BYTE_BUDGET = 12_500
 
 

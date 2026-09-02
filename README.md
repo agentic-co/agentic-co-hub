@@ -233,9 +233,10 @@ One entry in your `.mcp.json`, and nothing about how your harness works changes:
 
 Twelve tools, and twelve is a ceiling enforced by a test rather than
 remembered — a large tool surface costs every calling harness context on
-every tool-choice decision it makes. Ten are built today; `sop_revise` and
-`sop_activate` are reserved names in
-`docs/decisions/0002-participation-ladder.md`, not yet registered tools. A
+every tool-choice decision it makes. All twelve are built — the last two,
+`sop_revise` and `sop_activate`, landed with Phase 4 behind the revision
+policy, closing the reservations `docs/decisions/0002-participation-ladder.md`
+made — so the ceiling is binding. A
 byte budget over the registered schemas is published alongside the count
 (`tests/test_mcp_server.py`), because the count is a stand-in for context
 cost, not the thing itself, and a ceiling that holds while the bytes behind

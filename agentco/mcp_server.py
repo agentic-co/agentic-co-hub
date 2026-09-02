@@ -14,8 +14,8 @@ A large surface costs every calling harness context on every single tool-choice
 decision it makes — that cost is paid by every conversation, not just this one.
 0002-participation-ladder.md moved the ceiling from nine to twelve to reserve
 room for `attest`, `sop_revise` and `sop_activate`. `attest` shipped with the
-Phase 1 transports; the other two land with Phase 4, so ten are registered
-below and two names are held. Adding a thirteenth tool means
+Phase 1 transports; the other two landed with Phase 4, so all twelve are
+registered below and no names are held. Adding a thirteenth tool means
 deleting one, not extending the budget. A published byte budget
 (`tests/test_mcp_server.py`) sits alongside the count, because the count is a
 proxy for context cost, and a proxy that stops tracking the thing it measures
@@ -65,13 +65,13 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
-from agentco import auth, db, events as events_module, leases, scope, snapshots
+from agentco import auth, db, events as events_module, leases, policy, scope, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
 # publish.py is standard-library only, so importing it here costs the `mcp`
 # extra nothing — unlike `app`, which would drag FastAPI in (see above).
 from agentco.publish import Registry, RegistryError
-from agentco.sop import DEFAULT_SOP_STORE, SOP_STORE_ENV_VAR, SopLibrary, resolve_sop_store
+from agentco.sop import DEFAULT_SOP_STORE, SOP_STORE_ENV_VAR, SopError, SopLibrary, resolve_sop_store
 from agentco.stores import open_queue, open_sop_library, resolve_registry_db
 from agentco.work import (
     DEFAULT_LEASE_TTL_S,
@@ -216,6 +216,15 @@ class _LocalBackend:
         sop = self.library.get(sop_id, version=version)
         return json.loads(sop.to_json()) if sop is not None else None
 
+    def sop_revise(self, sop_id: str, changes: dict, title: Optional[str],
+                   author: str, author_kind: str) -> dict:
+        sop = self.library.revise(sop_id, title=title, author=author, author_kind=author_kind, **changes)
+        return json.loads(sop.to_json())
+
+    def sop_activate(self, sop_id: str, version: int, author: str, author_kind: str) -> dict:
+        sop = self.library.activate(sop_id, version, author=author, author_kind=author_kind)
+        return json.loads(sop.to_json())
+
     def describe(self) -> dict:
         return {
             "mode": "local",
@@ -298,6 +307,20 @@ class _RemoteBackend:
 
     def sop_get(self, sop_id: str, version: Optional[int]) -> Optional[dict]:
         return self.registry.sop_get(sop_id, version=version).get("sop")
+
+    def sop_revise(self, sop_id: str, changes: dict, title: Optional[str],
+                   author: str, author_kind: str) -> dict:
+        # `author` and `author_kind` are dropped deliberately: over HTTP the
+        # registry takes the author from the signature and the kind from ITS
+        # declaration of who is human. A proxy that forwarded its own reading
+        # would be the one place a caller could become human by configuration.
+        body = dict(changes)
+        if title is not None:
+            body["title"] = title
+        return self.registry.sop_revise(sop_id, **body)["sop"]
+
+    def sop_activate(self, sop_id: str, version: int, author: str, author_kind: str) -> dict:
+        return self.registry.sop_activate(sop_id, version)["sop"]
 
     def describe(self) -> dict:
         return {"mode": "remote", "registryUrl": self.registry.base_url}
@@ -581,6 +604,35 @@ def create_server(
         try:
             return backend.sop_get(sop_id, version)
         except (Refusal, RegistryError) as exc:
+            raise _refuse(exc) from exc
+
+    @mcp.tool(name="sop_revise")
+    def sop_revise(sop_id: str, changes: dict, title: Optional[str] = None) -> dict:
+        """Write the next version of a procedure as a DRAFT; the old one stays readable.
+
+        `changes` holds SOP fields (purpose, definition_of_done, common_mistakes,
+        executor, tags, ...); unset fields carry forward, `null` clears one.
+        Nothing is promoted until `sop_activate`. The revision policy applies:
+        as an agent you cannot touch a `money`/`irreversible` step, demote a
+        human step, or undo a change a human made.
+        """
+        try:
+            return backend.sop_revise(
+                sop_id, changes, title,
+                author=who, author_kind=policy.kind_of(who, policy.humans_from_env()),
+            )
+        except (SopError, ValueError, Refusal, RegistryError) as exc:
+            raise _refuse(exc) from exc
+
+    @mcp.tool(name="sop_activate")
+    def sop_activate(sop_id: str, version: int) -> dict:
+        """Make one version the one every reader gets. Policed like a revision."""
+        try:
+            return backend.sop_activate(
+                sop_id, version,
+                author=who, author_kind=policy.kind_of(who, policy.humans_from_env()),
+            )
+        except (SopError, ValueError, Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
 
     @mcp.tool(name="attest")

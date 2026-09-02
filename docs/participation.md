@@ -60,8 +60,9 @@ agent side — a local drainer, run by someone with the registry credential,
 picks the line up, signs it, and delivers it.
 
 The line has five fields — `line_id`, `at`, `verb`, `payload`, and an optional
-`agent_label` — and only six verbs are accepted: `claim_scope`,
-`release_scope`, `snapshot`, `work_report`, `attest`, `adjudicate`. `work_create` is
+`agent_label` — and only eight verbs are accepted: `claim_scope`,
+`release_scope`, `snapshot`, `work_report`, `attest`, `adjudicate`, `sop_revise`,
+`sop_activate`. `work_create` is
 deliberately not in that set: pushing a scope claim or a report is a statement
 about work you're already doing, and filing work into somebody else's queue is
 a different act — it has a consequence for a person who didn't ask for it, and
@@ -140,8 +141,7 @@ disk. Point it at a shared registry over HTTP instead by setting
 so `AGENTCO_WORK_STORE` / `AGENTCO_SOP_STORE` stop mattering. `AGENTCO_ACTOR`
 still names who you are — over HTTP it's what gets authenticated.
 
-Ten tools are registered (two more, `sop_revise` and `sop_activate`, are
-reserved names — not yet built, so they don't appear):
+Twelve tools are registered — the full budget:
 
 | Tool | When you'd call it |
 |---|---|
@@ -154,6 +154,8 @@ reserved names — not yet built, so they don't appear):
 | `work_report` | Report a terminal outcome (`done`/`failed`), fenced against the lease attempt you were issued. |
 | `work_create` | File a new item onto the queue. |
 | `sop_get` | Read one version of a procedure, or the active one. |
+| `sop_revise` | Write the next version as a draft — `changes` holds the fields; unset ones carry forward. This is how a lesson travels. The revision policy applies to you as an agent (`docs/asop.md` § 3). |
+| `sop_activate` | Make one version the one every reader gets. Policed like a revision. |
 | `attest` | Answer a gate on an item parked `awaiting_verify`, or re-run a failed one — see L3 below. Takes an optional `adjudication` (`{verdict: good\|bad, evidence}`) so the verifier can tag the divergence they saw in the same call; the adjudicator is never the executor, enforced. Over HTTP the tag also has its own endpoint, `POST /work/{id}/adjudicate`. |
 
 Identity is where the two encodings diverge, and it matters for how much you

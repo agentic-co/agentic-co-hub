@@ -712,11 +712,33 @@ def create_app(
     # edited, so instances pinned to it stay readable and the evidence for
     # whether the revision helped survives.
 
+    def _reject_author_in_body(payload: dict) -> None:
+        """A body naming the author or the kind is refused, not ignored.
+
+        Ignoring it would be the quieter bug: a caller writing
+        `author_kind: human` would see a 200 and believe the policy had been
+        told. Who authored is the signature; whether they are human is the
+        operator's declaration. Neither is the body's to say.
+        """
+        named = sorted({"author", "author_kind"} & set(payload))
+        if named:
+            raise Refusal(
+                code="author_from_signature",
+                message=f"the body names {named}; the signature and the operator's declaration already did",
+                remediation=(
+                    "Remove them. The author is the actor that signed the request and "
+                    "the kind is whether the operator listed that actor in "
+                    "AGENTCO_HUMANS — a caller cannot become human by saying so."
+                ),
+                http_status=400,
+            )
+
     @app.post("/sops")
     async def post_sop_create(request: Request) -> JSONResponse:
         """Author version 1, as a DRAFT — activation is a separate, deliberate act."""
 
         def work(actor: str, payload: dict) -> dict:
+            _reject_author_in_body(payload)
             body = {k: payload[k] for k in SOP_BODY_KEYS if k in payload}
             try:
                 sop = library.create(
@@ -736,6 +758,7 @@ def create_app(
         """Write the next version. Unset fields carry forward; the old one is superseded."""
 
         def work(actor: str, payload: dict) -> dict:
+            _reject_author_in_body(payload)
             body = {k: payload[k] for k in SOP_BODY_KEYS if k in payload}
             try:
                 sop = library.revise(
@@ -756,6 +779,7 @@ def create_app(
         """Make one version the one every reader gets by default."""
 
         def work(actor: str, payload: dict) -> dict:
+            _reject_author_in_body(payload)
             version = _int(payload, "version", -1)
             if version < 1:
                 raise Refusal(
