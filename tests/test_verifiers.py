@@ -525,6 +525,32 @@ def test_a_dry_run_reports_the_deadline_without_moving_anything(queue):
     assert queue.get(item.id).status is WorkStatus.AWAITING_VERIFY
 
 
+def test_the_clock_starts_when_the_gate_parked_not_when_the_row_last_changed(queue, monkeypatch):
+    """`_gate_outcome` stamps `verify_parked_at`, and `_parked_at` prefers it to
+    `updated_at`. Every test of the clock parked and swept inside the same
+    second, so deleting the stamp changed nothing any of them could see — the
+    fallback gave the same answer to the tenth of a second. The mechanism was
+    unprotected and looked covered.
+
+    Here the row is touched an hour after the gate parked, so the two candidate
+    start times differ by an hour and only one of them makes the gate due.
+    """
+    from agentco import work as work_module
+
+    an_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    monkeypatch.setattr(work_module, "_now", lambda: an_hour_ago)
+    item = park(queue, gate=gate(on_timeout="pass"))
+    monkeypatch.undo()
+
+    queue.annotate(item.id, {"note": "something changed the row after it parked"})
+    touched = queue.get(item.id)
+    assert touched.updated_at > touched.metadata["verify_parked_at"]
+
+    assert [r["item"] for r in verifiers.sweep_park_clocks(queue)["resolved"]] == [item.id], (
+        "the deadline was measured from the last touch, not from the park"
+    )
+
+
 def test_an_item_parked_before_the_clock_existed_still_gets_one(queue):
     """`verify_parked_at` is stamped by this version. An item parked by an earlier
     one has none, and refusing to start its clock would leave the OLDEST parked
@@ -961,3 +987,93 @@ def test_a_verifier_that_claimed_and_was_reaped_still_counts(queue):
     assert [r.id for r in queue.reap_expired_leases()] == [vehicle.id]
     assert queue.get(vehicle.id).leased_by is None
     assert verifiers.verifier_status(queue)["claimedEver"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# FIX-L3.6 — a pass survives losing a race, and reports what it skipped
+# --------------------------------------------------------------------------- #
+
+
+def test_a_retire_that_loses_a_race_does_not_abort_the_routing_pass(queue):
+    """`reap_expired_leases` catches `LeaseError` per item and carries on; these
+    passes did not. A verifier claiming a vehicle between the pass's `list()`
+    and its write raised straight out of the loop, and every item after it in
+    that run went untouched.
+
+    The failure is nearly invisible: the pass runs on a cadence, the next run
+    reads fresh, so the only symptom is one cycle in which half the queue did
+    not get swept — until the race is with something that recurs, and then the
+    tail of the queue is never swept at all.
+    """
+    first, second = park(queue, title="raced"), park(queue, title="later in the run")
+    verifiers.route_open_gates(queue)
+    [held] = [v for v in vehicles(queue) if verifiers.verifies(v) == first.id]
+    [after] = [v for v in vehicles(queue) if verifiers.verifies(v) == second.id]
+
+    queue.attest(first.id, attestation(JUDGED["check"]), "reviewer-1", capabilities=["verify"])
+    queue.attest(second.id, attestation(JUDGED["check"]), "reviewer-2", capabilities=["verify"])
+    queue.claim(held.id, "reviewer-1", capabilities=["verify"])
+
+    result = verifiers.route_open_gates(queue)
+    assert result["retired"] == [after.id], "the item after the race must still be swept"
+    assert [s["item"] for s in result["skipped"]] == [held.id]
+    assert "holds it" in result["skipped"][0]["reason"]
+    assert queue.get(held.id).leased_by == "reviewer-1", "and the work stays theirs"
+
+
+def test_a_verdict_landing_mid_sweep_does_not_abort_the_park_clock(queue, monkeypatch):
+    """The same race on the other pass, and the one that matters more: the clock
+    is what makes gated work terminate at all. One verdict arriving at the wrong
+    moment left every later due gate parked for another cycle."""
+    raced = park(queue, gate=gate(on_timeout="pass"), title="answered mid-pass")
+    untouched = park(queue, gate=gate(on_timeout="pass"), title="later in the run")
+
+    stale = queue.list()
+    queue.attest(raced.id, attestation(gate()["check"]), "reviewer", capabilities=["verify"])
+    monkeypatch.setattr(queue, "list", lambda *a, **kw: stale)
+    result = verifiers.sweep_park_clocks(queue, now=later())
+    monkeypatch.undo()
+
+    assert [r["item"] for r in result["resolved"]] == [untouched.id]
+    assert [s["item"] for s in result["skipped"]] == [raced.id]
+    assert queue.get(untouched.id).status is WorkStatus.DONE
+    assert queue.get(raced.id).attestation is not None, "the verdict stands"
+
+
+def test_quarantine_leaves_a_vehicle_a_verifier_is_holding(queue):
+    """Third pass, same rule. Somebody is working this item; quarantine does not
+    close it under them, and it does not stop halfway through the sweep either."""
+    first, _ = abandoned(queue, title="held by a verifier")
+    second, much_later = abandoned(queue, title="nobody is holding this one")
+    [held] = [v for v in vehicles(queue) if verifiers.verifies(v) == first.id]
+    queue.claim(held.id, "dana")
+
+    result = verifiers.sweep_quarantine(queue, now=much_later)
+    assert {q["item"] for q in result["quarantined"]} == {first.id, second.id}
+    assert [s["item"] for s in result["skipped"]] == [held.id]
+    assert queue.get(held.id).leased_by == "dana"
+
+
+def test_a_router_that_loses_the_create_race_announces_nothing(queue, registry, monkeypatch):
+    """Two routers on a cadence overlap. `create` deduplicates on the natural key
+    and returns the EXISTING item rather than raising, which is right — and it
+    left this pass reporting a create it did not make and emitting a second
+    `WorkParked` for a gate the other router had already announced. A feed that
+    carries one park twice is a feed whose consumers double-count, and the whole
+    point of the natural key is that the second router does nothing."""
+    item = park(queue, gate=gate(kind="human", on_timeout="escalate"))
+    stale = queue.list()
+    queue.create(
+        "Verify: the other router got there first",
+        natural_key=verifiers.vehicle_key(item),
+        assigned_agent="dana",
+        metadata={verifiers.VEHICLE_MARKER: item.id},
+    )
+    monkeypatch.setattr(queue, "list", lambda *a, **kw: stale)
+    result = verifiers.route_open_gates(queue, conn=registry)
+    monkeypatch.undo()
+
+    assert result["created"] == [], "it did not create this; the other router did"
+    assert [s["item"] for s in result["skipped"]] == [item.id]
+    assert feed(registry, "WorkParked") == []
+    assert len(vehicles(queue)) == 1

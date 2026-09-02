@@ -6,12 +6,20 @@ the opposite case by construction: it exists *because* the executor may not
 grade its own work, so somebody else has to be reachable, and "reachable" for a
 work queue means an item they can claim.
 
-So a parked gate gets a **vehicle**: an ordinary work item carrying
-`requires: ["verify"]`, invisible to any node that has not declared the
-capability, whose whole content is "go decide this". The verdict itself still
-travels through `Queue.attest` against the ORIGINAL item — the vehicle is how a
-verifier finds the work, never where the outcome lives. Two records for one
-decision would be two places for it to disagree with itself.
+So a gate awaiting an answer gets a **vehicle**: an ordinary work item whose
+whole content is "go decide this", reachable only by whoever is entitled to
+answer — `requires: ["verify"]` for a judged gate, so no node that has not
+declared the capability can claim it, and `assigned_agent` set to the gate's
+named `verifier` for a human one, so the executor cannot. The verdict itself
+still travels through `Queue.attest` against the ORIGINAL item — the vehicle is
+how a verifier finds the work, never where the outcome lives. Two records for
+one decision would be two places for it to disagree with itself.
+
+**A rejected gate is still owed one.** Parking is not the only state that needs
+an answer: the ASOP re-verify invariant keeps a failed unit blocking until its
+own gate runs again and passes, so `verify_failed` gets a vehicle too, keyed on
+the failure count and governed by the retry policy the failure recorded. One
+attempt, one vehicle; the superseded one is retired in the same pass.
 
 **Routing is a pass, not a side effect of reporting.** `report_result` parks the
 item and creates nothing, for the same reason it records a retry decision
@@ -39,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from agentco import events, gates
-from agentco.work import RESOLUTION_KEY, Queue, WorkItem, WorkStatus
+from agentco.work import RESOLUTION_KEY, LeaseError, Queue, WorkItem, WorkStatus
 
 # Re-exported from `gates` rather than defined twice. `work.attest` enforces it,
 # and work.py cannot import this module without a cycle.
@@ -166,6 +174,14 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
     filing work and wrong for a pass that runs every five minutes — the log
     would fill with reports of the routing working correctly. The natural key
     stays as the backstop for two passes racing.
+
+    **Losing a race is an ordinary answer, not an error.** The queue moves
+    between this pass's `list()` and each of its writes, and every such loss is
+    per-item: a verifier claimed one vehicle, another router filed one first.
+    Raising out of the loop abandoned every item after it, so the pass's own
+    reliability depended on nothing happening concurrently — in a work queue.
+    Each loss is caught, named in `skipped`, and the pass continues. Same rule
+    `reap_expired_leases` has always followed.
     """
     items = queue.list()
     by_id = {i.id: i for i in items}
@@ -173,6 +189,7 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
 
     created: list[dict] = []
     retired: list[str] = []
+    skipped: list[dict] = []
 
     for item in items:
         if not needs_a_verifier(item):
@@ -205,7 +222,7 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
         created.append(plan)
         if dry_run:
             continue
-        queue.create(
+        vehicle = queue.create(
             f"Verify: {item.title}",
             requires=plan["requires"],
             assigned_agent=plan["assigned_agent"],
@@ -230,6 +247,22 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
                 "attempt": item.verify_failures,
             },
         )
+        if (vehicle.metadata or {}).get("natural_key_conflict"):
+            # Another router filed this vehicle between our read and our write.
+            # `create` returns the existing item rather than raising, which is
+            # what every ingest path wants — and it left this pass reporting a
+            # create it did not make and announcing a park the other router had
+            # already announced. Two `WorkParked` events for one gate is a feed
+            # whose consumers double-count.
+            created.pop()
+            skipped.append({
+                "item": item.id,
+                "reason": (
+                    f"another router already filed {plan['naturalKey']!r} as "
+                    f"{vehicle.id} — the vehicle exists and is not ours to announce"
+                ),
+            })
+            continue
         if conn is not None and item.status is WorkStatus.AWAITING_VERIFY:
             # Only a genuinely parked gate. Routing a re-verify is not a park:
             # the item was answered and rejected, its clock is not running, and
@@ -280,17 +313,25 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
         # Retiring is not recording an outcome — the outcome lives on the parent
         # — so it closes with a result saying exactly that.
         retired.append(vehicle.id)
-        if not dry_run:
+        if dry_run:
+            continue
+        try:
             queue.retire(
                 vehicle.id,
                 f"retired by routing: {why}. The outcome is on the item "
                 f"itself, never here.",
             )
+        except LeaseError as exc:
+            # A verifier claimed it after the read above. They are working it;
+            # the next pass will find it moot again and close it then.
+            retired.pop()
+            skipped.append({"item": vehicle.id, "reason": str(exc)})
 
     return {
         "state": "dry-run" if dry_run else "routed",
         "created": created,
         "retired": retired,
+        "skipped": skipped,
         "capability": VERIFY_CAPABILITY,
     }
 
@@ -368,10 +409,18 @@ def sweep_park_clocks(
     Only `awaiting_verify` has a clock. A `verify_failed` item is not waiting on
     anybody — it is waiting on a fix, which the retry policy governs, and a
     second clock on top of that would close items whose repair was in progress.
+
+    A verdict arriving between the read and a write is refused by
+    `resolve_by_default` — correctly, the verdict wins — and that refusal is
+    caught per item and reported in `skipped`. Uncaught it ended the pass, so
+    one gate answered at the wrong moment left every later due gate parked for
+    another cycle, on the mechanism whose entire job is that gated work
+    terminates.
     """
     at = now or _now()
     resolved: list[dict] = []
     escalated: list[dict] = []
+    skipped: list[dict] = []
 
     for item in queue.list():
         if item.status is not WorkStatus.AWAITING_VERIFY:
@@ -422,15 +471,18 @@ def sweep_park_clocks(
         resolved.append({"item": item.id, "default": default, "waited": waited})
         if dry_run:
             continue
-        if default == "pass":
-            queue.resolve_by_default(item.id, WorkStatus.DONE, record)
-        else:
-            queue.resolve_by_default(item.id, WorkStatus.VERIFY_FAILED, record)
+        landing = WorkStatus.DONE if default == "pass" else WorkStatus.VERIFY_FAILED
+        try:
+            queue.resolve_by_default(item.id, landing, record)
+        except LeaseError as exc:
+            resolved.pop()
+            skipped.append({"item": item.id, "reason": str(exc)})
 
     return {
         "state": "dry-run" if dry_run else "swept",
         "resolved": resolved,
         "escalated": escalated,
+        "skipped": skipped,
     }
 
 
@@ -590,9 +642,14 @@ def sweep_quarantine(
     Reversible on purpose. An answer arriving after quarantine closes the item
     exactly as it always would; the flag governs what is OFFERED, never what is
     permitted.
+
+    A vehicle somebody is holding is left alone and named in `skipped`. A live
+    lease is somebody finally looking; withdrawing the offer is moot, and this
+    sweep does not get to end early over it either.
     """
     at = now or _now()
     quarantined: list[dict] = []
+    skipped: list[dict] = []
 
     for item in queue.list():
         if item.status is not WorkStatus.AWAITING_VERIFY or is_vehicle(item):
@@ -634,13 +691,23 @@ def sweep_quarantine(
             if verifies(vehicle) == item.id and vehicle.status not in (
                 WorkStatus.DONE, WorkStatus.FAILED
             ):
-                queue.retire(
-                    vehicle.id,
-                    f"retired by quarantine: unanswered for {waited}s after "
-                    f"escalation. The gate is still open; it is no longer offered.",
-                )
+                try:
+                    queue.retire(
+                        vehicle.id,
+                        f"retired by quarantine: unanswered for {waited}s after "
+                        f"escalation. The gate is still open; it is no longer offered.",
+                    )
+                except LeaseError as exc:
+                    # Somebody is holding it, which means somebody is finally
+                    # looking. Withdrawing the offer is moot and taking it out
+                    # of their hands would be worse than leaving it.
+                    skipped.append({"item": vehicle.id, "reason": str(exc)})
 
-    return {"state": "dry-run" if dry_run else "quarantined", "quarantined": quarantined}
+    return {
+        "state": "dry-run" if dry_run else "quarantined",
+        "quarantined": quarantined,
+        "skipped": skipped,
+    }
 
 
 def is_quarantined(item: WorkItem) -> bool:
