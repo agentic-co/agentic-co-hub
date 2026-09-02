@@ -48,7 +48,17 @@ from typing import Callable, Iterator, Optional, Sequence
 from agentco import migrations, policy
 from agentco.db import BUSY_TIMEOUT_MS
 from agentco.sop import SOP, SopLibrary, SopStatus
-from agentco.work import Queue, WorkError, WorkItem, WorkStatus, _iso, _now, build_item
+from agentco.work import (
+    Queue,
+    WorkError,
+    WorkItem,
+    WorkStatus,
+    _iso,
+    _now,
+    build_item,
+    enforce_decomposition,
+    is_child_row,
+)
 
 # Every WorkItem field is a column of the same name. Asserted at import rather
 # than trusted: adding a field to the dataclass and forgetting the migration
@@ -382,6 +392,38 @@ class SqlQueue(_SqlBacked, Queue):
                     existing.metadata = dict(existing.metadata or {})
                     existing.metadata["natural_key_conflict"] = True
                     return existing
+
+            def lookup(item_id: str) -> Optional[dict]:
+                found = conn.execute(
+                    "SELECT * FROM work_items WHERE id = ?", (item_id,)
+                ).fetchone()
+                return _row_to_dict(found) if found is not None else None
+
+            def count_children(parent_id: str) -> int:
+                # Counted in Python over every row's metadata, the way the
+                # JSONL store counts — one rule for what a child IS beats two.
+                # A LIKE pre-filter on the serialised JSON was considered and
+                # rejected: a newer writer's spacing would make it undercount,
+                # and an undercount here is a bound that silently stopped
+                # holding. Creates are not the hot path; claims are.
+                rows = conn.execute(
+                    "SELECT metadata FROM work_items WHERE metadata IS NOT NULL"
+                ).fetchall()
+                return sum(
+                    1 for r in rows
+                    if is_child_row({"metadata": json.loads(r["metadata"] or "{}")}, parent_id)
+                )
+
+            blocked_parent = enforce_decomposition(
+                item, lookup=lookup, count_children=count_children
+            )
+            if blocked_parent is not None:
+                parent = lookup(blocked_parent)
+                blocked = sorted(set(parent.get("blocked_by") or []) | {item.id})
+                conn.execute(
+                    "UPDATE work_items SET blocked_by = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(blocked), _iso(_now()), blocked_parent),
+                )
             row = _item_to_row(item)
             conn.execute(
                 f"INSERT INTO work_items ({', '.join(WORK_COLUMNS)}) "

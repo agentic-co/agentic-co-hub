@@ -21,6 +21,7 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | Capability | State | Level it unlocks |
 |---|---|---|
 | Scope claims, snapshots, change feed, work queue, leases | built, some proven | L2 |
+| Decomposition bounds — parent/child, review bound, depth, repair beside | built (`work.enforce_decomposition`) | — |
 | Tier-1 splice (`inject`), session hook | built | L0 |
 | MCP surface, HTTP surface, HMAC | built | L2 |
 | Versioned SOPs, `outcomes_by_version`, drift | built | — |
@@ -199,15 +200,21 @@ hand-fed. The policy was proven by mutation, the Phase 1 way: each rule, the
 lift, the activate path, the instantiate gate and the fail-closed default were
 removed in turn and a test failed each time ([`tests/test_revision_policy.py`](../tests/test_revision_policy.py)).
 
-**Beside this phase, not inside it: decomposition bounds enforced at create.**
-Parent/child on work items; at most six children per parent plus a verify
-unit; depth capped; a parent `blocked_by` its children so it cannot close
-early; repair items go beside, not beneath, so repair depth stays bounded. The
-contract already states the bound ([`asop.md`](asop.md) § Decomposition
-bounds) and readers keep taking it for a cap on total work rather than the
-human review bound it is — recursion is how the bound is honoured. The queue
-does not yet refuse a create that breaks it. Queue shape, not self-revision,
-so it is its own unit under the same epic.
+**Beside this phase, not inside it: decomposition bounds enforced at create —
+built.** `metadata.parent` makes an item a child; `metadata.repairs` makes it a
+repair. A parent holds at most seven children — six work units and the verify
+unit that closes them (`AGENTCO_MAX_CHILDREN` raises it; the contract's escape
+hatch, explicit) — and a tree goes at most three deep (`AGENTCO_MAX_DEPTH`),
+which is 343 leaves. A child is written into its parent's `blocked_by` in the
+same lock that files it, so the parent cannot close early. A child of a
+missing or closed parent is refused. A repair goes beside the unit it repairs
+— under the same parent or none, never beneath it — consumes no review budget
+and blocks nobody, because the red original it repairs already does. The
+contract states the bound ([`asop.md`](asop.md) § Decomposition bounds) and
+readers keep taking it for a cap on total work rather than the human review
+bound it is — recursion is how the bound is honoured. Refusals are HTTP 422
+`decomposition_bound` and write nothing (`work.enforce_decomposition`,
+[`tests/test_decomposition.py`](../tests/test_decomposition.py)).
 
 ---
 

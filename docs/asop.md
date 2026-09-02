@@ -213,6 +213,15 @@ bound** — a decomposition sized to what the accountable person can actually sa
 Implementations may raise it, but the escape hatch is explicit: a goal that genuinely
 needs more is usually two goals.
 
+The coordination plane enforces it at create: `metadata.parent` makes a work item a
+child; a parent holds at most seven (six plus the verify unit; `AGENTCO_MAX_CHILDREN`
+is the explicit escape hatch), a tree goes at most three deep, and the child is
+written into its parent's `blocked_by` in the same lock that files it, so a parent
+cannot close while a child is open. Recursion is how the bound is honoured, not how
+it is broken. A repair (`metadata.repairs`) goes beside the unit it repairs — same
+parent or none, never beneath — and counts against nobody's budget: the red
+original is what holds the parent open.
+
 ### Explicitly not covered (yet)
 
 ASOP v2 does not specify **rollback/compensation** (a gate that passed on work later
