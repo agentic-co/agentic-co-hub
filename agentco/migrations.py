@@ -296,12 +296,35 @@ _0005 = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0006 — the step's class, its tags, and who wrote each version.
+#
+# The revision policy (agentco/policy.py) needs three things the SOP row did not
+# carry: which steps are human, which are protected, and who authored each
+# version. `tags` is NOT NULL DEFAULT '[]' because `_row_to_sop` decodes JSON
+# columns unconditionally and a NULL there would quarantine every pre-existing
+# row — the same reason `common_mistakes` was declared that way. The other three
+# are nullable: an existing version has no recorded author and no class, and a
+# default of 'agent' or 'human' would assert a fact nobody observed. The policy
+# treats an unrecorded author as imposing nothing and an unclassified step as
+# an agent step, which is the conservative reading of each.
+# --------------------------------------------------------------------------- #
+
+_0006 = (
+    "ALTER TABLE sops ADD COLUMN executor TEXT",
+    "ALTER TABLE sops ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE sops ADD COLUMN author TEXT",
+    "ALTER TABLE sops ADD COLUMN author_kind TEXT",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001),
     Migration(2, "durable-work-and-sops", _0002),
     Migration(3, "events-agent-label", _0003),
     Migration(4, "work-item-gates", _0004),
     Migration(5, "calls-transport-and-label", _0005),
+    Migration(6, "sop-class-tags-authorship", _0006),
 )
 
 

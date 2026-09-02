@@ -171,6 +171,7 @@ service:
 export AGENTCO_REGISTRY_DB=~/.agentco/registry.sqlite3
 export AGENTCO_WORK_STORE=~/.agentco/work.jsonl
 export AGENTCO_REGISTRY_KEYS=~/.agentco/keys.json
+export AGENTCO_HUMANS=you            # the actors the revision policy exempts; everyone else is an agent
 
 python3 -m agentco keygen you > ~/.agentco/keys.json   # then chmod 600
 python3 -m agentco serve --port 8787                   # loopback by default
@@ -257,6 +258,13 @@ if pulled["state"] == "leased":
 reg.sop_revise(sop_id, common_mistakes=["Report with the attempt from work_pull"])
 reg.sop_activate(sop_id, 2)
 ```
+
+Both calls are policed when the caller is an agent — that is, any actor not
+named in `AGENTCO_HUMANS`. A step tagged `money` or `irreversible` is frozen
+against agents, a step's class only ratchets toward `human`, and no agent
+revision undoes a change a human made. `docs/asop.md` § 3 has the rules;
+`agentco/policy.py` enforces them, and a refusal comes back as HTTP 403
+`revision_policy:<rule>`.
 
 The claiming identity is the **authenticated actor**, never a field in the
 body — a worker that can name itself can take another worker's lease, and the

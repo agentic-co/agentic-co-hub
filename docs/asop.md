@@ -68,13 +68,16 @@ still exists), and revision proposals accumulate against the template. The loop 
 on a cadence — captured per-run, revised deliberately, never silently.
 
 Revision is itself policed when the reviser is an agent. Three rules, generic to
-every registry and computable because versions are immutable and the chain records
-who authored each: protected tags (`money` and `irreversible` by default) are
-immutable to an agent revision; a step's class may ratchet toward human but never
-away from it; and an agent may not reintroduce what a human removed. A human
-reviser is bound by none of these. Without the policy, self-revision is an
-unpoliced write path into the procedures — the one shape a harness with
-production access cannot accept.
+every registry and computable because versions are immutable and each records who
+authored it: a step carrying a protected tag (`money` and `irreversible` by
+default) is frozen against agents, who may neither change it nor add or remove
+such a tag; a step's class may ratchet toward human but never away from it; and an
+agent may not move any field into a state a human moved it away from, until a
+human moves it back. Who is human is declared by the operator, never inferred, and
+an undeclared registry polices everyone. A human reviser is bound by none of these.
+Activation is policed the same way, or the policy has a door beside it. Without
+the policy, self-revision is an unpoliced write path into the procedures — the one
+shape a harness with production access cannot accept.
 
 ### What an ASOP is not
 

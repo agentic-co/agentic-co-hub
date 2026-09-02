@@ -45,7 +45,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
-from agentco import migrations
+from agentco import migrations, policy
 from agentco.db import BUSY_TIMEOUT_MS
 from agentco.sop import SOP, SopLibrary, SopStatus
 from agentco.work import Queue, WorkError, WorkItem, WorkStatus, _iso, _now, build_item
@@ -96,10 +96,14 @@ SOP_COLUMNS: tuple[str, ...] = (
     "write_back",
     "common_mistakes",
     "next_sop",
+    "executor",
+    "tags",
+    "author",
+    "author_kind",
     "superseded_by",
     "created_at",
 )
-_SOP_JSON_COLUMNS = frozenset({"common_mistakes"})
+_SOP_JSON_COLUMNS = frozenset({"common_mistakes", "tags"})
 
 
 def _check_columns(dataclass_type, columns: Sequence[str]) -> None:
@@ -498,8 +502,12 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
     the queue does targeted updates.
     """
 
-    def __init__(self, path: Path | str = "agentco.sqlite3"):
+    def __init__(self, path: Path | str = "agentco.sqlite3", protected_tags: Optional[Sequence[str]] = None):
         self._open(path)
+        self.protected_tags = (
+            frozenset(protected_tags) if protected_tags is not None
+            else policy.protected_tags_from_env()
+        )
         # Rows this version cannot model, as raw `sqlite3.Row`s. The JSONL
         # library keeps raw BYTES here for the same reason: the point is to
         # carry the record through untouched, and anything parsed enough to
