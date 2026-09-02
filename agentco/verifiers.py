@@ -266,6 +266,7 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
             requires=plan["requires"],
             assigned_agent=plan["assigned_agent"],
             natural_key=plan["naturalKey"],
+            by_plane=True,
             # NO `verify=` here, ever. A gated vehicle needs a vehicle of its
             # own, and that one needs a third. See the module docstring.
             metadata={

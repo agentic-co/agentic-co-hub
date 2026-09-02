@@ -389,6 +389,7 @@ def test_a_vehicle_whose_parent_this_store_does_not_have_is_retired(queue):
     ghost = queue.create(
         "Verify: an item this store does not have",
         natural_key="verify:w-00000000:0",
+        by_plane=True,
         requires=[verifiers.VERIFY_CAPABILITY],
         metadata={verifiers.VEHICLE_MARKER: "w-00000000"},
     )
@@ -1206,6 +1207,7 @@ def test_a_router_that_loses_the_create_race_announces_nothing(queue, registry, 
     queue.create(
         "Verify: the other router got there first",
         natural_key=verifiers.vehicle_key(item),
+        by_plane=True,
         assigned_agent="dana",
         metadata={verifiers.VEHICLE_MARKER: item.id},
     )
@@ -1235,3 +1237,82 @@ def test_a_human_gate_is_answered_by_the_person_it_names_and_nobody_else(queue):
     assert queue.get(item.id).status is WorkStatus.AWAITING_VERIFY
 
     assert queue.attest(item.id, attestation(check), named).status is WorkStatus.DONE
+
+
+# --------------------------------------------------------------------------- #
+# FIX-L3.16 — the executor cannot suppress verification of its own gate
+# --------------------------------------------------------------------------- #
+
+
+def test_a_caller_cannot_file_a_fake_vehicle(queue):
+    """Variant (a) of the third review's finding. Any actor files an item carrying
+    `metadata.verifies` and the `verify:` key; routing sees the marker, believes
+    the gate is routed, files nothing, emits nothing — and the clock passes the
+    gate with no verifier ever offered it. Reserved at the write boundary."""
+    item = park(queue, gate=gate(on_timeout="pass"))
+    with pytest.raises(Refusal) as caught:
+        queue.create("decoy", metadata={"verifies": item.id})
+    assert caught.value.code == "metadata_reserved"
+    with pytest.raises(Refusal) as caught:
+        queue.create("decoy", natural_key=f"verify:{item.id}:0")
+    assert caught.value.code == "natural_key_reserved"
+
+    # And so the real vehicle is filed and a real verifier sees it.
+    assert len(verifiers.route_open_gates(queue)["created"]) == 1
+    assert [i.title for i in queue.ready(agent="reviewer")] == [f"Verify: {item.title}"]
+
+
+def test_every_plane_owned_key_is_reserved(queue):
+    """One test per key would be a list nobody keeps in step with the constant, so
+    the constant is the list: each name in it must be refused from a caller and
+    accepted from the plane."""
+    from agentco.work import RESERVED_METADATA_KEYS
+
+    for key in sorted(RESERVED_METADATA_KEYS):
+        with pytest.raises(Refusal):
+            queue.create("forged", metadata={key: "x"})
+    queue.create("the plane's own", metadata={"claims": []}, by_plane=True)
+
+
+def test_a_vehicle_cannot_be_closed_by_reporting_it(queue):
+    """Variant (b). Capabilities are self-asserted, so the executor's own node
+    declares `verify`, claims the real vehicle and reports it done without
+    attesting anything. The vehicle was ungated, so that used to succeed;
+    routing then saw a closed vehicle for the current attempt and filed no other,
+    and the clock passed the gate. A vehicle is closed by the verdict landing on
+    its item, never by a report on itself."""
+    item = park(queue, gate=gate(on_timeout="pass"))
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    claimed = queue.claim(vehicle.id, "executor", capabilities=["verify"])
+
+    with pytest.raises(Refusal) as caught:
+        queue.report_result(vehicle.id, claimed.lease_attempt, WorkStatus.DONE,
+                            result="nothing to see", submitted_by="executor")
+    assert "answers nothing" in caught.value.message
+    assert queue.get(vehicle.id).status is WorkStatus.IN_PROGRESS
+
+    # The clock then finds the gate still routed and unanswered — and the item
+    # still parked, because closing the vehicle was the only way past.
+    verifiers.sweep_park_clocks(queue, now=later())
+    assert queue.get(item.id).status is WorkStatus.DONE, "the clock still resolves it..."
+    assert queue.get(item.id).metadata["verify_resolution"]["by"] == "park-clock"
+    # ...which is the declared default doing its job, with the record saying so.
+    # What the executor could not do is make it look like a verifier was offered
+    # the work and declined: the vehicle stayed open the whole time.
+    assert queue.get(vehicle.id).status is WorkStatus.IN_PROGRESS
+
+
+def test_a_vehicle_still_retires_once_its_item_has_a_verdict(queue):
+    """The legitimate path is unchanged: verdict on the item, then routing
+    retires the vehicle. Only the shortcut is refused."""
+    item = park(queue)
+    verifiers.route_open_gates(queue)
+    [vehicle] = vehicles(queue)
+    queue.claim(vehicle.id, "reviewer", capabilities=["verify"])
+    queue.attest(item.id, attestation(JUDGED["check"]), "reviewer", capabilities=["verify"])
+    # The reviewer still holds the lease, so routing refuses to retire under them;
+    # once the lease lapses or is released, it retires.
+    queue.report_result(vehicle.id, queue.get(vehicle.id).lease_attempt, WorkStatus.DONE,
+                        result="answered", submitted_by="reviewer")
+    assert queue.get(vehicle.id).status is WorkStatus.DONE
