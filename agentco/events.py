@@ -37,7 +37,21 @@ KINDS = (
     "ScopeConflict",
     "SnapshotTaken",
     "DivergenceObserved",
+    # Work-queue events, added because their absence was the real reason a
+    # parked human gate reached nobody. The feed is how everything else here
+    # reaches a harness — the tier-1 splice, the session hook, the digest sender
+    # all read it — and a work item entering `awaiting_verify` emitted nothing
+    # at all, so no tier could surface it even in principle. The missing piece
+    # was the substrate, not the choice of channel.
+    "WorkParked",
+    "GateEscalated",
 )
+
+# Events the PLANE observes rather than an actor performing. A reserved name
+# rather than borrowing whoever happened to run the pass: attributing a
+# routing observation to a person would put their name on a row they did not
+# cause, and adoption metrics count actors.
+PLANE_ACTOR = "agentco"
 
 
 def now_iso() -> str:
