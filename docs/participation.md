@@ -197,29 +197,46 @@ from the signature, so it cannot be self-asserted.
 status — so nothing about the parked item is claimable. `agentco.verifiers`
 closes that with a **vehicle**: a routing pass gives every parked judged gate an
 ordinary work item carrying `requires: ["verify"]`, which a declaring node then
-finds through the queue it already polls. The verdict still travels through
-`attest` against the original item; the vehicle is how the work is found, never
-where the outcome lives.
+finds through the queue it already polls, and gives a parked human gate one
+assigned to whoever the gate names in its `verifier` field. A gate must name
+someone there to be `human` at all — `validate_gate` refuses a `human` gate
+declared without one, and refuses a `deterministic` gate that names one, since
+its executor is its own attester. The verdict still travels through `attest`
+against the original item; the vehicle is how the work is found, never where
+the outcome lives.
 
 Routing is a pass rather than a consequence of reporting, so **something has to
 run it** — the same way the outbox needs a drainer. A vehicle nobody routed is a
 gate nobody can see.
 
-**What is still absent, and matters most for a human gate.** A human gate gets a
-vehicle assigned to the named person, and nothing tells that person it exists.
-The change feed carries no work-queue events at all — its kinds are scope
-claims, releases, conflicts, snapshots and divergence — so no tier can surface a
-parked gate on its own. The missing piece is the substrate, not just the choice
-of channel, and the channel itself is an open decision. Until both land, a human
-gate is a queue entry somebody has to go and look for.
+**The park clock is enforced.** Every gate carries `max_park_seconds` and an
+`on_timeout` default, and `agentco verifiers --sweep` resolves every gate whose
+clock has run out, by that default — `pass`/`fail` close the item and record
+that the answer was a default, never a verdict; `escalate` hands it to the
+named party and keeps it parked. Nothing runs the sweep on its own, the same
+way the outbox needs a scheduled drainer — an org that never schedules
+`agentco verifiers --sweep` gets the old behaviour, a gate that waits forever.
 
-The park clock is likewise declared and not yet enforced: every gate carries
-`max_park_seconds` and an `on_timeout` default, they are validated and stored,
-and nothing acts on the deadline. So do not rely on a gate resolving itself.
+**The change feed carries `WorkParked` and `GateEscalated`.** A routing pass
+(`agentco verifiers --route`) emits one the first time it notices a parked
+gate, so a tier reading `events()` can see one without polling the queue for
+it — that is the substrate a human-gate notification needed, and it exists now.
 
-None of that makes gates useless today. A `deterministic` gate — the completing
-process re-runs its own check and reports an `attestation` in the same
-`work_report` call — works exactly as documented, on all three transports.
+**What is still absent, and matters most for a human gate.** A human gate gets
+a vehicle assigned to the named person, and by default nothing *pushes* it to
+them — reading the feed, or polling for `requires: verify`, still means going
+looking. [`docs/writeback.md`](writeback.md) closes one instance of that: when
+the parked item was mirrored from an external record, a configured write-back
+pass posts a notice back to that record, which is where its owner is actually
+looking. It is opt-in, off by default, and only for work with a known origin —
+an item filed locally has nowhere to be pushed to and stays a queue entry
+somebody has to go and look for. `agentco digest` surfaces a gate stuck past
+quarantine on a periodic cadence, as the honest floor under both.
+
+None of that makes gates useless when nothing above is configured. A
+`deterministic` gate — the completing process re-runs its own check and
+reports an `attestation` in the same `work_report` call — works exactly as
+documented, on all three transports, with none of this running.
 
 ## Verify it worked
 
@@ -252,8 +269,15 @@ trip as the claim that created it.
 
 **It never becomes your system of record.** It holds scope claims, pointers,
 a work queue, and versioned procedures — nothing that competes with a fact
-Jira, Azure DevOps, or Linear already owns. There is no path, planned or
-otherwise, for it to write back into one of those systems.
+Jira, Azure DevOps, or Linear already owns. There is exactly one path that
+reaches back the other way, and it is named rather than buried: an **opt-in
+write-back** ([`docs/writeback.md`](writeback.md)) that can tell the record a
+piece of work came from that its human gate is waiting. It is off until
+configured, it carries a notice and nothing that could change a state or close
+a ticket, and the built-in path POSTs to a URL you control — so the code that
+actually touches Jira or Azure DevOps is yours, holding your credential.
+Absent that configuration the sentence above holds without qualification,
+which is the only way a promise like it is worth making.
 
 **If it disappears, every tool falls back to exactly what it does today.**
 Nothing here is in the critical path of getting work done — a harness that
