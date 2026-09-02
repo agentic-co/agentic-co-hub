@@ -108,7 +108,7 @@ Every Part-I property has a concrete home:
 | Contract | Bead mechanics |
 |---|---|
 | Versioned | `metadata.sop` pins `(asop_id, version)`; the plane's `outcomes_by_version` aggregates results per version |
-| Verified | `metadata.verify` — validated at the **write boundary** (malformed gates are rejected, never silently no-op'd); enforced at the store's DONE flip, so no executor path can self-grade |
+| Verified | `metadata.verify` — validated at the **write boundary** (malformed gates are rejected, never silently no-op'd); enforced at the store's DONE flip, so no executor path can self-grade. On this repository's coordination plane a `human`-class gate must additionally name who answers it — the `verifier` field (`agentco/gates.py`) — because without one the routed work item has no assignee and requires no capability, and the queue offers it to the executor: the one party a human gate exists to exclude. A `deterministic` gate must not name one; its executor is its own attester. |
 | Self-revising | goal-close auto-writes a plan-vs-actual review; fix-beads carry `metadata.adjudication: good\|bad`; good feeds template revision, bad feeds RCA |
 
 ### The lifecycle around the bead (PPEV)

@@ -26,16 +26,17 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | Versioned SOPs, `outcomes_by_version`, drift | built | — |
 | `verify` payload, gate statuses, attestation | built — on all three transports | L2/L3 |
 | **Outbox + drainer + receipts** | built ([`docs/outbox.md`](outbox.md)) | **L1** |
-| **`verify` capability, judged routing, park clocks** | **absent** | **L3** |
+| `verify` capability, judged routing, park clocks, quarantine digest | built (`agentco verifiers --route --sweep --quarantine`) | L3 |
+| Write-back to an external system of record | built, opt-in ([`docs/writeback.md`](writeback.md)) | — |
 | **Adjudication tagging, plan-vs-actual, revision proposals** | **absent** | — |
 | **`sop_revise` / `sop_activate` on MCP** | HTTP only; reserved in the outbox push set | L2 |
 | Conformance suite | absent | all |
 
-Two of those absences are worth naming plainly. **Nothing in `agentco/`
-implements gates at all** — Parts II and III of the ASOP spec describe a runtime
-that lives elsewhere. And **shared learning, the headline claim, has no write
-path on the primary surface**: a harness on MCP can read a procedure but cannot
-contribute a lesson to it.
+One of those absences is worth naming plainly. **Shared learning, the headline
+claim, still has no write path on the primary surface**: a harness on MCP can
+read a procedure but cannot contribute a lesson to it. That is Phase 4, and it
+and Phase 5 (conformance) are what remains of the phases below — Phases 0
+through 3 are built.
 
 ---
 
