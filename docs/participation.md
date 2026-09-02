@@ -11,7 +11,7 @@ MCP, all against the same registry.
 | Level | What it gets you | What it costs |
 |---|---|---|
 | **L0 observer** | Reads live scope claims and the how-to-publish instructions, spliced into a file the harness already reads. | Zero — someone else runs the splice. You do nothing. |
-| **L1 publisher** | Can claim a scope, release one, record a snapshot, report work, attest a gate — write, not just read. | Zero on the agent side. Append a line to a file; someone schedules a drainer. |
+| **L1 publisher** | Can claim a scope, release one, record a snapshot, and attest a gate (as the named verifier or a declaring `verify` node) — write, not just read. Reporting work through this path succeeds only when the same signed identity already holds the lease — see the L1 section below. | Zero on the agent side. Append a line to a file; someone schedules a drainer. |
 | **L2 worker** | The full ten-tool surface: pull queued work, report outcomes, read the change feed, read SOPs. | One line in `.mcp.json`, or a signed HTTP client. |
 | **L3 verifier** | Intended to answer judged/human gates that an executor cannot grade itself. | Deliberate setup — and read the caveat in that section before you build anything around it. |
 
@@ -66,6 +66,19 @@ deliberately not in that set: pushing a scope claim or a report is a statement
 about work you're already doing, and filing work into somebody else's queue is
 a different act — it has a consequence for a person who didn't ask for it, and
 the cheapest write path on the plane only ever carries the cheap acts.
+
+`work_report` is narrower than the other four, and it matters enough to say
+plainly here: the drainer signs every pushed line with one machine identity
+(`AGENTCO_ACTOR`), and a report is refused unless that identity is the lease
+holder — "no lease, no report" ([`agentco/work.py`](../agentco/work.py)). The
+outbox carries no `work_pull` verb, so a harness that never leaves L1 has no
+way to acquire that lease through this path. In practice: L1 alone can claim
+scope, snapshot, and attest a gate it was routed to answer; it cannot
+successfully report work done, because reporting is downstream of taking the
+work, and taking work is an L2 act. The combination works fine when a harness
+pulls the item over L2 (MCP or HTTP) under the same machine identity the
+drainer signs with, then reports through the outbox — the lease and the
+report line up because it's the same signed actor either way.
 
 The full spec — receipts, quarantine, idempotency, deployment as a launchd job
 or a systemd timer — is [`docs/outbox.md`](outbox.md). Two worked examples
