@@ -110,10 +110,11 @@ SOP_COLUMNS: tuple[str, ...] = (
     "tags",
     "author",
     "author_kind",
+    "proposals",
     "superseded_by",
     "created_at",
 )
-_SOP_JSON_COLUMNS = frozenset({"common_mistakes", "tags"})
+_SOP_JSON_COLUMNS = frozenset({"common_mistakes", "tags", "proposals"})
 
 
 def _check_columns(dataclass_type, columns: Sequence[str]) -> None:

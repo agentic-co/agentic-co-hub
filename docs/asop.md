@@ -65,7 +65,11 @@ carries the adjudicator's identity and pointed evidence.
 
 A plan-vs-actual review is generated **at the moment of completion** (while the context
 still exists), and revision proposals accumulate against the template. The loop closes
-on a cadence — captured per-run, revised deliberately, never silently.
+on a cadence — captured per-run, revised deliberately, never silently. On this plane
+the cadence is a pass (`agentco lessons --propose`) that drafts the next version from
+the adjudications nobody has proposed yet: good ones into the procedure's `proposals`,
+bad ones into its `common_mistakes`. A draft, never an activation, and an agent
+revision under the policy below.
 
 Revision is itself policed when the reviser is an agent. Three rules, generic to
 every registry and computable because versions are immutable and each records who

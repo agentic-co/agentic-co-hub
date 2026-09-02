@@ -89,9 +89,17 @@ LINK_FIELD = "next_sop"
 EXECUTOR_FIELD = "executor"
 TAGS_FIELD = "tags"
 EXECUTORS = (policy.HUMAN, policy.AGENT)
+# Revision proposals accumulating against the template: one line per `good`
+# adjudication — the procedure was wrong here, and this is the evidence. The
+# plane cannot author the fix; it puts the proposal in front of whoever revises
+# next, on the draft they start from. A human dismissing one (revising it away)
+# is final for agents, by rule 3 of the policy.
+PROPOSALS_FIELD = "proposals"
 # What rule 3 of the policy compares, version to version.
 POLICY_SCALAR_FIELDS = ("title", *TEXT_FIELDS, LINK_FIELD, EXECUTOR_FIELD)
-POLICY_LIST_FIELDS = ("common_mistakes", TAGS_FIELD)
+POLICY_LIST_FIELDS = ("common_mistakes", TAGS_FIELD, PROPOSALS_FIELD)
+#: Written into `metadata.adjudication` by `propose()`: which draft consumed it.
+PROPOSED_KEY = "proposed_in"
 
 
 class SopError(Exception):
@@ -171,6 +179,9 @@ class SOP:
     # is computed from `author_kind`, and only from versions marked `human`.
     author: Optional[str] = None
     author_kind: Optional[str] = None
+    # Open revision proposals, one per good adjudication, carried forward until
+    # a reviser addresses or dismisses them. See `SopLibrary.propose`.
+    proposals: list[str] = field(default_factory=list)
 
     # Set when a later version replaces this one. Kept rather than deleted:
     # instances pinned to this version must stay resolvable forever, or their
@@ -204,7 +215,7 @@ def validate_fields(payload: dict) -> dict:
     believes they wrote one thing and the store holds another, and the
     difference surfaces at handoff time to whoever is least able to notice it.
     """
-    allowed = set(TEXT_FIELDS) | {"common_mistakes", LINK_FIELD, EXECUTOR_FIELD, TAGS_FIELD}
+    allowed = set(TEXT_FIELDS) | {"common_mistakes", LINK_FIELD, EXECUTOR_FIELD, TAGS_FIELD, PROPOSALS_FIELD}
     unknown = set(payload) - allowed
     if unknown:
         raise SopContractError(
@@ -294,7 +305,23 @@ def validate_fields(payload: dict) -> dict:
                 cleaned_tags.append(folded)
         out[TAGS_FIELD] = cleaned_tags
 
-    if not {k for k in out if k != TAGS_FIELD and k != EXECUTOR_FIELD}:
+    if PROPOSALS_FIELD in payload and payload[PROPOSALS_FIELD] is not None:
+        proposals = payload[PROPOSALS_FIELD]
+        if isinstance(proposals, (str, dict)) or not isinstance(proposals, (list, tuple)):
+            raise SopContractError(
+                f"'{PROPOSALS_FIELD}' must be a LIST of strings, got {type(proposals).__name__}."
+            )
+        cleaned_proposals: list[str] = []
+        for i, proposal in enumerate(proposals):
+            if not isinstance(proposal, str) or not proposal.strip():
+                raise SopContractError(
+                    f"'{PROPOSALS_FIELD}'[{i}] must be a non-empty string, got {proposal!r}"
+                )
+            if proposal.strip() not in cleaned_proposals:
+                cleaned_proposals.append(proposal.strip())
+        out[PROPOSALS_FIELD] = cleaned_proposals
+
+    if not {k for k in out if k not in (TAGS_FIELD, EXECUTOR_FIELD, PROPOSALS_FIELD)}:
         raise SopContractError(
             "an SOP with no fields set reads as delegation-ready and hands its "
             "executor nothing. Fill at least one field."
@@ -479,6 +506,8 @@ class SopLibrary:
                 carried[EXECUTOR_FIELD] = latest.executor
             if latest.tags:
                 carried[TAGS_FIELD] = list(latest.tags)
+            if latest.proposals:
+                carried[PROPOSALS_FIELD] = list(latest.proposals)
             carried.update({k: v for k, v in body.items()})
             validated = validate_fields({k: v for k, v in carried.items() if v is not None})
 
@@ -726,6 +755,133 @@ class SopLibrary:
                if getattr(sop, k)},
         }
         return queue.create(title or sop.title, metadata=metadata, by_plane=True, **work_kwargs)
+
+    # -- self-revision ---------------------------------------------------
+
+    def proposals(self, sop_id: str, queue: Queue) -> dict:
+        """Revision proposals accumulated against this template, from adjudications.
+
+        Computed from the instances, never stored separately: every adjudicated
+        instance pinned to this procedure is either a `good` divergence — the
+        procedure was wrong, and the next version should account for it — or a
+        `bad` one — the execution took a shortcut, and root-cause owns it. Each
+        entry says whether a draft has already consumed it (`proposedIn`), so
+        the same adjudication is never proposed twice and a reader can see what
+        is still pending.
+        """
+        history = self.history(sop_id)
+        if not history:
+            raise SopError(f"no SOP {sop_id!r}")
+        active = self.get(sop_id)
+        revisions: list[dict] = []
+        root_cause: list[dict] = []
+        for item in queue.list():
+            meta = item.metadata or {}
+            ref = meta.get("sop_ref") or {}
+            adjudication = meta.get("adjudication")
+            if ref.get("sop_id") != sop_id or not isinstance(adjudication, dict):
+                continue
+            entry = {
+                "itemId": item.id,
+                "title": item.title,
+                "pinnedVersion": ref.get("version"),
+                "verdict": adjudication.get("verdict"),
+                "by": adjudication.get("by"),
+                "evidence": adjudication.get("evidence"),
+                "at": adjudication.get("at"),
+                "proposedIn": adjudication.get(PROPOSED_KEY),
+                "flags": (meta.get("plan_vs_actual") or {}).get("flags"),
+            }
+            (revisions if entry["verdict"] == "good" else root_cause).append(entry)
+        revisions.sort(key=lambda e: e["at"] or "")
+        root_cause.sort(key=lambda e: e["at"] or "")
+        latest = history[-1]
+        return {
+            "sopId": sop_id,
+            "activeVersion": active.version if active else None,
+            "latestVersion": latest.version,
+            "latestStatus": latest.status.value,
+            "openProposals": list(latest.proposals),
+            "revisions": revisions,
+            "rootCause": root_cause,
+            "pending": sum(1 for e in revisions + root_cause if e["proposedIn"] is None),
+        }
+
+    def propose(
+        self,
+        sop_id: str,
+        queue: Queue,
+        *,
+        author: Optional[str] = None,
+        author_kind: Optional[str] = None,
+    ) -> Optional[SOP]:
+        """Draft the next version from the adjudications nobody has proposed yet.
+
+        The loop closing, deliberately and never silently: a DRAFT, authored by
+        whoever ran the pass (an agent unless the operator declared otherwise),
+        so the revision policy applies in full — a protected step is refused, a
+        lesson a human removed does not come back, and nothing here activates.
+        The existing versions are not touched; an instance pinned to v1 reads
+        the same v1 afterwards.
+
+        `good` adjudications become entries in `proposals`: the procedure was
+        wrong here, and this is the evidence the next author reads. `bad` ones
+        become `common_mistakes` — the lesson channel the eval harness measures
+        — because a shortcut one executor took is a failure mode the next one is
+        warned about; root-cause keeps the pointer through `proposals()`.
+
+        The lesson channel is capped (`MAX_COMMON_MISTAKES`). When the pending
+        lessons would overflow it, this refuses rather than dropping one:
+        which mistake stops biting is a human's call, and an agent making it
+        would be removing what a human added — the policy would refuse that
+        too, but this says why first.
+
+        Returns None when nothing is pending, so a scheduled pass that finds
+        nothing to do is a quiet run, not an error.
+        """
+        view = self.proposals(sop_id, queue)
+        pending_good = [e for e in view["revisions"] if e["proposedIn"] is None]
+        pending_bad = [e for e in view["rootCause"] if e["proposedIn"] is None]
+        if not pending_good and not pending_bad:
+            return None
+        latest = self.history(sop_id)[-1]
+
+        body: dict = {}
+        if pending_bad:
+            lessons = list(latest.common_mistakes)
+            for entry in pending_bad:
+                lesson = f"{entry['evidence']} (adjudicated bad on {entry['itemId']} by {entry['by']})"
+                if lesson not in lessons:
+                    lessons.append(lesson)
+            if len(lessons) > MAX_COMMON_MISTAKES:
+                raise SopError(
+                    f"cannot draft {sop_id!r}: {len(pending_bad)} pending lesson(s) would "
+                    f"put common_mistakes at {len(lessons)}; the cap is "
+                    f"{MAX_COMMON_MISTAKES}. The cap is the discipline — which mistake "
+                    f"has stopped biting is a human's call. Prune the list in a human "
+                    f"revision, then run the pass again."
+                )
+            body["common_mistakes"] = lessons
+        if pending_good:
+            proposals = list(latest.proposals)
+            for entry in pending_good:
+                proposal = (
+                    f"{entry['evidence']} (adjudicated good on {entry['itemId']} by "
+                    f"{entry['by']}; v{entry['pinnedVersion']} was wrong here)"
+                )
+                if proposal not in proposals:
+                    proposals.append(proposal)
+            body[PROPOSALS_FIELD] = proposals
+
+        draft = self.revise(sop_id, author=author, author_kind=author_kind, **body)
+        for entry in pending_good + pending_bad:
+            item = queue.get(entry["itemId"])
+            if item is None:
+                continue
+            record = dict((item.metadata or {}).get("adjudication") or {})
+            record[PROPOSED_KEY] = draft.version
+            queue.annotate(item.id, {"adjudication": record})
+        return draft
 
     # -- evaluation ------------------------------------------------------
 
