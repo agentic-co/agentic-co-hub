@@ -55,6 +55,8 @@ from agentco import events
 WRITEBACK_URL_ENV_VAR = "AGENTCO_WRITEBACK_URL"
 CURSOR_ENV_VAR = "AGENTCO_WRITEBACK_CURSOR"
 DEFAULT_CURSOR_FILE = "~/.agentco/writeback.cursor"
+DEADLETTER_ENV_VAR = "AGENTCO_WRITEBACK_DEADLETTER"
+DEFAULT_DEADLETTER_FILE = "~/.agentco/writeback.deadletter.jsonl"
 
 # The only kinds that travel. Adding one here is the decision to notify about
 # something new, and it should look like a decision in a diff.
@@ -159,6 +161,41 @@ def write_cursor(cursor: str) -> None:
     path.write_text(cursor, encoding="utf-8")
 
 
+def _is_permanent_failure(exc: BaseException) -> bool:
+    """A 4xx is the caller's fault forever, not the network's fault today.
+
+    The ticket was deleted, the URL was never valid, the token doesn't have
+    access — retrying the same POST does not fix any of those. `status` is
+    only ever set by `WritebackFailed`; any other exception has no verdict to
+    give and is treated as transient, which is the safer default when we
+    cannot tell.
+    """
+    status = getattr(exc, "status", None)
+    return isinstance(status, int) and 400 <= status < 500
+
+
+def _deadletter_path() -> Path:
+    return Path(os.environ.get(DEADLETTER_ENV_VAR) or DEFAULT_DEADLETTER_FILE).expanduser()
+
+
+def _write_deadletter(notice: dict, exc: BaseException) -> None:
+    """Record a notice this pass gave up on, rather than retry it forever.
+
+    Appended, never overwritten — the cursor already moved past this event,
+    so the file is the only remaining record that the notice was dropped
+    rather than delivered.
+    """
+    path = _deadletter_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "notice": notice,
+        "status": getattr(exc, "status", None),
+        "detail": str(exc),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def run(
     conn,
     *,
@@ -177,6 +214,19 @@ def run(
     The cursor advances only over events that were actually handled, so a
     delivery failure is retried on the next run instead of being skipped by a
     watermark that moved regardless.
+
+    A writer exception splits two ways. A **permanent** failure (4xx — the
+    ticket was deleted, the URL never existed) cannot be fixed by sending the
+    same POST again, so that one notice is dead-lettered (`_write_deadletter`)
+    and the pass moves on to the events after it. A **transient** failure
+    (5xx, unreachable, or anything else we cannot classify) stops the pass —
+    but the cursor is persisted up to the last event actually handled BEFORE
+    the exception propagates, so the next run retries the poison event
+    instead of everything from the beginning. Persisting before re-raising is
+    the fix: previously the only write happened after the whole loop, so an
+    exception on the second of three events left the cursor at `None`
+    forever and re-sent the first notice on every subsequent run, without
+    ever reaching the third.
     """
     configured = via in _WRITERS or writeback_url() is not None
     if not configured:
@@ -196,6 +246,7 @@ def run(
 
     sent: list[dict] = []
     skipped: list[str] = []
+    deadlettered: list[dict] = []
     cursor = start
     for event in page["events"]:
         if event["kind"] not in NOTIFIED_KINDS:
@@ -209,7 +260,24 @@ def run(
             cursor = events.encode_cursor(event["seq"])
             continue
         if not dry_run:
-            writer(notice)
+            try:
+                writer(notice)
+            except Exception as exc:
+                if _is_permanent_failure(exc):
+                    _write_deadletter(notice, exc)
+                    deadlettered.append(notice)
+                    # Per EVENT, from its seq — see the comment below. A
+                    # permanent failure is handled, just not delivered, so it
+                    # advances the cursor exactly like a sent notice does.
+                    cursor = events.encode_cursor(event["seq"])
+                    continue
+                # Transient: persist everything handled so far, then let the
+                # caller see the failure. Doing this here, not after the
+                # loop, is what makes the retry start at THIS event instead
+                # of at the beginning.
+                if cursor and cursor != start:
+                    write_cursor(cursor)
+                raise
         sent.append(notice)
         # Per EVENT, from its seq — `events.read` returns a page-level
         # `nextCursor` and no per-row one, so reaching for `event["cursor"]`
@@ -226,6 +294,7 @@ def run(
         "state": "dry-run" if dry_run else "sent",
         "sent": len(sent),
         "skipped": len(skipped),
+        "deadlettered": len(deadlettered),
         "notices": sent,
         "cursor": cursor,
         "via": via if via in _WRITERS else "webhook",

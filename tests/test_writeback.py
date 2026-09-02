@@ -15,6 +15,8 @@ their credential.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agentco import db, events, writeback
@@ -24,6 +26,7 @@ from agentco import db, events, writeback
 def conn(tmp_path, monkeypatch):
     monkeypatch.delenv(writeback.WRITEBACK_URL_ENV_VAR, raising=False)
     monkeypatch.setenv(writeback.CURSOR_ENV_VAR, str(tmp_path / "writeback.cursor"))
+    monkeypatch.setenv(writeback.DEADLETTER_ENV_VAR, str(tmp_path / "writeback.deadletter.jsonl"))
     writeback._WRITERS.clear()
     return db.connect(tmp_path / "registry.sqlite3")
 
@@ -194,3 +197,89 @@ def test_a_dry_run_delivers_nothing_and_leaves_the_cursor_alone(conn):
     assert result["state"] == "dry-run" and result["sent"] == 1
     assert seen == []
     assert writeback.read_cursor() is None
+
+
+# --------------------------------------------------------------------------- #
+# FIX-L3.7 — a poison event must not block the pass, or erase the cursor
+# --------------------------------------------------------------------------- #
+
+
+def test_a_permanent_failure_is_dead_lettered_and_the_pass_continues(conn):
+    """Reproduced against the reviewer's exact shape: three `WorkParked`
+    events, the writer failing on the second with a permanent (4xx) status —
+    a deleted ticket, the paradigm case. Before this fix `run` advanced its
+    cursor only after the whole loop finished, and a writer exception
+    propagated before that write ever happened, so three successive runs each
+    delivered `['acme/1', 'acme/1', 'acme/1']`: the first notice forever,
+    the cursor never moving off `None`, and nothing after the poison event
+    ever sent.
+
+    A 4xx is the caller's fault forever, not the network's fault today — the
+    ticket is not coming back by retrying the same POST — so it is recorded
+    and skipped rather than retried indefinitely.
+    """
+    parked(conn, source_id="acme/1")
+    parked(conn, source_id="acme/2")
+    parked(conn, source_id="acme/3")
+
+    calls: list[str] = []
+
+    def flaky(notice):
+        calls.append(notice["sourceId"])
+        if notice["sourceId"] == "acme/2":
+            raise writeback.WritebackFailed(400, "ticket acme/2 was deleted")
+
+    writeback.register_writer("flaky", flaky)
+    result = writeback.run(conn, via="flaky")
+
+    assert calls == ["acme/1", "acme/2", "acme/3"]
+    assert [n["sourceId"] for n in result["notices"]] == ["acme/1", "acme/3"]
+    assert result["sent"] == 2
+    assert result["deadlettered"] == 1
+
+    deadletter_path = writeback._deadletter_path()
+    lines = [json.loads(line) for line in deadletter_path.read_text("utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["notice"]["sourceId"] == "acme/2"
+    assert lines[0]["status"] == 400
+
+    # Idempotent: the whole pass, including the dead-lettered event, is not
+    # replayed just because it happened to fail once.
+    calls.clear()
+    assert writeback.run(conn, via="flaky")["sent"] == 0
+    assert calls == []
+
+
+def test_a_transient_failure_persists_what_already_landed_then_stops(conn):
+    """Pins the ordering `write_cursor` depends on, which is exactly the
+    ordering the reviewer's report found broken: the cursor may only advance
+    up to the LAST event actually handled before a transient failure, never
+    past the event that failed.
+
+    A mutant that advanced `cursor` to the current event's seq BEFORE calling
+    the writer, instead of after it succeeds, would have the except branch
+    persist the poison event's own cursor rather than the one before it — the
+    retry below would then never re-attempt `acme/2`. This test dies against
+    that mutant because the second run would deliver nothing.
+    """
+    parked(conn, source_id="acme/1")
+    parked(conn, source_id="acme/2")
+
+    calls: list[str] = []
+
+    def flaky(notice):
+        calls.append(notice["sourceId"])
+        if notice["sourceId"] == "acme/2":
+            raise writeback.WritebackFailed(503, "the endpoint is down")
+
+    writeback.register_writer("flaky", flaky)
+    with pytest.raises(writeback.WritebackFailed):
+        writeback.run(conn, via="flaky")
+    assert calls == ["acme/1", "acme/2"]
+    assert writeback.read_cursor() is not None, "acme/1 was handled and must not be lost"
+
+    seen = collector()
+    assert writeback.run(conn, via="test")["sent"] == 1
+    assert [n["sourceId"] for n in seen] == ["acme/2"], (
+        "a retry must redeliver only the event that actually failed"
+    )
