@@ -31,7 +31,8 @@ edge** — the parts that let a harness the plane has never met do more than rea
 | Write-back to an external system of record | built, opt-in ([`docs/writeback.md`](writeback.md)) | — |
 | **Revision policy** — three rules an agent revision obeys, on `revise` and `activate` | built ([`agentco/policy.py`](../agentco/policy.py)) | — |
 | **Adjudication tagging** — `good`/`bad`, adjudicator ≠ executor | built (`Queue.adjudicate`) | — |
-| **Plan-vs-actual, revision proposals** | **absent** | — |
+| **Plan-vs-actual** — plan under the pin, review at completion | built (`work.plan_vs_actual`) | — |
+| **Revision proposals** | **absent** | — |
 | **`sop_revise` / `sop_activate` on MCP** | HTTP only; reserved in the outbox push set | L2 |
 | Conformance suite | absent | all |
 
@@ -199,8 +200,19 @@ systems — needs the rails before it needs the loop.
   MCP and the outbox — which is how it reaches the primary surface without a
   thirteenth tool; and the `adjudicate` outbox verb. Refusals write nothing;
   a rider the executor offers refuses the whole `attest` call.
-- **Plan-vs-actual review** generated at the moment of completion, while the
-  context still exists.
+- **Plan-vs-actual review** — built. `instantiate` copies the procedure's own
+  words (`title`, `definition_of_done`, `validation`, `entry_check`) under the
+  pin as `metadata.sop_plan`, so the review reads what the executor was handed
+  even after the procedure moves on. `report_result` on an item that pins a
+  procedure writes `metadata.plan_vs_actual` at the moment of completion, while
+  the lease still names the executor: plan beside actual — reported status,
+  landed status, result, attempt, attestation, filed and reported times — plus
+  computed flags (`gate_disagreed`, `retried`, `failed`, `awaiting_verdict`)
+  that say where to look first. A verifier's later verdict lands beside the
+  executor's claim, never over it. Nothing is judged: the plane records, the
+  adjudicator concludes, and this is what they read. Both keys are reserved at
+  create; `instantiate` holds the caller's own metadata to that rule before it
+  files. An item that pins no procedure gets no review.
 - **Revision proposals** accumulating against the template — good adjudications
   feed the next version, bad ones feed root-cause. Proposals pass through the
   same policy as any other agent revision.
