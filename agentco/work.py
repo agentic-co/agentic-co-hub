@@ -1184,9 +1184,17 @@ class Queue:
             # evidence of the check. It is moved rather than dropped — the clock
             # firing happened, and how long this waited before it got a verdict
             # is the whole history of the gate.
-            superseded = metadata.pop(RESOLUTION_KEY, None)
-            if superseded is not None:
-                metadata[HISTORY_KEY] = [*(metadata.get(HISTORY_KEY) or []), superseded]
+            # The same goes for the quarantine and escalation records: each says
+            # "nobody had answered as of this moment", and a verdict makes that
+            # history. Left in place, the digest went on listing an ANSWERED
+            # gate as abandoned, with an age that kept growing — a digest lying.
+            for key in (RESOLUTION_KEY, "verify_quarantined", "verify_escalated"):
+                superseded = metadata.pop(key, None)
+                if superseded is not None:
+                    metadata[HISTORY_KEY] = [
+                        *(metadata.get(HISTORY_KEY) or []),
+                        {"kind": key, **superseded} if isinstance(superseded, dict) else superseded,
+                    ]
             if gates.attestation_passes(record):
                 metadata.pop("verify_retry", None)
                 return {

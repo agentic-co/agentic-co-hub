@@ -1452,3 +1452,21 @@ def test_routing_is_idempotent_by_inspection_not_by_suppressed_duplicates(queue,
     result = verifiers.route_open_gates(queue)
     assert result["created"] == []
     assert "DUPLICATE-SUPPRESSED" not in capsys.readouterr().err
+
+
+def test_an_answered_gate_leaves_the_stuck_digest(queue):
+    """The confirmation pass's one new finding. `attest` moved the clock's record
+    to history and left the quarantine record in place, so the digest went on
+    listing an answered gate as abandoned — with an "unanswered" age that kept
+    growing. A quarantine record is a statement about a moment; a verdict makes
+    it history, and the digest reads only the present."""
+    item, much_later = abandoned(queue)
+    verifiers.sweep_quarantine(queue, now=much_later)
+    assert verifiers.quarantine_digest(queue, now=much_later)["count"] == 1
+
+    queue.attest(item.id, attestation(gate(kind="human", on_timeout="escalate")["check"]), "dana")
+    assert queue.get(item.id).status is WorkStatus.DONE
+    assert not verifiers.is_quarantined(queue.get(item.id))
+    assert verifiers.quarantine_digest(queue, now=much_later)["count"] == 0
+    kinds = {h.get("kind") for h in queue.get(item.id).metadata["verify_history"]}
+    assert {"verify_quarantined", "verify_escalated"} <= kinds, "moved, not dropped"
