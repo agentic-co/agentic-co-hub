@@ -22,6 +22,7 @@ edge** — the parts that let a harness the plane has never met do more than rea
 |---|---|---|
 | Scope claims, snapshots, change feed, work queue, leases | built, some proven | L2 |
 | Decomposition bounds — parent/child, review bound, depth, repair beside | built (`work.enforce_decomposition`) | — |
+| Verifier binding — `verify` counts only for `AGENTCO_VERIFIERS` once declared (DECIDE-L3 #1) | built (`policy.bind_capabilities`, in `claim` and `attest`) | L3 |
 | Tier-1 splice (`inject`), session hook | built | L0 |
 | MCP surface, HTTP surface, HMAC | built | L2 |
 | Versioned SOPs, `outcomes_by_version`, drift | built | — |

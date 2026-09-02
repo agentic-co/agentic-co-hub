@@ -271,8 +271,11 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 class SqlQueue(_SqlBacked, Queue):
     """The work queue on SQLite. Same protocol, different storage underneath."""
 
-    def __init__(self, path: Path | str = "agentco.sqlite3"):
+    def __init__(self, path: Path | str = "agentco.sqlite3", verifiers: Optional[Sequence[str]] = None):
         self._open(path)
+        self.verifiers: frozenset[str] = (
+            frozenset(verifiers) if verifiers is not None else policy.verifiers_from_env()
+        )
         # Empty for the same reason it is empty on the JSONL side after a
         # read: a row this version cannot MODEL is not a quarantined line.
         # `Queue._read_all` says so at length — such a row is dropped from the

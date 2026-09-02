@@ -46,6 +46,8 @@ from typing import Iterable, Optional, Sequence
 
 HUMANS_ENV_VAR = "AGENTCO_HUMANS"
 PROTECTED_TAGS_ENV_VAR = "AGENTCO_PROTECTED_TAGS"
+VERIFIERS_ENV_VAR = "AGENTCO_VERIFIERS"
+VERIFY_CAPABILITY = "verify"
 
 HUMAN = "human"
 AGENT = "agent"
@@ -242,3 +244,42 @@ def check_revision(
                     f"policy rule '{RULE_NO_UNDO}': a human added {element!r} to "
                     f"'{name}' and an agent may not remove it.",
                 )
+
+
+# --------------------------------------------------------------------------- #
+# verifier binding — who may hold the `verify` capability
+# --------------------------------------------------------------------------- #
+
+
+def verifiers_from_env(value: Optional[str] = None) -> frozenset[str]:
+    """The actors the operator declared as verifiers. Comma-separated, exact spelling.
+
+    Empty means UNDECLARED, and undeclared means the `verify` capability stays
+    self-asserted — routing hygiene, as it always was. That is the one place
+    this module fails open rather than closed, deliberately: a registry where
+    nobody may verify does not become safer, it resolves every judged gate on
+    the clock, which is work approved on a timer. Declaring the set is what
+    turns the capability into a rail, and `verifier_status` says out loud
+    whether the set is declared.
+    """
+    return _split(value if value is not None else os.environ.get(VERIFIERS_ENV_VAR))
+
+
+def bind_capabilities(
+    actor: Optional[str],
+    capabilities: Optional[Iterable[str]],
+    verifiers: Iterable[str],
+) -> tuple[frozenset[str], bool]:
+    """The capabilities this actor actually holds, given the operator's declaration.
+
+    When verifiers are declared, `verify` counts only for a declared actor;
+    anyone else's claim to it is dropped here, before the capability gate
+    compares it with anything. Returns the bound set and whether `verify` was
+    stripped, so the refusal downstream can name the declaration rather than
+    telling a node to "declare verify" it already did.
+    """
+    held = frozenset(capabilities or ())
+    declared = frozenset(verifiers)
+    if declared and VERIFY_CAPABILITY in held and actor not in declared:
+        return held - {VERIFY_CAPABILITY}, True
+    return held, False

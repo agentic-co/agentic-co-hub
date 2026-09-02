@@ -200,12 +200,22 @@ HTTP. Two things then hold, both enforced under the same lock as the lease CAS:
 a work item carrying `requires: ["verify"]` can only be claimed by a node that
 declares it, and a **judged** gate refuses a verdict from a node that does not.
 
-Be precise about what the second buys. Capabilities are asserted by the caller,
-so it is routing hygiene rather than authority — it stops a node answering gates
-it was never configured for, and a node determined to answer one need only
-declare the string. The authority rule for a judged gate is the other one: the
-submitter may not be the actor that reported the work done, and that is derived
-from the signature, so it cannot be self-asserted. That claim rests on a report
+Be precise about what the second buys, because it depends on one more line of
+configuration. Capabilities are asserted by the caller, so on its own `verify`
+is routing hygiene rather than authority — it stops a node answering gates it
+was never configured for, and a node determined to answer one need only declare
+the string. **Declaring the verifiers turns it into a rail**: with
+`AGENTCO_VERIFIERS=dana,reviewer-box` set on the registry (or on the node, in
+local MCP mode), `verify` counts only for those actors — on every claim of a
+routed vehicle and on every verdict, on every transport, because the binding
+lives in the queue. An undeclared node that declares the word is told, by name,
+that the operator bound the capability to somebody else. Undeclared stays
+self-asserted on purpose — a registry where nobody may verify resolves every
+judged gate on the clock, which is worse — and `agentco verifiers` reports
+which of the two you are running. The authority rule for a judged gate that
+holds either way is the separation: the submitter may not be the actor that
+reported the work done, and that is derived from the signature, so it cannot be
+self-asserted. That claim rests on a report
 being derived the same way: `work_report` (MCP) and its HTTP equivalent refuse a
 report from anyone but the lease holder, so "the actor that reported the work
 done" names one real party rather than whoever's body claimed to be it.
