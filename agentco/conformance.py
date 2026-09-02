@@ -43,15 +43,17 @@ from agentco.work import CapabilityError, Queue, parse_terminal_status, unknown_
 TRANSPORTS = ("http", "mcp", "mcp-remote", "outbox")
 
 #: Everything the plane reads from the environment to find a store or a
-#: registry. Every run pins all of them to "unset" so the scenarios can only
-#: ever touch the temporary stores the World was built on — the second party
-#: on P5.V ran `conform` with AGENTCO_DB set and watched it write 29 items into
-#: the operator's live database. Never again, by construction.
+#: registry. `run_scenario` and the CLI's budget probe pin all of them to
+#: "unset" so a run can only ever touch the temporary stores it was built on —
+#: the second party on P5.V ran `conform` with AGENTCO_DB set and watched it
+#: write 29 items into the operator's live database, then found the budget
+#: probe doing the same after the scenarios were fixed. The pin is per call
+#: site, so a new site that opens a store must wrap itself the same way.
 STORE_ENV_VARS = (
     "AGENTCO_DB", "AGENTCO_REGISTRY_DB", "AGENTCO_WORK_STORE", "AGENTCO_SOP_STORE",
     "AGENTCO_REGISTRY_URL", "AGENTCO_SECRET", "AGENTCO_REGISTRY_KEYS", "AGENTCO_ACTOR",
     "AGENTCO_CAPABILITIES", "AGENTCO_HUMANS", "AGENTCO_VERIFIERS", "AGENTCO_PROTECTED_TAGS",
-    "AGENTCO_OUTBOX", "AGENTCO_AGENT_LABEL",
+    "AGENTCO_OUTBOX", "AGENTCO_AGENT_LABEL", "AGENTCO_REGISTRY_OPERATOR",
 )
 
 #: The verbs a scenario may use. Every transport carries a subset; the core
@@ -141,6 +143,9 @@ SCENARIOS: dict[str, dict] = {
             step("alice", "work_report", item="@t1", attempt="@pull1.attempt", status="done", result="exported"),
             step("bob", "work_report", item="@t1", attempt="@pull1.attempt", status="done", result="again"),
             step("alice", "work_pull", save="pull2"),
+            step("operator", "work_create", save="t2", title="render the report", requires=["gpu"]),
+            step("alice", "work_pull", save="pull3", capabilities=[]),
+            step("bob", "work_pull", save="pull4", capabilities=["gpu"], ttl_seconds=4321),
         ],
     },
     "judged-gate": {
@@ -193,7 +198,7 @@ SCENARIOS: dict[str, dict] = {
             step("alice", "sop_activate", sop="@pay", version=2),
             step("carol", "sop_activate", sop="@pay", version=0),
             step("carol", "sop_activate", sop="sop-deadbeef", version=1),
-            step("operator", "sop_instantiate", save="i1", sop="@deploy"),
+            step("operator", "sop_instantiate", save="i1", sop="@deploy", metadata={"epic": "release-week"}),
             step("operator", "sop_instantiate", save="i2", sop="@pay"),
             step("operator", "sop_instantiate", save="i3", sop="@pay", verify={
                 "kind": "human", "check": "the owner signs off", "verifier": "carol",
@@ -440,7 +445,8 @@ def _core(world: World, s: dict) -> dict:
             # the handler would hide a transport that swallowed less.
             for candidate in world.queue.ready(agent=actor):
                 try:
-                    leased = world.queue.claim(candidate.id, actor, capabilities=a.get("capabilities"))
+                    leased = world.queue.claim(candidate.id, actor, capabilities=a.get("capabilities"),
+                                               **({"ttl_seconds": a["ttl_seconds"]} if a.get("ttl_seconds") else {}))
                 except CapabilityError:
                     continue
                 if leased is not None:
@@ -507,7 +513,7 @@ def _http(world: World, s: dict) -> dict:
             out = reg.work_create(a["title"], **fields)
             return _ok(**_save(world, s, out["item"]["id"], {"id": out["item"]["id"]}))
         if verb == "work_pull":
-            out = reg.work_pull(capabilities=a.get("capabilities"))
+            out = reg.work_pull(capabilities=a.get("capabilities"), ttl_seconds=a.get("ttl_seconds"))
             if out["state"] != "leased":
                 return {"state": "empty"}
             return _ok(state="leased", **_save(world, s, out["item"]["id"],
@@ -569,7 +575,7 @@ def _mcp(world: World, s: dict, remote: bool = False) -> dict:
                 out = tool("work_create")(**{k: v for k, v in a.items()})
                 return _ok(**_save(world, s, out["id"], {"id": out["id"]}))
             if verb == "work_pull":
-                out = tool("work_pull")()
+                out = tool("work_pull")(**({"ttl_seconds": a["ttl_seconds"]} if a.get("ttl_seconds") else {}))
                 if out is None:
                     return {"state": "empty"}
                 return _ok(state="leased", **_save(world, s, out["id"], {"id": out["id"], "attempt": out["lease_attempt"]}))
@@ -664,6 +670,18 @@ DRIVERS: dict[str, Callable[[World, dict], dict]] = {
 # --------------------------------------------------------------------------- #
 
 
+def _ttl_of(item) -> Optional[int]:
+    """The lease's length, not its timestamps: a transport that dropped or
+    rewrote ttlSeconds shows up here without the clock getting a vote."""
+    if not item.lease_expires_at or not item.updated_at:
+        return None
+    from datetime import datetime
+
+    expires = datetime.fromisoformat(item.lease_expires_at)
+    updated = datetime.fromisoformat(item.updated_at)
+    return int(round((expires - updated).total_seconds()))
+
+
 def photograph(world: World) -> dict:
     """Everything that matters about the world, with identifiers replaced by labels."""
     items = []
@@ -681,6 +699,7 @@ def photograph(world: World) -> dict:
             "requires": list(item.requires),
             "blocked_by": sorted(world.label_of(b) for b in item.blocked_by),
             "leased_by": item.leased_by,
+            "lease_ttl_s": _ttl_of(item),
             "lease_attempt": item.lease_attempt,
             "claims": [c.get("agent") for c in (meta.get("claims") or [])],
             "executor": report.get("reported_by"),
