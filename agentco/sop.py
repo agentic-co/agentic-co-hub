@@ -53,7 +53,7 @@ from typing import Iterator, Optional, Sequence
 
 from agentco import policy
 from agentco.filelock import lock_exclusive, unlock
-from agentco.work import Queue, WorkItem, WorkStatus
+from agentco.work import PLAN_KEY, Queue, WorkItem, WorkStatus, reject_reserved
 
 # The cap IS the discipline. An unbounded list of known failure modes is a wiki
 # page, and a wiki page is not read at handoff time. Keep the ones that bite.
@@ -710,8 +710,22 @@ class SopLibrary:
                 )
 
         metadata = dict(work_kwargs.pop("metadata", None) or {})
+        # The caller's metadata is held to the create rule FIRST, because the
+        # create below is filed `by_plane` so that the plan can be copied under
+        # a reserved key — and a plane-side convenience that skipped the
+        # caller's check would be the hole in the boundary it exists to keep.
+        reject_reserved(metadata, work_kwargs.get("natural_key"))
         metadata["sop_ref"] = sop.ref
-        return queue.create(title or sop.title, metadata=metadata, **work_kwargs)
+        # The plan, in the procedure's own words, pinned with the version. This
+        # is what `plan_vs_actual` compares against at completion; copying it
+        # here rather than looking it up later means the review reads the words
+        # the executor was actually handed, even after the procedure moves on.
+        metadata[PLAN_KEY] = {
+            "title": sop.title,
+            **{k: getattr(sop, k) for k in ("definition_of_done", "validation", "entry_check")
+               if getattr(sop, k)},
+        }
+        return queue.create(title or sop.title, metadata=metadata, by_plane=True, **work_kwargs)
 
     # -- evaluation ------------------------------------------------------
 

@@ -348,7 +348,13 @@ RESERVED_METADATA_KEYS = frozenset({
     # executor rule lives. A caller who could set it on create would be an
     # executor grading its own divergence, with the plane's name on the tag.
     "adjudication",
+    # `sop_plan` is the procedure's own words, copied at instantiate under the
+    # pin; `plan_vs_actual` is what the plane writes beside them at completion.
+    # Both read back as fact by the adjudicator, so neither is a caller's to set.
+    "sop_plan", "plan_vs_actual",
 })
+PLAN_KEY = "sop_plan"
+PLAN_VS_ACTUAL_KEY = "plan_vs_actual"
 # And the natural-key namespace the routing pass uses for vehicles.
 RESERVED_KEY_PREFIX = "verify:"
 
@@ -633,6 +639,91 @@ def is_child_row(row: dict, parent_id: str) -> bool:
     return meta.get(PARENT_KEY) == parent_id and meta.get(REPAIRS_KEY) is None
 
 
+def reject_reserved(metadata: Optional[dict], natural_key: Optional[str] = None) -> None:
+    """Refuse a caller's metadata that names a plane-owned key, or a reserved key prefix.
+
+    Split out of `build_item` so a plane-side writer that must ADD a reserved
+    key (`SopLibrary.instantiate` copying the plan under the pin) can first
+    hold the caller's own metadata to the same rule, then file with
+    `by_plane=True`. Without this the plane's own convenience would be the
+    hole: anything routed through it would skip the check.
+    """
+    forged = sorted(RESERVED_METADATA_KEYS & set(metadata or {}))
+    if forged:
+        raise Refusal(
+            code="metadata_reserved",
+            message=f"metadata sets plane-owned key(s) {forged}",
+            remediation=(
+                "Remove them. These keys are written by AgentCo about an item "
+                "and read back as fact — a caller who could set `verifies` would "
+                "make an ordinary item pass for a routing vehicle, so the real "
+                "one is never filed and the gate resolves on its clock with no "
+                "verifier ever seeing it. Put your own data under keys of your "
+                "own."
+            ),
+        )
+    if isinstance(natural_key, str) and natural_key.startswith(RESERVED_KEY_PREFIX):
+        raise Refusal(
+            code="natural_key_reserved",
+            message=f"natural key {natural_key!r} is in the routing pass's namespace",
+            remediation=(
+                f"Keys beginning {RESERVED_KEY_PREFIX!r} name verification "
+                f"vehicles and are filed by the plane. Filing one yourself "
+                f"pre-empts the real vehicle for that item — the routing pass "
+                f"sees the key, believes the gate is routed, and never files "
+                f"the one a verifier could actually claim."
+            ),
+        )
+
+
+def plan_vs_actual(item: "WorkItem", *, reported: "WorkStatus", landed: "WorkStatus",
+                   result: Optional[str], attempt: int, record: Optional[dict],
+                   failures: int, at: str) -> dict:
+    """The review, written at the moment of completion while the context exists.
+
+    Plan is the procedure's own words as pinned at instantiate (`sop_plan`);
+    actual is what the plane recorded of the execution. Side by side, with
+    nothing judged: the plane does not know whether a divergence was the
+    procedure's fault or the executor's — that is the adjudicator's call, and
+    this record is the evidence they read. Written every time, not only on
+    divergence, because "the plan and the outcome agreed" is itself the
+    observation `outcomes_by_version` needs.
+    """
+    meta = item.metadata or {}
+    actual: dict = {
+        "reported": reported.value,
+        "landed": landed.value,
+        "executor": item.leased_by,
+        "attempt": attempt,
+        "result": result,
+        "verify_failures": failures,
+        "filed_at": item.created_at,
+        "reported_at": at,
+    }
+    if record:
+        actual["attestation"] = {
+            k: record.get(k) for k in ("check", "exit_status", "environment", "at", "submitted_by")
+        }
+    gate = item.verify or {}
+    return {
+        "generated_at": at,
+        "sop_ref": meta.get("sop_ref"),
+        "plan": meta.get(PLAN_KEY),
+        "gate": {"kind": gate.get("kind"), "check": gate.get("check")} if gate else None,
+        "actual": actual,
+        # What the reader should look at first. Computed, not judged.
+        "flags": sorted(
+            f for f, on in (
+                # Parking is not a verdict; only a gate that said no disagreed.
+                ("gate_disagreed", landed is WorkStatus.VERIFY_FAILED and reported is WorkStatus.DONE),
+                ("retried", failures > 0),
+                ("failed", landed is WorkStatus.FAILED),
+                ("awaiting_verdict", landed is WorkStatus.AWAITING_VERIFY),
+            ) if on
+        ),
+    }
+
+
 def build_item(
     title: str,
     *,
@@ -664,32 +755,7 @@ def build_item(
     touched, so a refused create leaves the store byte-identical.
     """
     if not by_plane:
-        forged = sorted(RESERVED_METADATA_KEYS & set(metadata or {}))
-        if forged:
-            raise Refusal(
-                code="metadata_reserved",
-                message=f"metadata sets plane-owned key(s) {forged}",
-                remediation=(
-                    "Remove them. These keys are written by AgentCo about an item "
-                    "and read back as fact — a caller who could set `verifies` would "
-                    "make an ordinary item pass for a routing vehicle, so the real "
-                    "one is never filed and the gate resolves on its clock with no "
-                    "verifier ever seeing it. Put your own data under keys of your "
-                    "own."
-                ),
-            )
-        if isinstance(natural_key, str) and natural_key.startswith(RESERVED_KEY_PREFIX):
-            raise Refusal(
-                code="natural_key_reserved",
-                message=f"natural key {natural_key!r} is in the routing pass's namespace",
-                remediation=(
-                    f"Keys beginning {RESERVED_KEY_PREFIX!r} name verification "
-                    f"vehicles and are filed by the plane. Filing one yourself "
-                    f"pre-empts the real vehicle for that item — the routing pass "
-                    f"sees the key, believes the gate is routed, and never files "
-                    f"the one a verifier could actually claim."
-                ),
-            )
+        reject_reserved(metadata, natural_key)
     return WorkItem(
         id=f"w-{uuid.uuid4().hex[:8]}",
         title=title,
@@ -1524,6 +1590,17 @@ class Queue:
                         *(metadata.get(HISTORY_KEY) or []),
                         {"kind": key, **superseded} if isinstance(superseded, dict) else superseded,
                     ]
+            review = metadata.get(PLAN_VS_ACTUAL_KEY)
+            if isinstance(review, dict):
+                # The review was written when the executor reported; the verdict
+                # arrives later, from somebody else. It lands beside the actual
+                # rather than replacing it, so the adjudicator sees both what
+                # the executor claimed and what the verifier found.
+                review = {**review, "verdict": {
+                    "by": record.get("submitted_by"), "exit_status": record.get("exit_status"),
+                    "at": record.get("at"), "passed": gates.attestation_passes(record),
+                }}
+                metadata[PLAN_VS_ACTUAL_KEY] = review
             if gates.attestation_passes(record):
                 metadata.pop("verify_retry", None)
                 return {
@@ -1760,6 +1837,15 @@ class Queue:
                 submitted_by=submitted_by or item.leased_by,
                 metadata=metadata,
             )
+            if metadata.get("sop_ref"):
+                # The third property's second record: written at the moment of
+                # completion, while the executor and the context still exist —
+                # never reconstructed later from a store that has forgotten
+                # who held the lease.
+                metadata[PLAN_VS_ACTUAL_KEY] = plan_vs_actual(
+                    item, reported=status, landed=landed, result=result,
+                    attempt=attempt, record=record, failures=failures, at=_iso(_now()),
+                )
             return {
                 "status": landed,
                 "attestation": record,
