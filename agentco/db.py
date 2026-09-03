@@ -30,8 +30,12 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Union
 
 from agentco import migrations
+from agentco.pgadapter import PgConnection, is_postgres_target
+
+AnyConnection = Union[sqlite3.Connection, PgConnection]
 
 # The live schema is now the migration list (`agentco/migrations.py`), because
 # `CREATE TABLE IF NOT EXISTS` on every open has nowhere to put a change that
@@ -134,23 +138,36 @@ CREATE INDEX IF NOT EXISTS idx_conflict_fired ON conflict_actions(fired_at);
 """
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
-    """Open (creating if needed) the one registry file, schema applied.
+def connect(path: str | Path) -> AnyConnection:
+    """Open (creating if needed) the one registry file, schema applied — or,
+    when `path` is a `postgresql://`/`postgres://` DSN, the one registry
+    DATABASE, same schema, same migrations, over `pgadapter.PgConnection`
+    (agentco/pgadapter.py). `AGENTCO_DB=<path>` keeps meaning SQLite;
+    `AGENTCO_DB=postgresql://...` is the only thing that changes, and it is
+    resolved once, here, so every caller of `db.connect` — `app.py`,
+    `mcp_server.py`, `cli.py`, `hook.py`, the conformance world — gets
+    whichever backend the operator named without knowing which one it got.
 
     `check_same_thread=False` because uvicorn serves requests on a worker
     thread pool; every write in this package goes through a short `with conn`
-    transaction, and SQLite's own locking is the serialisation. Row factory is
-    set so callers read columns by name — a positional read is how a schema
-    addition silently shifts a field.
+    transaction, and SQLite's own locking is the serialisation (the Postgres
+    adapter's own lock plays the equivalent role — see its class docstring).
+    Row factory is set so callers read columns by name — a positional read is
+    how a schema addition silently shifts a field.
 
     `busy_timeout` is set because this file is no longer opened only by the
     one server process: `SqlQueue` and `SqlSopLibrary` open it too, and a
     writer that finds the lock held should wait rather than raise
     `database is locked` at whoever happened to be second.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), check_same_thread=False)
+    if is_postgres_target(path):
+        conn: AnyConnection = PgConnection(str(path))
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        migrations.apply(conn)
+        return conn
+    sqlite_path = Path(path)
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

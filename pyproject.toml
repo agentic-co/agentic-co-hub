@@ -25,6 +25,12 @@ dependencies = []
 [project.optional-dependencies]
 server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 mcp = ["mcp<2"]
+# The Postgres storage backend (agentco/pgadapter.py). Optional because the
+# default install stays dependency-free — this is only pulled in by a
+# deployment that sets AGENTCO_DB to a postgresql:// URL.
+postgres = [
+    "psycopg[binary]>=3.1",
+]
 dev = ["pytest>=8.0"]
 # The ASOP eval harness (`evals/`, not shipped in the wheel). LiteLLM is a
 # heavy transitive tree and only the harness needs it — an adopter running
