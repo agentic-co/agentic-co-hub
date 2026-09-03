@@ -342,3 +342,44 @@ def test_the_session_line_flags_an_overdue_pulse_from_what_it_declared():
     assert line.startswith("Pulse: last ran 3h ago — ok, 0 finding(s)")
     assert "overdue" in line
     assert pulse.render_session_line(None) is None
+
+
+# --------------------------------------------------------------------------- #
+# found live, in the two-harness test
+# --------------------------------------------------------------------------- #
+
+JUDGED_ESCALATE = {
+    "kind": "judged", "check": "a reviewer reads the diff", "on_timeout": "escalate",
+    "escalate_to": "dana", "max_park_seconds": 60,
+}
+
+
+def test_a_parked_judged_gate_reaches_the_feed_on_the_first_apply(conn, queue):
+    """Over HTTP, a report that parks a judged gate emits nothing — `WorkParked`
+    belongs to the routing pass. Before the pulse ran that pass, a parked gate
+    was invisible on the feed until its clock ran out."""
+    item = queue.create("ship the release", verify=JUDGED_ESCALATE)
+    leased = queue.claim(item.id, "executor")
+    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'WorkParked'").fetchone()[0] == 0
+
+    dry = run(conn, queue)
+    assert dry["housekeeping"]["routing"]["created"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'WorkParked'").fetchone()[0] == 0
+
+    applied = run(conn, queue, apply=True)
+    assert applied["housekeeping"]["routing"]["created"] == 1
+    parked = conn.execute("SELECT payload FROM events WHERE kind = 'WorkParked'").fetchall()
+    assert len(parked) == 1 and json.loads(parked[0]["payload"])["itemId"] == item.id
+
+
+def test_the_unauthenticated_placeholder_is_not_a_participant(conn, queue):
+    """One `curl /events` with no credentials records a call by actor `-`.
+    Nobody is called `-`, and a monitor that lists it as a silent colleague
+    is a monitor people stop reading."""
+    from agentco import metrics
+
+    metrics.record_call(conn, verb="events", actor="-", status="refused", code="unauthenticated", latency_ms=1.0)
+    metrics.record_call(conn, verb="events", actor="kofi", status="accepted", latency_ms=1.0)
+    report = run(conn, queue)
+    assert [p["actor"] for p in report["participants"]] == ["kofi"]
