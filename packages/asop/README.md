@@ -11,7 +11,7 @@ importing the other. This package is that agreement.
 - The [AgentCo coordination plane](../..) (`agentco/gates.py`,
   `agentco/errors.py`, `agentco/sop.py` are thin shims over this package,
   keeping every existing caller and test unchanged).
-- The [AgentCo Harness](https://github.com/mabidoli/agentco-harness), the
+- The [AgentCo Harness](https://github.com/agentic-co/agentic-co-harness), the
   standalone execution runtime, from its P2 (adopting this schema in place
   of its own `VERIFY_KEYS`/`validate_verify`).
 - Anyone else building a plane or a harness that wants to speak the same
