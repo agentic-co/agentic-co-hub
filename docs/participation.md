@@ -172,7 +172,10 @@ ignored in favor of the signature.
 
 For a harness that speaks no MCP at all, the same primitives are on the HTTP
 surface, reachable through `agentco/publish.py` — standard-library only, and
-meant to be copied next to whatever you already run rather than installed:
+meant to be copied next to whatever you already run rather than installed.
+Writing the client in another language? [`connector-guide.md`](connector-guide.md)
+is the wire contract as observed live: signing, casing, every response shape and
+refusal a work-queue seam meets, and the fence in action.
 
 ```bash
 python3 -m agentco keygen your-name   # prints a secret; never writes it anywhere

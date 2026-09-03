@@ -67,6 +67,9 @@ from agentco.work import WorkStatus, executors_of
 
 EVENT_KIND = "PulseObserved"
 
+#: The actor the HTTP app records for a request that never authenticated.
+UNAUTHENTICATED_ACTOR = "-"
+
 CADENCE_ENV_VAR = "AGENTCO_CADENCE"
 EVERY_ENV_VAR = "AGENTCO_PULSE_EVERY"
 KEYS_ENV_VAR = "AGENTCO_REGISTRY_KEYS"
@@ -331,6 +334,12 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
             i.id for i in queue.list(WorkStatus.IN_PROGRESS)
             if i.leased_by and not i.lease_active_at(now)
         ]
+    # Routing BEFORE the clocks. Found live, not in a test: a judged gate parked
+    # by a report over HTTP emitted nothing on the feed until its clock ran out,
+    # because `WorkParked` is the routing pass's event and nothing was running
+    # that pass. A parked gate nobody can see is the abandonment the whole L3
+    # design exists to prevent, and it was one unscheduled command away.
+    routing = verifiers.route_open_gates(queue, conn=conn, dry_run=not apply)
     park = verifiers.sweep_park_clocks(queue, now=now, conn=conn, dry_run=not apply)
     quarantine = verifiers.sweep_quarantine(queue, now=now, dry_run=not apply)
     stuck = verifiers.quarantine_digest(queue, now=now)
@@ -355,6 +364,10 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
     facts = {
         "applied": apply,
         "expiredLeases": reaped,
+        "routing": {
+            "created": len(routing.get("created", [])),
+            "retired": len(routing.get("retired", [])),
+        },
         "parkClocks": {
             "resolved": len(park.get("resolved", [])),
             "escalated": len(park.get("escalated", [])),
@@ -378,7 +391,10 @@ def last_seen(conn: sqlite3.Connection, queue) -> dict[str, datetime]:
     seen: dict[str, datetime] = {}
 
     def note(actor: Optional[str], stamp: Optional[str]) -> None:
-        if not actor or actor == events.PLANE_ACTOR:
+        # `-` is what the HTTP app records as the actor of a request that
+        # never authenticated (`app.py`). Found live: one unauthenticated curl
+        # against /events made "-" a participant. Nobody is called "-".
+        if not actor or actor in (events.PLANE_ACTOR, UNAUTHENTICATED_ACTOR):
             return
         when = _parse(stamp)
         if when and (actor not in seen or when > seen[actor]):
@@ -586,6 +602,7 @@ def run(
                 "silentParticipants": sum(1 for p in participants if p["state"] == "silent"),
                 "housekeeping": {
                     "expiredLeases": len(house["expiredLeases"]),
+                    "routed": house["routing"]["created"],
                     "parkClocksResolved": house["parkClocks"]["resolved"],
                     "parkClocksEscalated": house["parkClocks"]["escalated"],
                     "quarantined": house["quarantine"]["quarantined"],
@@ -629,6 +646,7 @@ def render_text(report: dict) -> str:
     verb = "returned to ready" if report["applied"] else "would return to ready"
     lines.append(
         f"housekeeping: {len(house['expiredLeases'])} expired lease(s) {verb}; "
+        f"gates routed {house['routing']['created']}; "
         f"park clocks {house['parkClocks']['resolved']} resolved, "
         f"{house['parkClocks']['escalated']} escalated; "
         f"quarantine {house['quarantine']['quarantined']} new, {house['stuck']} stuck"
