@@ -447,9 +447,11 @@ def sweep_park_clocks(
     "nobody looked and the default said pass" are distinguishable forever after.
     The alternative is a queue that manufactures its own green.
 
-    Only `awaiting_verify` has a clock. A `verify_failed` item is not waiting on
-    anybody — it is waiting on a fix, which the retry policy governs, and a
-    second clock on top of that would close items whose repair was in progress.
+    Only `awaiting_verify` is RESOLVED by a clock. A `verify_failed` item has a
+    clock too (DECIDE-L3 #3) but it never manufactures a verdict: when the
+    re-verify offer goes unclaimed past the gate's park time, `sweep_quarantine`
+    withdraws the offer and the digest names the item — a failed gate that
+    passed on a timer would be the plane manufacturing its own green.
 
     A verdict arriving between the read and a write is refused by
     `resolve_by_default` — correctly, the verdict wins — and that refusal is
@@ -720,40 +722,60 @@ def sweep_quarantine(
     skipped: list[dict] = []
 
     for item in queue.list():
-        if item.status is not WorkStatus.AWAITING_VERIFY or is_vehicle(item):
+        if is_vehicle(item):
             continue
         metadata = item.metadata or {}
         if metadata.get(QUARANTINE_KEY):
             continue
-        escalated = metadata.get(ESCALATED_KEY)
-        if not escalated:
-            continue
-        try:
-            since = datetime.fromisoformat(escalated["resolved_at"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if since.tzinfo is None:
-            since = since.replace(tzinfo=timezone.utc)
-        waited = int((at - since).total_seconds())
-        if waited < grace_seconds:
+        if item.status is WorkStatus.AWAITING_VERIFY:
+            escalated = metadata.get(ESCALATED_KEY)
+            if not escalated:
+                continue
+            try:
+                since = datetime.fromisoformat(escalated["resolved_at"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if since.tzinfo is None:
+                since = since.replace(tzinfo=timezone.utc)
+            waited = int((at - since).total_seconds())
+            if waited < grace_seconds:
+                continue
+            reason, to = "escalated", escalated.get("to")
+            note = ("not a resolution — the item is still awaiting a verdict and still "
+                    "blocks its dependents. It has stopped being offered.")
+        elif item.status is WorkStatus.VERIFY_FAILED:
+            # The re-verify offer's clock (DECIDE-L3 #3): the gate's own park
+            # time, from the moment it failed. Past it with nobody having
+            # claimed the vehicle, the offer is withdrawn and the item is named
+            # — never passed, never failed further. The item stays
+            # verify_failed and keeps blocking, exactly as before; what ends is
+            # the silence.
+            deadline = due_at(item)
+            if deadline is None or deadline > at:
+                continue
+            waited = int((at - (_parked_at(item) or at)).total_seconds())
+            reason, to = "re-verify unanswered", (item.verify or {}).get("escalate_to")
+            note = ("not a resolution — the item is still verify_failed, still blocks its "
+                    "dependents, and its own gate still has to pass. It has stopped being "
+                    "offered for re-verification.")
+        else:
             continue
 
         quarantined.append({
             "item": item.id,
             "title": item.title,
-            "to": escalated.get("to"),
+            "to": to,
+            "reason": reason,
             "abandonedSeconds": waited,
         })
         if dry_run:
             continue
         queue.annotate(item.id, {QUARANTINE_KEY: {
             "at": at.isoformat(),
-            "escalated_to": escalated.get("to"),
+            "escalated_to": to,
+            "reason": reason,
             "unanswered_seconds": waited,
-            "note": (
-                "not a resolution — the item is still awaiting a verdict and still "
-                "blocks its dependents. It has stopped being offered."
-            ),
+            "note": note,
         }}, by_plane=True)
         for vehicle in queue.list():
             if verifies(vehicle) == item.id and vehicle.status not in (
@@ -762,8 +784,8 @@ def sweep_quarantine(
                 try:
                     queue.retire(
                         vehicle.id,
-                        f"retired by quarantine: unanswered for {waited}s after "
-                        f"escalation. The gate is still open; it is no longer offered.",
+                        f"retired by quarantine: {reason}, unanswered for {waited}s. "
+                        f"The gate is still open; it is no longer offered.",
                     )
                 except LeaseError as exc:
                     # Somebody is holding it, which means somebody is finally
@@ -800,6 +822,8 @@ def quarantine_digest(queue: Queue, *, now: Optional[datetime] = None) -> dict:
         rows.append({
             "itemId": item.id,
             "title": item.title,
+            "status": item.status.value,
+            "reason": record.get("reason", "escalated"),
             "escalatedTo": record.get("escalated_to"),
             "unansweredSeconds": int((at - started).total_seconds()) if started else None,
             "quarantinedAt": record.get("at"),

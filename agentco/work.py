@@ -813,6 +813,24 @@ def build_item(
     """
     if not by_plane:
         reject_reserved(metadata, natural_key)
+    gate = gates.validate_gate(verify) if verify is not None else None
+    if gate and gate.get("kind") == "human" and assigned_agent and gate.get("verifier") == assigned_agent:
+        # The separation check would refuse this person's verdict when it came,
+        # so the gate could only ever resolve on its clock — configured-looking,
+        # and unanswerable. Refused here, like every other gate that would
+        # quietly do nothing (DECIDE-L3 #5).
+        raise Refusal(
+            code=gates.GATE_INVALID,
+            message=(
+                f"the human gate names {assigned_agent!r} as verifier and the item is "
+                f"assigned to {assigned_agent!r} — the one party a human gate exists to exclude"
+            ),
+            remediation=(
+                "Name somebody else as verifier, or assign the work to somebody else. "
+                "A person may not sign off their own step; the plane would refuse the "
+                "verdict, and the gate would resolve on its clock with nobody having looked."
+            ),
+        )
     return WorkItem(
         id=f"w-{uuid.uuid4().hex[:8]}",
         title=title,
@@ -828,7 +846,7 @@ def build_item(
             period=period,
         ),
         metadata=dict(metadata or {}),
-        verify=gates.validate_gate(verify) if verify is not None else None,
+        verify=gate,
     )
 
 
@@ -1450,6 +1468,10 @@ class Queue:
             "decision": gates.retry_decision(failures),
             "decided_at": _iso(_now()),
         }
+        # The clock starts here too. A failed gate's re-verify offer used to
+        # have no clock at all, so an unclaimed vehicle sat open forever and
+        # the digest never saw it (DECIDE-L3 #3).
+        metadata["verify_parked_at"] = _iso(_now())
         return WorkStatus.VERIFY_FAILED, record, failures
 
     def attest(
@@ -1735,6 +1757,7 @@ class Queue:
                 "decision": gates.retry_decision(failures),
                 "decided_at": _iso(_now()),
             }
+            metadata["verify_parked_at"] = _iso(_now())  # the re-verify offer's clock starts now
             return {
                 "status": WorkStatus.VERIFY_FAILED,
                 "attestation": record,
@@ -1879,12 +1902,22 @@ class Queue:
                     f"The row is preserved on disk. Upgrade, or repair the row."
                 )
             return None
-        if idempotency_key:
-            prior = (current.metadata or {}).get("lease_report") or {}
-            if prior.get("idempotency_key") == idempotency_key:
-                return current
+        class _AlreadyRecorded(Exception):
+            """Raised from inside the lock: the key is on record, nothing to write."""
+
+            def __init__(self, item: WorkItem):
+                self.item = item
 
         def fence(item: WorkItem) -> dict:
+            # INSIDE the lock, before the fence. Read outside it, an honest
+            # retry racing its own first attempt saw no key yet, reached the
+            # fence with a stale attempt, and was refused as superseded — an
+            # error for the one caller doing exactly what the key exists to
+            # allow (DECIDE-L3 #4). Raising leaves the store byte-identical.
+            if idempotency_key:
+                prior = (item.metadata or {}).get("lease_report") or {}
+                if prior.get("idempotency_key") == idempotency_key:
+                    raise _AlreadyRecorded(item)
             carried = (item.metadata or {}).get("verifies")
             if carried:
                 # ANY terminal report, not just DONE — the first version guarded
@@ -1987,7 +2020,10 @@ class Queue:
                 "lease_attempt": item.lease_attempt + 1,
             }
 
-        return self._mutate(item_id, fence)
+        try:
+            return self._mutate(item_id, fence)
+        except _AlreadyRecorded as recorded:
+            return recorded.item
 
     def annotate(self, item_id: str, metadata: dict, *, by_plane: bool = False) -> Optional[WorkItem]:
         """Merge keys into an item's metadata, changing nothing else.
@@ -2090,6 +2126,9 @@ class Queue:
                     "decision": gates.retry_decision(item.verify_failures + 1),
                     "decided_at": _iso(_now()),
                 }
+                # The re-verify offer's clock starts when the park clock fired —
+                # the sweep's own time, not this process's wall clock.
+                metadata["verify_parked_at"] = resolution.get("resolved_at") or _iso(_now())
             return updates
 
         return self._mutate(item_id, resolve)

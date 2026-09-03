@@ -145,7 +145,17 @@ Mostly assembly — capability routing already exists and is tested.
 - **No verifier configured** is a first-class state: gated work resolves by
   default on the clock rather than parking forever. An org that never sets up
   L3 must still be able to use gates.
-- **Stuck-gate quarantine** to a periodic digest.
+- **Stuck-gate quarantine** to a periodic digest. Since DECIDE-L3 (2026-09-03)
+  a failed gate's re-verify offer has a clock too: past the gate's park time
+  with nobody having claimed the vehicle, quarantine withdraws the offer and
+  the digest names the item — never resolving it, because a failed gate that
+  passed on a timer would be the plane manufacturing its own green. The same
+  round settled two more: the idempotency key is read inside the lock, so an
+  honest retry racing its own first attempt gets its result back rather than a
+  fence refusal; and a human gate whose verifier is the item's assignee is
+  refused at the write boundary, since only the clock could ever answer it.
+  A judged gate's `verifier` stays an offer, not a binding verdict — binding who
+  may verify at all is `AGENTCO_VERIFIERS`.
 
 ---
 
