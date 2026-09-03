@@ -248,6 +248,9 @@ that the answer was a default, never a verdict; `escalate` hands it to the
 named party and keeps it parked. Nothing runs the sweep on its own, the same
 way the outbox needs a scheduled drainer — an org that never schedules
 `agentco verifiers --sweep` gets the old behaviour, a gate that waits forever.
+`agentco pulse --apply` runs that sweep — and the lease reaper and quarantine —
+on whatever schedule you give it, so "nobody ran the sweep" stops being a way
+for a gate to wait forever ([`pulse.md`](pulse.md)).
 
 **The change feed carries `WorkParked` and `GateEscalated`.** A routing pass
 (`agentco verifiers --route`) emits one the first time it notices a parked

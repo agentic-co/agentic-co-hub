@@ -26,7 +26,13 @@ from agentco.app import create_app
 from agentco.errors import Refusal
 from agentco.work import LeaseError, WorkStatus
 
-T0 = datetime(2026, 9, 3, 9, 0, tzinfo=timezone.utc)
+# A clock in the FUTURE, deliberately. `report_result` stamps `verify_parked_at`
+# with the real wall clock, and the sweeps below are driven at `T0 + 601s`; a
+# fixed T0 was correct the morning it was written and a time bomb by lunch,
+# because once the wall clock passed it the gate had been parked for LESS than
+# its 600s when swept. One day ahead keeps every relative offset in here on
+# the right side of the parking stamp, whenever the suite runs.
+T0 = (datetime.now(timezone.utc) + timedelta(days=1)).replace(microsecond=0)
 JUDGED_FAIL = {"kind": "judged", "check": "a reviewer reads the diff", "max_park_seconds": 600,
                "on_timeout": "fail"}
 DETERMINISTIC = {"kind": "deterministic", "check": "pytest -q", "max_park_seconds": 600, "on_timeout": "fail"}

@@ -304,7 +304,14 @@ preserving the file's own line endings. `hook` takes a verbatim backup so
 ```bash
 python3 -m agentco metrics        # weekly publishers, latency, conflict precision
 python3 -m agentco gate1          # exit 0 iff the adoption gate is met
+python3 -m agentco pulse          # the plane checks itself and every actor wired to it; dry run
+python3 -m agentco pulse --apply --every 15m   # the scheduled form: sweeps, records, exit = worst class
 ```
+
+`pulse` is the heartbeat, inverted: the plane runs no cycles, so instead of proving
+one ran it reads the traffic it already sees and says who has gone quiet. Exit 0 is
+ok, 1 is attention, 2 means the plane itself cannot be trusted — never a count. Its
+own silence is a finding too. See [`docs/pulse.md`](docs/pulse.md).
 
 ### Before you rely on it
 
