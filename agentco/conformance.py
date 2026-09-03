@@ -35,6 +35,7 @@ from typing import Any, Callable, Iterator, Optional
 from agentco import auth, db, events, leases, policy, snapshots
 from agentco.errors import Refusal
 from agentco.outbox import PUSH_VERBS, Outbox, drain, registry_publisher
+from agentco.pgadapter import is_postgres_target
 from agentco.publish import Registry, RegistryError
 from agentco.refusals import classify
 from agentco.sop import SopLibrary
@@ -298,13 +299,27 @@ def _environment(**values: Optional[str]) -> Iterator[None]:
 
 
 class World:
-    """Fresh stores in a temp dir, plus every transport pointed at them."""
+    """Fresh stores in a temp dir, plus every transport pointed at them.
 
-    def __init__(self, root: Path, humans: list[str], verifiers: list[str]):
+    `registry_db` is the one deliberate hole in the environment pin below:
+    everywhere else, "nothing here touches a live registry" means every
+    store-finding variable is unset for the run. The registry backend is
+    different — proving the SQLite-vs-Postgres claim ("identical semantics")
+    means running the SAME conformance scenarios against both, so `run_scenario`
+    reads `AGENTCO_DB` ONCE, before the pin erases it, and hands the value in
+    here rather than letting the scenario's own environment decide. A fresh
+    temporary SQLite file remains the default the instant this argument is
+    `None` — an operator who never names a Postgres DSN gets exactly the
+    prior behaviour, byte for byte.
+    """
+
+    def __init__(
+        self, root: Path, humans: list[str], verifiers: list[str], registry_db: Optional[str] = None,
+    ):
         self.root = root
         self.humans = frozenset(humans)
         self.verifiers = frozenset(verifiers)
-        self.db_path = str(root / "registry.sqlite3")
+        self.db_path = registry_db or str(root / "registry.sqlite3")
         self.work_path = str(root / "work.jsonl")
         self.sop_path = str(root / "sops.jsonl")
         self.conn = db.connect(self.db_path)
@@ -764,26 +779,96 @@ def photograph(world: World) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+def _pg_scoped_registry(base_dsn: str) -> tuple[str, Callable[[], None]]:
+    """A DSN pointed at a fresh, disposable schema in `base_dsn`'s database,
+    plus a callable that drops it.
+
+    `run_scenario` is called once per transport per scenario — up to five
+    times per scenario (core, http, mcp, mcp-remote, outbox) — and every one
+    of those calls would otherwise point at the SAME literal database named
+    by `AGENTCO_DB`. SQLite avoids this for free: each call gets its own
+    fresh `tempfile.TemporaryDirectory`, so a run's registry file starts
+    empty. A single fixed Postgres database has no such per-call isolation
+    built in, so this function builds the equivalent `tests/conftest.py`
+    already builds for the pytest suite (that module cannot be imported from
+    here — it is test code) — a schema-scoped DSN via `search_path`, created
+    before the run and dropped after. Without it, the SECOND transport's run
+    of a scenario would see the FIRST transport's leases, snapshots and
+    events still sitting in the same tables, and `photograph()`'s comparison
+    would report a difference that has nothing to do with either transport.
+    """
+    import uuid
+
+    import psycopg
+
+    schema = f"conform_{uuid.uuid4().hex[:16]}"
+    with psycopg.connect(base_dsn, autocommit=True) as boot:
+        boot.execute(f'CREATE SCHEMA "{schema}"')
+    sep = "&" if "?" in base_dsn else "?"
+    dsn = f"{base_dsn}{sep}options=-csearch_path%3D{schema}"
+
+    def cleanup() -> None:
+        with psycopg.connect(base_dsn, autocommit=True) as boot:
+            boot.execute(f'DROP SCHEMA "{schema}" CASCADE')
+
+    return dsn, cleanup
+
+
 def run_scenario(name: str, transport: str, root: Optional[Path] = None) -> dict:
     """One scenario, with every step the transport carries performed through it.
 
     Returns the outcomes step by step and the photograph at the end. `core` is
     the reference run; the others are compared against it.
+
+    `AGENTCO_DB` is read HERE, before the pin two lines down erases it for
+    the rest of the run — the one deliberate exception to "every store-finding
+    variable is unset", so that `agentco conform` run with `AGENTCO_DB=postgresql://…`
+    proves the SAME claim against Postgres that an unset run proves against a
+    fresh temporary SQLite file. It reaches every transport that touches the
+    registry (http, mcp, mcp-remote, outbox) because each is built from
+    `world.db_path` via an explicit `db_path=` argument (`World.client`,
+    `World.server`) — never by leaving `AGENTCO_DB` set in the scenario's own
+    environment, which would also retarget the work-item/SOP JSONL files
+    `photograph()` reads directly from disk and break every scenario that
+    files work or authors a procedure, for every transport, not just this one
+    registry check.
     """
+    # Read, and immediately narrowed to "a Postgres DSN, or nothing at all".
+    # `test_the_suite_never_touches_the_operators_stores` is the regression
+    # test for the incident this pin exists to prevent (Finding 1: `conform`
+    # once wrote 29 items into a live SQLite file named by `AGENTCO_DB`) — a
+    # plain path, or unset, must still mean "fresh temporary SQLite file",
+    # exactly as before this function read the variable at all. Only a
+    # `postgresql://`/`postgres://` value opts in, and it opts in to a
+    # freshly-created SCHEMA (`_pg_scoped_registry`), never the literal
+    # database name — the same "temp file" contract has been kept, on a
+    # backend where a temp FILE cannot exist.
+    _requested = os.environ.get("AGENTCO_DB")
+    registry_db: Optional[str] = None
+    pg_cleanup: Optional[Callable[[], None]] = None
+    if _requested and is_postgres_target(_requested):
+        registry_db, pg_cleanup = _pg_scoped_registry(_requested)
     scenario = SCENARIOS[name]
     carries = CARRIES[transport]
     logging.getLogger("httpx").setLevel(logging.WARNING)  # the wire is not the finding
-    with tempfile.TemporaryDirectory(prefix=f"agentco-conform-{name}-{transport}-") as tmp, \
-            _environment(**{k: None for k in STORE_ENV_VARS}):
-        world = World(Path(root or tmp), scenario.get("humans", []), scenario.get("verifiers", []))
-        outcomes = []
-        with _environment(**world.env()):
-            for s in scenario["steps"]:
-                via = transport if s["verb"] in carries else "core"
-                outcome = DRIVERS[via](world, s)
-                outcomes.append({"step": f"{s['actor']} {s['verb']}", "via": via, **outcome})
-            picture = photograph(world)
-        world.conn.close()
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"agentco-conform-{name}-{transport}-") as tmp, \
+                _environment(**{k: None for k in STORE_ENV_VARS}):
+            world = World(
+                Path(root or tmp), scenario.get("humans", []), scenario.get("verifiers", []),
+                registry_db=registry_db,
+            )
+            outcomes = []
+            with _environment(**world.env()):
+                for s in scenario["steps"]:
+                    via = transport if s["verb"] in carries else "core"
+                    outcome = DRIVERS[via](world, s)
+                    outcomes.append({"step": f"{s['actor']} {s['verb']}", "via": via, **outcome})
+                picture = photograph(world)
+            world.conn.close()
+    finally:
+        if pg_cleanup is not None:
+            pg_cleanup()
     return {"scenario": name, "transport": transport, "outcomes": outcomes, "state": picture}
 
 
