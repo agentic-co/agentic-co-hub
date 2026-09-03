@@ -171,7 +171,7 @@ These are load-bearing, and each was derived from a failure mode rather than fro
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone https://github.com/mabidoli/agentco && cd agentco
+git clone https://github.com/agentic-co/agentic-co-hub && cd agentic-co-hub
 uv run --extra dev --extra server --extra mcp pytest -q
 ```
 
