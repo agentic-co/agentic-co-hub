@@ -68,6 +68,19 @@ first: one unreachable pointer currently aborts the whole digest run
 ([`known-issues.md`](known-issues.md)), so a scheduled job should alert on a
 non-zero exit rather than assume "no output means nothing moved".
 
+## The pulse
+
+```bash
+docker compose run --rm pulse                                 # dry run: look, change nothing
+AGENTCO_CADENCE="alice=1d,ci-worker=2h" \
+  docker compose run --rm pulse pulse --apply --every 15m     # the scheduled form
+```
+
+Same posture as the digest: the host owns the schedule. The exit code is the worst
+consequence class — `0` ok, `1` attention, `2` the plane itself cannot be trusted —
+so a timer should alert on non-zero and never on the count of findings. Details
+and what each check means: [`pulse.md`](pulse.md).
+
 ## What is not containerised, and why
 
 **The MCP surface.** `serve-mcp` speaks JSON-RPC on stdio and is launched *by*

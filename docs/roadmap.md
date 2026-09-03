@@ -26,9 +26,9 @@ in exactly the place it should have, the connectors.
 | SOPs as versioned templates | 🆕 | ✅ | Pinned per instance; outcomes grouped by version |
 | Durable storage backend (SQLite) | 🆕 | ✅ | Opt-in via `AGENTCO_DB`; same interfaces, conformance-tested against the JSONL default |
 | Numbered schema migrations | 🆕 | ✅ | Applied once, one transaction each, recorded in the file |
-| Scheduling with reservations + silent-schedule audit | ✅ | ⏳ | Catches "this has not run in ten days" |
+| Silent-schedule audit | ✅ | ✅ | `agentco pulse`: an actor silent past its declared cadence (`AGENTCO_CADENCE`) is a finding; undeclared is `null`, never a guess — and the pulse judges its own gap first. Reservations-style scheduling of work itself is still ⏳ |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
-| Health checks with consequence classes | ✅ | ⏳ | Exit code derived from class, never counted |
+| Health checks with consequence classes | ✅ | ✅ | `agentco pulse` — exit code is the worst class (ok / attention / fatal), never a count; dry-run by default, `--apply` runs the sweeps nobody was running (expired leases, park clocks, quarantine) and records a `PulseObserved` heartbeat — see [`docs/pulse.md`](pulse.md) |
 | MCP surface | ✅ | ✅ | 12 tools of a stated 12 — the ceiling is binding; a byte budget over the schemas is published beside the count |
 | Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
 | Session-hook injection (tier 3) | ✅ | ✅ | Fail-open per dependency; byte-identical uninstall |

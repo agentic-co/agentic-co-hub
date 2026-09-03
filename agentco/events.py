@@ -45,6 +45,11 @@ KINDS = (
     # was the substrate, not the choice of channel.
     "WorkParked",
     "GateEscalated",
+    # The pulse's own heartbeat (`pulse.py`): one row per `agentco pulse --apply`,
+    # attributed to the plane. Its AGE is what the next run and the session hook
+    # judge — a pass that records nothing when it crashes leaves the gap as the
+    # signal, which is the one property worth keeping from a heartbeat file.
+    "PulseObserved",
 )
 
 # Events the PLANE observes rather than an actor performing. A reserved name

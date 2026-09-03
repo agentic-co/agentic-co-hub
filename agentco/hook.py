@@ -115,14 +115,30 @@ def _registry_section(actor: str) -> tuple[Optional[str], Optional[str]]:
         conn = db.connect(resolve_db_path())
         digest = divergence.collect(conn)
         conflicts = leases.conflicts_for(conn, actor)
-        return (
-            inject.render_session_block(
-                digest, conflicts, actor=actor, receipts=_outbox_receipts()
-            ),
-            None,
+        block = inject.render_session_block(
+            digest, conflicts, actor=actor, receipts=_outbox_receipts()
         )
+        # The pulse's last recorded run, judged against the interval IT declared.
+        # Folded in here rather than given a section of its own for the same
+        # reason as the outbox receipts: same audience, same connection, and a
+        # registry that has never run a pulse renders nothing — an L1 publisher
+        # should not be told about a pass that is not theirs to run.
+        pulse_line = _pulse_line(conn)
+        if pulse_line:
+            block = f"{block}\n\n{pulse_line}"
+        return block, None
     except Exception as exc:  # noqa: BLE001 - one of the named independent dependencies
         return None, f"divergence/scope-conflict check unavailable ({type(exc).__name__}: {exc})"
+
+
+def _pulse_line(conn) -> Optional[str]:
+    """One line about the last `agentco pulse --apply`, or None. Never raises."""
+    try:
+        from agentco import pulse
+
+        return pulse.render_session_line(pulse.last_observed(conn))
+    except Exception:  # noqa: BLE001 - optional content, never load-bearing
+        return None
 
 
 def _outbox_receipts() -> list[dict]:

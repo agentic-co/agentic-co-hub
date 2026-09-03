@@ -1,4 +1,4 @@
-"""`python3 -m agentco <command>` — serve, digest, gate1, metrics, keygen.
+"""`python3 -m agentco <command>` — serve, digest, pulse, gate1, metrics, keygen.
 
 Dry-run by default everywhere it matters. `digest` prints and does not deliver
 unless asked, and does not send anywhere unless asked twice
@@ -702,6 +702,35 @@ def cmd_writeback(args) -> int:
     return 0
 
 
+def cmd_pulse(args) -> int:
+    """The plane checks itself and everything wired to it. Dry-run unless `--apply`.
+
+    Exit status is the worst consequence class — 0 ok, 1 attention, 2 fatal —
+    never a count, so a scheduler alerts on non-zero and a human reads the
+    report for what. `--apply` runs the sweeps (expired leases, park clocks,
+    quarantine) and records the run as a `PulseObserved` event; the next run
+    and the session hook judge the gap against `--every`, which is the
+    silent-schedule audit applied first to the auditor. See `pulse.py`.
+
+    Opens the queue through `stores.open_queue` so `AGENTCO_DB` is honoured:
+    a sweep against the JSONL store of a SQLite deployment reports an empty
+    queue and moves nothing, which is the wrong kind of quiet.
+    """
+    from agentco import pulse
+
+    try:
+        every = pulse.parse_duration(args.every) if args.every else pulse.every_from_env()
+    except ValueError as exc:
+        print(f"--every: {exc}", file=sys.stderr)
+        return 2
+    conn = _conn(args)
+    queue = open_queue(args.work_store, db=args.db)
+    library = open_sop_library(args.sop_store, db=args.db)
+    report = pulse.run(conn, queue, library=library, apply=args.apply, every=every)
+    print(json.dumps(report, indent=2) if args.json else pulse.render_text(report))
+    return pulse.exit_code(report)
+
+
 def cmd_keygen(args) -> int:
     """Mint a shared secret for one actor and print the key-file line.
 
@@ -884,6 +913,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_wb.add_argument("--dry-run", action="store_true", help="print notices, send nothing")
     p_wb.add_argument("--json", action="store_true", help="machine-readable output")
     p_wb.set_defaults(func=cmd_writeback)
+
+    p_pulse = sub.add_parser(
+        "pulse",
+        help="the plane checks itself and every actor wired to it; exit code is the worst consequence class",
+    )
+    p_pulse.add_argument("--work-store", default=None, help="path to the work store")
+    p_pulse.add_argument("--sop-store", default=None, help="path to the SOP store")
+    p_pulse.add_argument(
+        "--apply",
+        action="store_true",
+        help="run the sweeps (expired leases, park clocks, quarantine) and record the run; default is dry-run",
+    )
+    p_pulse.add_argument(
+        "--every",
+        default=None,
+        help="the interval this pulse is scheduled at (e.g. 15m, 1h); a gap over twice it is a finding. Default: $AGENTCO_PULSE_EVERY",
+    )
+    p_pulse.add_argument("--json", action="store_true", help="machine-readable output")
+    p_pulse.set_defaults(func=cmd_pulse)
 
     p_key = sub.add_parser("keygen", help="mint a shared secret for one actor")
     p_key.add_argument("actor")

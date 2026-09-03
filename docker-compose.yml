@@ -64,5 +64,27 @@ services:
       AGENTCO_DIGEST_WEBHOOK: ${AGENTCO_DIGEST_WEBHOOK:-}
     command: ["digest"]
 
+  # The pulse, same shape as the digest: a one-shot the host schedules. Bare
+  # `pulse` is a dry run. `--apply` runs the sweeps and records the run; the
+  # exit code is the worst consequence class (0 ok, 1 attention, 2 fatal), so
+  # alert on non-zero and read the output for what.
+  #
+  #   docker compose run --rm pulse                                  # look, change nothing
+  #   docker compose run --rm pulse pulse --apply --every 15m        # every 15 minutes, from cron
+  pulse:
+    build:
+      context: .
+    image: agentco:local
+    profiles: ["ops"]
+    volumes:
+      - agentco-state:/var/lib/agentco
+      - ./keys.json:/run/secrets/agentco-keys.json:ro
+    environment:
+      # actor=duration, comma-separated: who is expected to publish how often.
+      # Unset means nobody's silence is judged; the pulse still sweeps and reports.
+      AGENTCO_CADENCE: ${AGENTCO_CADENCE:-}
+      AGENTCO_PULSE_EVERY: ${AGENTCO_PULSE_EVERY:-}
+    command: ["pulse"]
+
 volumes:
   agentco-state:
