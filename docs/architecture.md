@@ -105,23 +105,39 @@ uniqueness rule on the ingest path, so no source can invent its own idempotency 
 
 ## Storage
 
-Two backends, one set of interfaces. JSONL under an advisory file lock is the default;
-`AGENTCO_DB` selects SQLite instead ([roadmap](roadmap.md#where-the-stores-live) has the
+Three backends, one set of interfaces. JSONL under an advisory file lock is the default;
+`AGENTCO_DB=<path>` selects SQLite — one file, or `AGENTCO_DB=postgresql://...`/`postgres://...`
+selects Postgres — one database ([roadmap](roadmap.md#where-the-stores-live) has the
 resolution table and the reasoning).
 
-The protocol does not change between them, and that is enforced rather than intended: the
-lease logic has exactly one implementation, and the SQLite store inherits it, overriding
-only how a row is read and written. Under SQLite the compare-and-swap is `BEGIN IMMEDIATE`
-— the write lock is taken *before* the read the write is conditioned on — followed by an
-update conditioned on the attempt it was decided against. A read, then a write, with the
-transaction opened around only the second half, is the shape that passes every
-single-process test and fails the moment a second machine pulls the same queue.
+The protocol does not change between any of them, and that is enforced rather than
+intended: the lease logic has exactly one implementation, and both database-backed stores
+inherit it, overriding only how a row is read and written. Under SQLite the compare-and-swap
+is `BEGIN IMMEDIATE` — the write lock is taken *before* the read the write is conditioned on
+— followed by an update conditioned on the attempt it was decided against. A read, then a
+write, with the transaction opened around only the second half, is the shape that passes
+every single-process test and fails the moment a second machine pulls the same queue.
 
-Schema changes go through numbered migrations recorded in the database file itself, applied
-once and one transaction each, so every file is at version N or at N-1 and never halfway
+Postgres gets there by a different route rather than by copying SQLite's lock: a thin
+connection adapter (`agentco/pgadapter.py`) presents the same `sqlite3.Connection` surface
+this codebase's SQL is written against — `?` placeholders, `with conn:`, `cur.lastrowid` —
+over a real `psycopg` connection, so none of `events.py`/`leases.py`/`snapshots.py`/
+`metrics.py`/`divergence.py`/`sqlstore.py` needed a second, PG-dialect copy of a single
+query. What the adapter does NOT paper over is `BEGIN IMMEDIATE`'s whole-database lock
+itself — Postgres has no such lock, and does not need one: the fenced claim's own
+compare-and-swap `WHERE` clause, plus `SELECT ... FOR UPDATE` on the one contested row, and
+`pg_advisory_xact_lock` on a brand-new natural key with no row yet to lock, carry the same
+correctness under Postgres's READ COMMITTED that the whole-database lock buys for free
+under SQLite. `sqlstore.py`'s docstrings on `SqlQueue._mutate` and `.create` say which
+primitive and why, at the two places it actually matters.
+
+Schema changes go through numbered migrations recorded in the database itself, applied
+once and one transaction each, so every database is at version N or at N-1 and never halfway
 through. Migration 1 is the schema that already exists in deployed registries, written to be
 safe to apply to them — a migration system that only works on empty files is one nobody can
-adopt.
+adopt. Where SQLite's DDL is not portable (`AUTOINCREMENT`, `INSERT OR IGNORE`), that one
+migration carries a Postgres-dialect rewrite (`GENERATED ALWAYS AS IDENTITY`, `ON CONFLICT
+... DO NOTHING`) alongside it; every other migration's DDL already runs unchanged on both.
 
 ### `SOP` — a procedure with a version history
 

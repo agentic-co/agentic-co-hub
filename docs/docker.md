@@ -81,6 +81,44 @@ consequence class — `0` ok, `1` attention, `2` the plane itself cannot be trus
 so a timer should alert on non-zero and never on the count of findings. Details
 and what each check means: [`pulse.md`](pulse.md).
 
+## Postgres, as an opt-in profile
+
+Everything above is the default: one SQLite file on `agentco-state`. Compose
+also ships a `pg` profile — a `postgres` service that only exists when asked
+for, so the default path (`docker compose up -d registry`, no profile flag)
+is unaffected either way:
+
+```bash
+AGENTCO_PG_PASSWORD=$(openssl rand -hex 24) \
+  docker compose --profile pg up -d postgres
+AGENTCO_PG_PASSWORD=... AGENTCO_PG_DSN="postgresql://agentco:${AGENTCO_PG_PASSWORD}@postgres:5432/agentco" \
+  docker compose --profile pg up -d --build registry
+```
+
+`AGENTCO_PG_DSN` is the one variable that matters: `registry` (and `digest`/
+`pulse`, when run) forward it straight to `AGENTCO_DB` — see
+[`docs/architecture.md`](architecture.md#storage) for what changes underneath
+(nothing in the SQL; `agentco/pgadapter.py` is a connection adapter, not a
+second dialect) and [`docs/roadmap.md`](roadmap.md#where-the-stores-live) for
+the resolution table. Leave `AGENTCO_PG_DSN` unset and `registry` falls back
+to the SQLite file on `agentco-state`, exactly as before this profile
+existed.
+
+`AGENTCO_PG_PASSWORD` has a checked-in placeholder default
+(`change-me-before-using-the-pg-profile`) rather than a required-variable
+error, because Compose interpolates every service's `environment:` block
+while parsing the file regardless of which profile is active — a hard
+failure there would break the DEFAULT, no-Postgres path too. Set it for
+real before this profile touches anything but a throwaway local database.
+
+Cutting an existing SQLite deployment over, rather than starting fresh:
+stop `registry` first, copy `registry.sqlite3`/`work.jsonl`/`sops.jsonl`
+off the `agentco-state` volume, run
+[`tools/migrate_sqlite_to_pg.py`](../tools/migrate_sqlite_to_pg.py) against
+the copies and the new database, then start `registry` with
+`AGENTCO_PG_DSN` set. Never point the migration tool at the live files —
+copy first.
+
 ## What is not containerised, and why
 
 **The MCP surface.** `serve-mcp` speaks JSON-RPC on stdio and is launched *by*

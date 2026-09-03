@@ -25,6 +25,8 @@ in exactly the place it should have, the connectors.
 | Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression |
 | SOPs as versioned templates | 🆕 | ✅ | Pinned per instance; outcomes grouped by version |
 | Durable storage backend (SQLite) | 🆕 | ✅ | Opt-in via `AGENTCO_DB`; same interfaces, conformance-tested against the JSONL default |
+| Durable storage backend (Postgres) | 🆕 | ✅ | Opt-in via `AGENTCO_DB=postgresql://…`; thin `sqlite3.Connection`-shaped adapter (`agentco/pgadapter.py`) over `psycopg`, no second copy of the SQL; same conformance suite, `psycopg[binary]` is an optional `postgres` extra |
+| `tools/migrate_sqlite_to_pg.py` | 🆕 | ✅ | Idempotent cutover from a stopped SQLite file to Postgres; preserves `events.seq`/`calls.id`/`conflict_actions.id` and advances the identity sequence so a subscriber's cursor keeps resuming |
 | Numbered schema migrations | 🆕 | ✅ | Applied once, one transaction each, recorded in the file |
 | Silent-schedule audit | ✅ | ✅ | `agentco pulse`: an actor silent past its declared cadence (`AGENTCO_CADENCE`) is a finding; undeclared is `null`, never a guess — and the pulse judges its own gap first. Reservations-style scheduling of work itself is still ⏳ |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
@@ -109,12 +111,13 @@ changes:
 
 ### Where the stores live
 
-Two backends behind one set of interfaces, chosen by one variable:
+Three backends behind one set of interfaces, chosen by one variable:
 
 | `AGENTCO_DB` | Work queue | SOP library | Registry |
 |---|---|---|---|
 | unset *(default)* | `work.jsonl` | `sops.jsonl` | `AGENTCO_REGISTRY_DB` |
 | `/path/to/agentco.sqlite3` | that file | that file | that file, unless `AGENTCO_REGISTRY_DB` overrides |
+| `postgresql://…` or `postgres://…` | that database | that database | that database, unless `AGENTCO_REGISTRY_DB` overrides |
 
 Unset is the default deliberately. JSONL under an advisory lock is greppable
 at 02:00, diffs in review, and lets one corrupt line be quarantined instead of
@@ -128,6 +131,17 @@ the idempotency rule rather than a scan that assumes a lock, and numbered
 migrations so a schema change has somewhere to go. `AGENTCO_REGISTRY_DB` still
 wins where it is already set, because turning on the durable backend must not
 silently relocate a registry that already exists.
+
+A `postgresql://`/`postgres://` value is the same opt-in, one step further: a
+managed database instead of a file a team has to put somewhere and back up
+itself. `agentco/pgadapter.py` is a thin connection adapter, not a second
+dialect of the SQL — the query text in `events.py`/`leases.py`/`snapshots.py`/
+`metrics.py`/`divergence.py`/`sqlstore.py` is unchanged from the SQLite path.
+Install the optional `postgres` extra (`pip install 'agentco[postgres]'`) to
+pull in `psycopg`; the default install stays dependency-free. Cutting an
+existing SQLite deployment over: stop the writer, copy the file (never point
+anything at a live one), run `tools/migrate_sqlite_to_pg.py`, then flip
+`AGENTCO_DB` to the Postgres DSN.
 
 The two backends are held to one contract by running the same behavioural
 tests against both — `tests/conftest.py` parametrises the queue and library
