@@ -177,8 +177,24 @@ def test_a_judged_gate_may_narrow_its_route_to_one_verifier(queue):
 
 
 def test_a_stored_gate_is_normalised(queue):
+    """Normalised means every field of the shared gate schema present, not
+    just the ones this payload set — `asop.gates.validate_gate` also carries
+    the Harness's staged-check and runtime-hint fields (`checks`, `cwd`,
+    `timeout_s`, `rubric`, `judge_route`) and `schema_version`, all `None`/1
+    here since this gate never mentioned them. See `docs/architecture.md`
+    § "The ASOP contract package"."""
     item = queue.create("ship it", verify=DETERMINISTIC)
-    assert item.verify == dict(DETERMINISTIC, escalate_to=None, verifier=None)
+    assert item.verify == dict(
+        DETERMINISTIC,
+        escalate_to=None,
+        verifier=None,
+        checks=None,
+        cwd=None,
+        timeout_s=None,
+        rubric=None,
+        judge_route=None,
+        schema_version=1,
+    )
     assert queue.get(item.id).verify == item.verify
     assert item.is_gated
 

@@ -8,10 +8,19 @@ resolution-markers = [
     "python_full_version < '3.14' and sys_platform != 'win32'",
 ]
 
+[manifest]
+members = [
+    "agentco",
+    "agentco-asop",
+]
+
 [[package]]
 name = "agentco"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "agentco-asop" },
+]
 
 [package.optional-dependencies]
 dev = [
@@ -33,6 +42,7 @@ server = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentco-asop", editable = "packages/asop" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.110" },
     { name = "litellm", marker = "extra == 'eval'", specifier = ">=1.70" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = "<2" },
@@ -41,6 +51,20 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'server'", specifier = ">=0.29" },
 ]
 provides-extras = ["server", "mcp", "postgres", "dev", "eval"]
+
+[[package]]
+name = "agentco-asop"
+version = "0.1.0"
+source = { editable = "packages/asop" }
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" }]
+provides-extras = ["dev"]
 
 [[package]]
 name = "aiohappyeyeballs"

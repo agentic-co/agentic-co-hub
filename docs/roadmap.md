@@ -24,6 +24,7 @@ in exactly the place it should have, the connectors.
 | Work queue + fenced leases | ✅ | ✅ | CAS + fencing token, **proven across 12 real processes** |
 | Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression |
 | SOPs as versioned templates | 🆕 | ✅ | Pinned per instance; outcomes grouped by version |
+| ASOP contract package (`agentco-asop`, `packages/asop/`) | 🆕 | ✅ | The gate schema, `Refusal`, and the SOP record shape split out of `agentco/gates.py` \| `errors.py` \| `sop.py` into a standalone package a harness can depend on without depending on this plane; `agentco/{gates,errors,sop}.py` are now thin shims over it. Merges this plane's park-clock gate fields with the AgentCo Harness's staged-check/runtime-hint fields into one normalised schema |
 | Durable storage backend (SQLite) | 🆕 | ✅ | Opt-in via `AGENTCO_DB`; same interfaces, conformance-tested against the JSONL default |
 | Durable storage backend (Postgres) | 🆕 | ✅ | Opt-in via `AGENTCO_DB=postgresql://…`; thin `sqlite3.Connection`-shaped adapter (`agentco/pgadapter.py`) over `psycopg`, no second copy of the SQL; same conformance suite, `psycopg[binary]` is an optional `postgres` extra |
 | `tools/migrate_sqlite_to_pg.py` | 🆕 | ✅ | Idempotent cutover from a stopped SQLite file to Postgres; preserves `events.seq`/`calls.id`/`conflict_actions.id` and advances the identity sequence so a subscriber's cursor keeps resuming |

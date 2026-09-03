@@ -20,7 +20,19 @@ classifiers = [
 ]
 
 # Standard library first. A dependency has to earn its place — see CONTRIBUTING.md.
-dependencies = []
+# `agentco-asop` is the one exception, and it earns its place by being this
+# repo's own extraction: the gate schema, refusal vocabulary, and SOP record
+# contract in `packages/asop/` moved out so the AgentCo Harness (a separate
+# repo) can validate against the same shape without depending on this
+# package. `agentco/gates.py`, `agentco/errors.py` and `agentco/sop.py` are
+# thin shims over it — see docs/architecture.md.
+dependencies = ["agentco-asop"]
+
+[tool.uv.sources]
+agentco-asop = { workspace = true }
+
+[tool.uv.workspace]
+members = ["packages/asop"]
 
 [project.optional-dependencies]
 server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
@@ -41,3 +53,13 @@ eval = ["litellm>=1.70"]
 [tool.hatch.build.targets.wheel]
 # `evals` is deliberately absent: it lives in the repo, not in the package.
 packages = ["agentco"]
+
+[tool.pytest.ini_options]
+# Scoped to this package's own suite. `packages/asop/` is a separate
+# workspace member with its own `tests/` — same basenames (`test_gates.py`,
+# `test_sop.py`) by design, since they test the same contract from each
+# side of the shim, which collides under pytest's default rootdir-relative
+# import when both are swept into one run. Run the asop suite on its own:
+# `uv run pytest packages/asop/tests -q`, or `cd packages/asop && uv run
+# --with pytest pytest -q`.
+testpaths = ["tests"]
