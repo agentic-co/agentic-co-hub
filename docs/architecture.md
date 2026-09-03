@@ -224,6 +224,47 @@ Everything organisation-specific is a connector, and connectors are configuratio
 Naming Azure DevOps is fine; it is a product thousands of organisations run. Naming *your*
 organisation's instance is configuration and does not belong in this repository.
 
+## The ASOP contract package
+
+The gate schema (`deterministic` / `judged` / `human`, with attestation) and
+the SOP record shape (`SopStatus`, the `SOP` dataclass, `validate_fields`)
+live in `packages/asop/` — a separate distribution, `agentco-asop` (import
+name `asop`), inside this repo but published independently of it. `Refusal`,
+the one exception type the contract speaks in, moved with them.
+
+The reason is the AgentCo Harness: a standalone execution runtime in a
+separate repository, extracted from the same private implementation this
+plane was, that grew its own gate schema under a different name for the same
+axis (`class` instead of `kind`) with its own optional fields (a staged
+`checks` ladder, `cwd`/`timeout_s`/`rubric`/`judge_route`). Two schemas
+answering the same three-way split — deterministic re-run, judged by a
+different route, addressed to a human — is not a divergence either side
+chose; it is two extractions from one system that had not yet had to agree
+with each other. `asop.gates.validate_gate` is that agreement: one normalised
+shape, with the one thing that actually differs between callers — whether
+the park-clock group is mandatory — exposed as an argument (`require`)
+rather than hidden as an assumption.
+
+This plane imports `asop` as an ordinary dependency (`[tool.uv.sources]` in
+the root `pyproject.toml` resolves it from `packages/asop/`, editable, via a
+`uv` workspace). `agentco/gates.py`, `agentco/errors.py` and `agentco/sop.py`
+are now thin shims: they call into `asop.gates` / `asop.errors` / `asop.sop`
+with this plane's own calling convention (`require=("clock",)`, its own
+`MAX_PARK_SECONDS` ceiling) and re-export what callers in this repo already
+expect, so nothing outside those three files had to change.
+`agentco.errors.Refusal is asop.errors.Refusal` holds by construction — the
+plane does not define its own `Refusal`, it imports the shared one — which
+is what lets a `try/except Refusal` written against either side catch a
+refusal raised by the other.
+
+What did **not** move: `SopLibrary` (the versioned store — drafting,
+revising, activating, instantiating work items, grouping outcomes by
+version), file locking, and the revision policy. Those are about how a
+procedure is KEPT, which is plane policy, not part of what a procedure IS.
+Likewise `Unauthenticated` (an HTTP-transport concern) and `scope_too_broad`
+(a `ScopeClaim` concern) stay in `agentco/errors.py` — a harness adopting
+the ASOP contract has no reason to know what a scope claim is.
+
 ## Failure semantics
 
 **Fail static.** If the plane is unavailable, nothing is blocked. Every tool falls back to

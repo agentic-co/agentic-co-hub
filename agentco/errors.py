@@ -1,73 +1,27 @@
-"""Refusals that carry a machine code AND a remediation sentence.
+"""`Refusal` and the plane's own refusal shapes.
 
-The rule: "Never a submission that returns success and produces
-nothing. Every refusal carries a machine code and a remediation sentence
-generated from the command registry."
+`Refusal` itself has moved to `asop.errors` — the shared ASOP contract's one
+exception type, so that a caller validating a gate or an attestation against
+`asop.gates` never has to know whether it is talking to this plane or to a
+harness that only depends on `asop`. This module re-exports it rather than
+redefining it: `agentco.errors.Refusal is asop.errors.Refusal` holds, and
+that identity is the point — two `Refusal` classes would mean a `try/except
+Refusal` written against one side silently missing refusals raised by the
+other. See `packages/asop/asop/errors.py` for the type itself.
 
-The remediation is not decoration. the scope-model decision's whole argument is that a
-`ScopeLease` registry whose leases all intersect becomes noise within four
-days; the thing that stops a colleague concluding the tool is broken when
-their first `POST` is refused is a sentence that names what to do instead.
-A refusal that says only `scope_too_broad` teaches them to stop calling.
-
-`Refusal` is deliberately NOT an HTTPException subclass — this module is
-imported by the CLI and the digest job as well as the app, and none of them
-should have to depend on FastAPI to read a refusal. `app.py` owns the one
-translation into HTTP.
+What stays here are the refusal shapes that are NOT part of the shared
+contract because nothing outside this plane has an opinion on them:
+`Unauthenticated` is an HTTP-transport concern (this plane's auth), and
+`scope_too_broad` is a `ScopeClaim` concern (this plane's concurrency
+primitive — a harness adopting the ASOP contract has no reason to know what
+a scope claim is).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from asop.errors import Refusal
 
-
-# NOT frozen, and that is deliberate rather than an oversight. A frozen
-# dataclass subclassing Exception cannot have `__traceback__` assigned —
-# `FrozenInstanceError` — which breaks any library that rewrites tracebacks,
-# and pytest and multiprocessing both do. Immutability is not worth that: an
-# exception is thrown and read, and nothing here mutates one.
-@dataclass
-class Refusal(Exception):
-    """A request the registry declines, with the reason machine- and human-readable.
-
-    `code` is stable and greppable (clients branch on it). `remediation` is a
-    complete sentence addressed to the caller. `http_status` is carried here
-    rather than mapped in the app so that a new refusal cannot be added
-    without its author deciding what it means over HTTP.
-    """
-
-    code: str
-    message: str
-    remediation: str
-    http_status: int = 422
-
-    def __post_init__(self) -> None:
-        """Populate `args`, which is what makes this exception survive a pickle.
-
-        `Exception.__reduce__` reconstructs from `(cls, self.args)`, and a
-        dataclass exception never populates `args` on its own — so a Refusal
-        crossing a process boundary came back as
-        `TypeError: __init__() missing 3 required positional arguments`, having
-        lost its code, message and remediation on the way.
-
-        Nothing in this package crosses a process boundary with a Refusal today,
-        so this was latent. It would have surfaced inside a worker pool or under
-        pytest-xdist, as an argument-count TypeError with no trace of the actual
-        refusal — an error about an error, which is the worst place to be
-        debugging from.
-        """
-        super().__init__(self.code, self.message, self.remediation)
-
-    def __str__(self) -> str:  # pragma: no cover - trivial
-        return f"{self.code}: {self.message} — {self.remediation}"
-
-    def to_dict(self) -> dict:
-        return {
-            "state": "refused",
-            "code": self.code,
-            "message": self.message,
-            "remediation": self.remediation,
-        }
+__all__ = ["Refusal", "Unauthenticated", "scope_too_broad"]
 
 
 class Unauthenticated(Refusal):

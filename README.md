@@ -27,6 +27,13 @@ was done and gets better when it wasn't.* AgentCo is the plane that stores ASOPs
 versions them, records their outcomes, and routes their human gates — whatever
 work-unit your harness uses to execute them (ours is called a bead).
 
+The gate schema and the SOP record shape that make "verified" and
+"versioned" checkable are their own package, `agentco-asop`
+([`packages/asop/`](packages/asop/)) — the one piece any harness executing
+ASOP work needs, without needing the rest of this coordination plane. This
+repo depends on it like any other consumer; see
+[`docs/architecture.md`](docs/architecture.md#the-asop-contract-package).
+
 It sits **above** agent memory and context stores — an agent's own recall is its
 harness's business (that layer is well served by projects like
 [OpenViking](https://github.com/volcengine/OpenViking)); AgentCo coordinates what
@@ -167,6 +174,10 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 git clone https://github.com/mabidoli/agentco && cd agentco
 uv run --extra dev --extra server --extra mcp pytest -q
 ```
+
+That pulls in `agentco-asop` (the ASOP contract package, `packages/asop/`)
+as a `uv` workspace member automatically — nothing extra to install. Its own
+suite runs on its own: `uv run pytest packages/asop/tests -q`.
 
 ### Run it
 
