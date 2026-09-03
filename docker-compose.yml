@@ -35,11 +35,48 @@ services:
     environment:
       # The identity excluded from the adoption gate's own publisher count.
       AGENTCO_REGISTRY_OPERATOR: ${AGENTCO_REGISTRY_OPERATOR:-operator}
+      # Unset here means the SQLite-on-the-volume default two lines below.
+      # Set AGENTCO_PG_DSN (compose's `pg` profile, see the `postgres` service
+      # below) and the registry, work queue and SOP library all move to that
+      # one database — same "AGENTCO_DB names the durable backend" rule
+      # docs/roadmap.md#where-the-stores-live states, just with the DSN kept
+      # in one place instead of typed twice.
+      AGENTCO_DB: ${AGENTCO_PG_DSN:-}
     security_opt:
       - no-new-privileges:true
     # Advisory service, small footprint. The cap exists so a runaway resolver
     # cannot take the host down with it.
     mem_limit: 512m
+
+  # Opt-in durable backend, one step further than the SQLite file on
+  # `agentco-state`: `docker compose --profile pg up -d postgres registry`,
+  # with `AGENTCO_PG_DSN` pointing `registry`'s `AGENTCO_DB` (above) at this
+  # service. Absent `--profile pg`, this service does not exist and nothing
+  # about the default (JSONL, then SQLite via a bare `AGENTCO_DB=<path>`)
+  # changes — the storage backend stays an opt-in, not a new requirement.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["pg"]
+    container_name: agentco-postgres
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - agentco-pg-state:/var/lib/postgresql/data
+    environment:
+      # `${VAR:?message}` is NOT usable here even though this service only
+      # STARTS under `--profile pg` — Compose interpolates every service's
+      # `environment:` block while parsing the file, profile or not, so a
+      # required-variable error here would break `docker compose config`/`up`
+      # for the DEFAULT path (no Postgres involved at all) too. The default
+      # below is therefore an obvious, checked-in placeholder, not a real
+      # secret — set AGENTCO_PG_PASSWORD in a `.env` compose reads (or export
+      # it) before actually starting this profile.
+      POSTGRES_USER: ${AGENTCO_PG_USER:-agentco}
+      POSTGRES_PASSWORD: ${AGENTCO_PG_PASSWORD:-change-me-before-using-the-pg-profile}
+      POSTGRES_DB: ${AGENTCO_PG_DB:-agentco}
+    security_opt:
+      - no-new-privileges:true
 
   # The cadence boundary, as a one-shot rather than a sidecar: divergence is
   # delivered on a schedule a team chooses, and a container that decides that
@@ -62,6 +99,9 @@ services:
       # Set to post the digest somewhere. Absent means print-only, which is the
       # honest default: delivery reaches other people.
       AGENTCO_DIGEST_WEBHOOK: ${AGENTCO_DIGEST_WEBHOOK:-}
+      # Same backend `registry` is pointed at — a digest reading a different
+      # store than the one being written to would silently report nothing.
+      AGENTCO_DB: ${AGENTCO_PG_DSN:-}
     command: ["digest"]
 
   # The pulse, same shape as the digest: a one-shot the host schedules. Bare
@@ -84,7 +124,11 @@ services:
       # Unset means nobody's silence is judged; the pulse still sweeps and reports.
       AGENTCO_CADENCE: ${AGENTCO_CADENCE:-}
       AGENTCO_PULSE_EVERY: ${AGENTCO_PULSE_EVERY:-}
+      # Same backend `registry` is pointed at — see the note on `digest`.
+      AGENTCO_DB: ${AGENTCO_PG_DSN:-}
     command: ["pulse"]
 
 volumes:
   agentco-state:
+  # Only created when the `pg` profile is used; harmless and unused otherwise.
+  agentco-pg-state:
