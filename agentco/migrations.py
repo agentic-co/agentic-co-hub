@@ -32,13 +32,22 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timezone
-from typing import NamedTuple, Sequence
+from typing import NamedTuple, Optional, Sequence
 
 
 class Migration(NamedTuple):
     version: int
     name: str
     statements: tuple[str, ...]
+    # A Postgres-dialect rewrite of `statements`, for the migrations where the
+    # SQLite DDL is not portable — `AUTOINCREMENT` (Postgres: `GENERATED
+    # ALWAYS AS IDENTITY`) and `INSERT OR IGNORE` (Postgres: `ON CONFLICT ...
+    # DO NOTHING`) are the two shapes that appear below. `None` means the
+    # SQLite statements already ARE portable (every `CREATE TABLE IF NOT
+    # EXISTS`/`ALTER TABLE ADD COLUMN`/`CREATE INDEX IF NOT EXISTS` in this
+    # file that has no AUTOINCREMENT column runs unchanged on Postgres) — the
+    # common case, so most migrations below carry no second copy at all.
+    pg_statements: Optional[tuple[str, ...]] = None
 
 
 LEDGER = """
@@ -139,6 +148,100 @@ _0001 = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_conflict_fired ON conflict_actions(fired_at)",
     "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', '1')",
+)
+
+
+# The Postgres rewrite of `_0001`, statement for statement, differing only
+# where SQLite's dialect is not portable:
+#
+#   * `INTEGER PRIMARY KEY AUTOINCREMENT` → `BIGINT GENERATED ALWAYS AS
+#     IDENTITY PRIMARY KEY` on the three append-only tables (`events.seq`,
+#     `calls.id`, `conflict_actions.id`) — Postgres's identity column, chosen
+#     over `SERIAL` because it is the SQL-standard spelling and does not leave
+#     a same-named sequence object implicitly owned in older, surprising ways.
+#   * `INSERT OR IGNORE` → `INSERT ... ON CONFLICT (key) DO NOTHING`.
+#
+# Every other line — every `CREATE TABLE IF NOT EXISTS` with a TEXT primary
+# key, every `CREATE INDEX IF NOT EXISTS`, every partial index — is copied
+# unchanged, because it already IS portable and a second hand-typed copy of
+# an unchanged line is a second place for the two to drift.
+_0001_pg = (
+    """
+    CREATE TABLE IF NOT EXISTS meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        seq         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        uid         TEXT NOT NULL UNIQUE,
+        kind        TEXT NOT NULL,
+        actor       TEXT NOT NULL,
+        repo        TEXT,
+        occurred_at TEXT NOT NULL,
+        payload     TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_events_actor ON events(actor)",
+    "CREATE INDEX IF NOT EXISTS idx_events_kind  ON events(kind)",
+    """
+    CREATE TABLE IF NOT EXISTS leases (
+        uid            TEXT PRIMARY KEY,
+        holder         TEXT NOT NULL,
+        holder_attested INTEGER NOT NULL DEFAULT 0,
+        repo           TEXT NOT NULL,
+        prefixes       TEXT NOT NULL,
+        intent         TEXT NOT NULL,
+        claimed_at     TEXT NOT NULL,
+        expires_at     TEXT NOT NULL,
+        released_at    TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_leases_live ON leases(repo, released_at, expires_at)",
+    """
+    CREATE TABLE IF NOT EXISTS snapshots (
+        uid           TEXT PRIMARY KEY,
+        actor         TEXT NOT NULL,
+        artifact_uri  TEXT NOT NULL,
+        purpose       TEXT NOT NULL,
+        hash_kind     TEXT NOT NULL,
+        content_hash  TEXT NOT NULL,
+        taken_at      TEXT NOT NULL,
+        expires_at    TEXT,
+        last_seen_hash TEXT,
+        last_checked_at TEXT,
+        diverged_at    TEXT,
+        delivered_at   TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_snapshots_actor ON snapshots(actor)",
+    """
+    CREATE TABLE IF NOT EXISTS calls (
+        id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        verb        TEXT NOT NULL,
+        actor       TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        code        TEXT,
+        latency_ms  REAL NOT NULL,
+        at          TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_calls_actor ON calls(actor, at)",
+    "CREATE INDEX IF NOT EXISTS idx_calls_verb  ON calls(verb, at)",
+    """
+    CREATE TABLE IF NOT EXISTS conflict_actions (
+        id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        lease_uid   TEXT NOT NULL,
+        with_holder TEXT NOT NULL,
+        fired_at    TEXT NOT NULL,
+        acted_at    TEXT,
+        action      TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_conflict_fired ON conflict_actions(fired_at)",
+    "INSERT INTO meta(key, value) VALUES ('schema_version', '1') "
+    "ON CONFLICT (key) DO NOTHING",
 )
 
 
@@ -330,23 +433,50 @@ _0006 = (
 _0007 = ("ALTER TABLE sops ADD COLUMN proposals TEXT NOT NULL DEFAULT '[]'",)
 
 
+# --------------------------------------------------------------------------- #
+# 0008 — `work_items.ordinal`: a portable stand-in for SQLite's `rowid`.
+#
+# `SqlQueue._read_raw` orders by `rowid` so `list()`/`ready()` return items in
+# INSERTION order regardless of how many times a row has since been UPDATEd —
+# SQLite's rowid does not move on UPDATE, only on VACUUM/re-insert, neither of
+# which this codebase does. Postgres has no such column: `ctid` is the closest
+# analogue and is explicitly the wrong one — it changes on every UPDATE
+# (MVCC writes a new tuple version), so ordering by it would reorder the queue
+# every time a lease is claimed or a result reported, not just on create.
+#
+# `ordinal` is populated only for Postgres (`GENERATED ALWAYS AS IDENTITY`,
+# which Postgres backfills for existing rows on `ADD COLUMN`) and is simply
+# never read on SQLite, where `rowid` already does this job — the SQLite
+# statement below adds the column for schema symmetry (so a row from either
+# backend has the same column set) but nothing ever queries it there.
+# --------------------------------------------------------------------------- #
+
+_0008 = ("ALTER TABLE work_items ADD COLUMN ordinal INTEGER",)
+_0008_pg = ("ALTER TABLE work_items ADD COLUMN ordinal BIGINT GENERATED ALWAYS AS IDENTITY",)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
-    Migration(1, "registry-core", _0001),
+    Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
     Migration(3, "events-agent-label", _0003),
     Migration(4, "work-item-gates", _0004),
     Migration(5, "calls-transport-and-label", _0005),
     Migration(6, "sop-class-tags-authorship", _0006),
     Migration(7, "sop-proposals", _0007),
+    Migration(8, "work-items-insertion-order", _0008, pg_statements=_0008_pg),
 )
 
 
-def applied_versions(conn: sqlite3.Connection) -> set[int]:
+def applied_versions(conn) -> set[int]:
+    """`conn` is a `sqlite3.Connection` or a `pgadapter.PgConnection` — this
+    function only ever calls `.execute()`, so the type is left unannotated
+    rather than importing `pgadapter` here for a Union that buys no checking
+    (nothing in this module constructs either type)."""
     conn.execute(LEDGER)
     return {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
 
 
-def apply(conn: sqlite3.Connection, pending: Sequence[Migration] = MIGRATIONS) -> list[int]:
+def apply(conn, pending: Sequence[Migration] = MIGRATIONS) -> list[int]:
     """Bring `conn`'s file up to date. Returns the versions newly applied.
 
     An empty return is the normal steady state and is what the idempotency
@@ -373,6 +503,12 @@ def apply(conn: sqlite3.Connection, pending: Sequence[Migration] = MIGRATIONS) -
     the transaction, where the answer cannot change under us, and an
     already-applied migration is skipped rather than repeated.
     """
+    # `dialect` is read off the connection, not passed in — every caller
+    # already does `conn = db.connect(target)` / `conn = pgadapter.connect(...)`
+    # before reaching here, and a plain `sqlite3.Connection` has no `dialect`
+    # attribute, which is exactly the "sqlite" default. One call site
+    # (`migrations.apply(conn)`) stays unchanged for both backends this way.
+    dialect = getattr(conn, "dialect", "sqlite")
     done = applied_versions(conn)
     previous = conn.isolation_level
     conn.isolation_level = None
@@ -381,6 +517,11 @@ def apply(conn: sqlite3.Connection, pending: Sequence[Migration] = MIGRATIONS) -
         for migration in pending:
             if migration.version in done:
                 continue
+            statements = (
+                migration.pg_statements
+                if dialect == "postgres" and migration.pg_statements is not None
+                else migration.statements
+            )
             conn.execute("BEGIN IMMEDIATE")
             try:
                 # The authoritative check: the write lock is held, so no other
@@ -393,7 +534,7 @@ def apply(conn: sqlite3.Connection, pending: Sequence[Migration] = MIGRATIONS) -
                     is not None
                 )
                 if not already:
-                    for statement in migration.statements:
+                    for statement in statements:
                         conn.execute(statement)
                     conn.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) "

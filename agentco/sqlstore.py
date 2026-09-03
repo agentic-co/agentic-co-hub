@@ -47,6 +47,7 @@ from typing import Callable, Iterator, Optional, Sequence
 
 from agentco import migrations, policy
 from agentco.db import BUSY_TIMEOUT_MS
+from agentco.pgadapter import PgConnection, is_postgres_target
 from agentco.sop import SOP, SopLibrary, SopStatus
 from agentco.work import (
     Queue,
@@ -138,16 +139,27 @@ def _quote(column: str) -> str:
     return f'"{column}"'
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
+def connect(path: str | Path) -> sqlite3.Connection | PgConnection:
     """Open the durable store, migrated, in autocommit so BEGIN is explicit.
 
     `isolation_level=None` because every write here is wrapped in an explicit
     `BEGIN IMMEDIATE`. Leaving Python's implicit transaction handling on would
     mean the transaction that matters starts somewhere the code does not say.
+
+    `path` is a Postgres DSN when `AGENTCO_DB` names one — `agentco/stores.py`
+    hands the same string to `SqlQueue`/`SqlSopLibrary` that it hands to
+    `db.connect` for the registry tables, because "one file for both" is the
+    storage design, and a DSN is that file's equivalent for this backend. See
+    `agentco/pgadapter.py` for what changes and what does not.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
+    if is_postgres_target(path):
+        conn: sqlite3.Connection | PgConnection = PgConnection(str(path))
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        migrations.apply(conn)
+        return conn
+    sqlite_path = Path(path)
+    sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(sqlite_path), isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
@@ -185,7 +197,13 @@ class _SqlBacked:
     """
 
     def _open(self, path: str | Path) -> None:
-        self.path = Path(path)
+        # A Postgres DSN is not a filesystem path — `Path("postgresql://...")`
+        # would not fail here, but `path.parent.mkdir(...)` two lines into
+        # `connect()` would try to create a directory named `postgresql:`.
+        # `.path` is kept as the raw string for that case; every existing use
+        # of `.path` (tests comparing it to a `tmp_path` file, `jsonl_queue`
+        # reading it as a file) is on the SQLite/JSONL side, never on a DSN.
+        self.path = path if is_postgres_target(path) else Path(path)
         # Before the connection: a caller that raced `_open` must never find
         # the attribute missing.
         self._tx_lock = threading.RLock()
@@ -310,7 +328,13 @@ class SqlQueue(_SqlBacked, Queue):
 
     def _read_raw(self) -> tuple[list[dict], list[bytes]]:
         with self._read_tx() as conn:
-            rows = conn.execute("SELECT * FROM work_items ORDER BY rowid").fetchall()
+            # `rowid` is SQLite's implicit, UPDATE-stable insertion-order
+            # column; Postgres has no equivalent (`ctid` moves on every
+            # UPDATE, which this table gets constantly via leases and
+            # results) so migration 0008 adds `ordinal`, an identity column,
+            # for exactly this ORDER BY. See that migration's docstring.
+            order_col = "ordinal" if getattr(conn, "dialect", "sqlite") == "postgres" else "rowid"
+            rows = conn.execute(f"SELECT * FROM work_items ORDER BY {order_col}").fetchall()
         return [_row_to_dict(r) for r in rows], []
 
     # -- creation --------------------------------------------------------
@@ -364,6 +388,25 @@ class SqlQueue(_SqlBacked, Queue):
 
         with self._write_tx() as conn:
             if key:
+                if getattr(conn, "dialect", "sqlite") == "postgres":
+                    # `BEGIN IMMEDIATE`'s whole-database write lock is what
+                    # makes the check-then-insert below safe on SQLite: a
+                    # second `create()` racing on the SAME key cannot even
+                    # start its own SELECT until this transaction commits, so
+                    # it always sees whichever row won. Postgres's plain
+                    # `BEGIN` has no such lock, and `SELECT ... FOR UPDATE`
+                    # (the fix used in `_mutate` for the analogous claim race)
+                    # does not apply here — there is no ROW yet for a
+                    # genuinely new key, so there is nothing to lock. What
+                    # serialises two creates racing on the SAME key instead is
+                    # a lock on the KEY ITSELF: `pg_advisory_xact_lock` takes
+                    # it now and releases it automatically at this
+                    # transaction's COMMIT or ROLLBACK, never left dangling.
+                    # Scoped to one key, not the whole table — an unrelated
+                    # `create()` under a different key is not serialised
+                    # against this one, matching SQLite's own behaviour under
+                    # WAL for anything that is not this specific contest.
+                    conn.execute("SELECT pg_advisory_xact_lock(hashtext(?)::bigint)", (key,))
                 existing_row = conn.execute(
                     "SELECT * FROM work_items WHERE natural_key = ?", (key,)
                 ).fetchone()
@@ -444,10 +487,35 @@ class SqlQueue(_SqlBacked, Queue):
         Every lease operation inherited from `Queue` — claim, report, reap —
         is expressed in terms of this, so this is the single place the fenced
         CAS has to be right.
+
+        **`FOR UPDATE` on Postgres, nothing extra on SQLite.** SQLite's
+        `BEGIN IMMEDIATE` (`_write_tx`) takes a whole-database write lock
+        before this SELECT runs, so two racing claims are fully serialised:
+        the second one's SELECT does not start until the first's transaction
+        has committed, and it therefore sees the lease already held — `cas()`
+        raises the ordinary `LeaseError`, "someone else got it first". Under
+        Postgres's default READ COMMITTED with a plain `BEGIN`, there is no
+        such lock: two concurrent transactions could both SELECT the row
+        while it is still unleased, both decide (correctly, on what they each
+        read) to grant the lease, and only then discover the conflict at the
+        UPDATE — which the compare-and-swap WHERE clause does catch, but as a
+        `WorkError` ("matched 0 rows"), not the clean `LeaseError` a caller
+        expects for a lost race (see `tests/test_sqlstore.py`'s twelve-process
+        test, which asserts every loser comes back with `won=False`, never an
+        exception). `SELECT ... FOR UPDATE` closes that gap the same way
+        `BEGIN IMMEDIATE` does: the second transaction's SELECT blocks until
+        the first commits, then re-reads the row's now-current (leased)
+        state, so `cas()` sees what SQLite's readers see and raises the same
+        `LeaseError`. A row-level lock, not `pg_advisory_xact_lock` or a
+        table lock — the contested resource is this one row, and locking
+        anything wider would serialise claims on UNRELATED items too, which
+        SQLite's own design does not do either (WAL lets readers and writers
+        on different rows proceed; only this specific race needs blocking).
         """
         with self._write_tx() as conn:
+            suffix = " FOR UPDATE" if getattr(conn, "dialect", "sqlite") == "postgres" else ""
             row = conn.execute(
-                "SELECT * FROM work_items WHERE id = ?", (item_id,)
+                f"SELECT * FROM work_items WHERE id = ?{suffix}", (item_id,)
             ).fetchone()
             if row is None:
                 return None
@@ -582,9 +650,27 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
         version is `max(...) + 1` over what could be PARSED, so an invisible
         row silently frees its number for reissue to different text. With this
         list hardcoded empty, that refusal could never fire on this backend.
+
+        **`FOR UPDATE` when called from inside `_locked()`, nothing extra as
+        a plain read.** `create`/`revise`/`activate` all read the whole
+        history and write it back inside one `_locked()` transaction — under
+        SQLite's `BEGIN IMMEDIATE` that whole read-modify-write is already
+        serialised against a second author, so two concurrent `revise()`
+        calls cannot both compute the same "next version" number. Postgres's
+        plain `BEGIN` gives no such guarantee, and this table has no targeted
+        row to lock the way `_mutate` locks one work item — the read here IS
+        the whole table. `conn.in_transaction` is how this method tells the
+        two callers apart without a second method or a parameter every
+        caller would have to remember to pass: true only when a `_locked()`
+        block is already open (`get`/`history`/`list_active` call this
+        outside one, and stay plain reads that do not block on an unrelated
+        writer, matching SQLite/WAL's own readers-don't-block-writers
+        behaviour there).
         """
         with self._read_tx() as conn:
-            rows = conn.execute("SELECT * FROM sops ORDER BY sop_id, version").fetchall()
+            postgres = getattr(conn, "dialect", "sqlite") == "postgres"
+            suffix = " FOR UPDATE" if postgres and conn.in_transaction else ""
+            rows = conn.execute(f"SELECT * FROM sops ORDER BY sop_id, version{suffix}").fetchall()
         out: list[SOP] = []
         quarantined: list[sqlite3.Row] = []
         for row in rows:
