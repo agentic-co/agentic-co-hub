@@ -82,7 +82,6 @@ from asop.sop import (
     Step,
     lesson_text,
     validate_asop,
-    validate_fields,
     validate_step,
 )
 
@@ -109,7 +108,6 @@ __all__ = [
     "step_payload",
     "upgrade_legacy",
     "validate_asop",
-    "validate_fields",
     "validate_step",
 ]
 
