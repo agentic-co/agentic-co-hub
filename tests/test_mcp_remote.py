@@ -152,17 +152,30 @@ def test_an_empty_queue_is_none_rather_than_an_error_or_an_envelope(remote):
 
 
 def test_sop_get_returns_the_sop_itself_and_none_for_a_miss(remote, filer, client):
-    """`sop_create` is not an MCP tool — the nine-tool budget — so the SOP is
-    authored over HTTP, which is exactly how the other machine would do it."""
+    """`sop_create` is not an MCP tool — the twelve-tool budget — so the ASOP
+    is authored over HTTP, which is exactly how the other machine would do it."""
     filer_reg = LoopbackRegistry("bigmac", client)
-    sop = filer_reg.sop_create("Pull work safely", purpose="Keep the lane honest")["sop"]
-    assert tool(remote, "sop_get")(sop_id=sop["sop_id"]) is None, "a draft is not active yet"
+    sop = filer_reg.sop_create(
+        "Pull work safely",
+        purpose="Keep the lane honest",
+        roles={"puller": {"kind": "agent"}},
+        steps=[{
+            "name": "pull", "role": "puller", "purpose": "claim only what this lane owns",
+            "gate": {"kind": "deterministic", "check": "agentco verifiers",
+                     "max_park_seconds": 900, "on_timeout": "fail"},
+        }],
+    )["sop"]
+    assert tool(remote, "sop_get")(sop_id=sop["asop_id"]) is None, "a draft is not active yet"
 
-    filer_reg.sop_activate(sop["sop_id"], 1)
-    read = tool(remote, "sop_get")(sop_id=sop["sop_id"])
-    assert read["sop_id"] == sop["sop_id"]
+    filer_reg.sop_activate(sop["asop_id"], 1)
+    read = tool(remote, "sop_get")(sop_id=sop["asop_id"])
+    assert read["asop_id"] == sop["asop_id"]
     assert read["purpose"] == "Keep the lane honest"
-    assert tool(remote, "sop_get")(sop_id="sop-nope") is None
+    # The proxy carries the whole sequence, gates included — a relay that
+    # dropped `steps` would hand the far machine a procedure with no checks.
+    assert [st["name"] for st in read["steps"]] == ["pull"]
+    assert read["steps"][0]["gate"]["kind"] == "deterministic"
+    assert tool(remote, "sop_get")(sop_id="asop-nope") is None
 
 
 def test_work_create_returns_the_item_and_a_duplicate_key_returns_the_same_one(remote):

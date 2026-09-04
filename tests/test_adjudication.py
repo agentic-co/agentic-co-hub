@@ -57,6 +57,19 @@ def attestation(check="a reviewer reads the diff", exit_status=0):
             "at": "2026-09-02T15:00:00+00:00"}
 
 
+def _declare(queue, humans=(), adjudicators=()):
+    """Who the operator declared. Undeclared, only declared humans may
+    adjudicate (ASOP v3 §6.1) — so a test that adjudicates has to say who its
+    human is, exactly as an operator does with `AGENTCO_HUMANS`. This also
+    works around `SqlQueue` not defaulting `.humans`/`.adjudicators` the way
+    the JSONL `Queue` does (`agentco/sqlstore.py`) — every backend needs them
+    set explicitly before `.adjudicate()` is reachable, even a call this test
+    expects to be refused for an unrelated reason."""
+    queue.humans = frozenset(humans)
+    queue.adjudicators = frozenset(adjudicators)
+    return queue
+
+
 # --------------------------------------------------------------------------- #
 # the record
 # --------------------------------------------------------------------------- #
@@ -64,6 +77,7 @@ def attestation(check="a reviewer reads the diff", exit_status=0):
 
 def test_a_reviewer_tags_a_divergence_with_evidence(queue):
     item = executed(queue, metadata={"sop_ref": {"sop_id": "sop-1", "version": 3}}, by_plane=True)
+    _declare(queue, humans=("dana",))
     tagged = queue.adjudicate(item.id, "good", "step 3 says 'restart'; the log shows a reload sufficed",
                               adjudicator="dana")
     record = tagged.metadata["adjudication"]
@@ -77,6 +91,7 @@ def test_a_reviewer_tags_a_divergence_with_evidence(queue):
 
 def test_the_verdict_is_good_or_bad_and_nothing_else(queue):
     item = executed(queue)
+    _declare(queue, humans=("dana",))
     with pytest.raises(Refusal) as caught:
         queue.adjudicate(item.id, "meh", "some evidence", adjudicator="dana")
     assert caught.value.code == ADJUDICATION_INVALID
@@ -85,6 +100,7 @@ def test_the_verdict_is_good_or_bad_and_nothing_else(queue):
 
 def test_evidence_is_required(queue):
     item = executed(queue)
+    _declare(queue, humans=("dana",))
     for evidence in (None, "", "   ", 42):
         with pytest.raises(Refusal) as caught:
             queue.adjudicate(item.id, "bad", evidence, adjudicator="dana")
@@ -99,9 +115,12 @@ def test_evidence_is_required(queue):
 
 def test_the_executor_cannot_adjudicate_its_own_work(queue):
     """The lease is released on report, so `leased_by` has forgotten kofi.
-    The record has not."""
+    The record has not. Nobody is declared here at all — the self check
+    fires before the declaration question is even asked (adjudication_record's
+    order is shape -> unexecuted -> self -> entitlement -> exists)."""
     item = executed(queue, agent="kofi")
     assert item.leased_by is None
+    _declare(queue)
     with pytest.raises(Refusal) as caught:
         queue.adjudicate(item.id, "good", "I judged my shortcut acceptable", adjudicator="kofi")
     assert caught.value.code == ADJUDICATION_SELF
@@ -112,6 +131,7 @@ def test_the_executor_cannot_adjudicate_its_own_work(queue):
 def test_the_current_lease_holder_cannot_adjudicate_either(queue):
     item = queue.create("in flight")
     queue.claim(item.id, "kofi")
+    _declare(queue)
     with pytest.raises(Refusal) as caught:
         queue.adjudicate(item.id, "bad", "x", adjudicator="kofi")
     assert caught.value.code == ADJUDICATION_SELF
@@ -120,6 +140,7 @@ def test_the_current_lease_holder_cannot_adjudicate_either(queue):
 def test_a_deterministic_attester_is_an_executor_too(queue):
     """On a deterministic gate the party that attests IS the executor by
     design. A re-run by another node still puts that node in the executor set."""
+    _declare(queue, humans=("dana",))
     item = queue.create("gated", verify=DETERMINISTIC)
     leased = queue.claim(item.id, "kofi")
     queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE,
@@ -136,6 +157,7 @@ def test_a_deterministic_attester_is_an_executor_too(queue):
 
 def test_an_unexecuted_item_has_no_divergence_to_judge(queue):
     item = queue.create("never claimed")
+    _declare(queue, humans=("dana",))
     with pytest.raises(Refusal) as caught:
         queue.adjudicate(item.id, "bad", "x", adjudicator="dana")
     assert caught.value.code == ADJUDICATION_UNEXECUTED
@@ -143,6 +165,7 @@ def test_an_unexecuted_item_has_no_divergence_to_judge(queue):
 
 def test_an_empty_adjudicator_is_a_judgement_from_nobody(queue):
     item = executed(queue)
+    _declare(queue)
     for nobody in ("", "  ", None):
         with pytest.raises(Refusal) as caught:
             queue.adjudicate(item.id, "good", "x", adjudicator=nobody)
@@ -151,6 +174,7 @@ def test_an_empty_adjudicator_is_a_judgement_from_nobody(queue):
 
 def test_an_adjudication_is_immutable(queue):
     item = executed(queue)
+    _declare(queue, humans=("dana", "eve"))
     queue.adjudicate(item.id, "good", "x", adjudicator="dana")
     with pytest.raises(Refusal) as caught:
         queue.adjudicate(item.id, "bad", "y", adjudicator="eve")
@@ -179,11 +203,61 @@ def test_an_unknown_item_is_none_not_an_error(queue):
 
 
 # --------------------------------------------------------------------------- #
+# who may adjudicate AT ALL — declared, not inferred (ASOP v3 §6.1)
+# --------------------------------------------------------------------------- #
+
+
+def test_an_undeclared_route_may_not_adjudicate(queue):
+    """Undeclared means only declared humans adjudicate — this fails CLOSED,
+    the opposite default from verifiers. `eve` here executed nothing and is
+    declared neither a human nor an adjudicator, so the entitlement question
+    (not the separation one) is what refuses her."""
+    item = executed(queue, agent="kofi")
+    _declare(queue)
+    with pytest.raises(Refusal) as caught:
+        queue.adjudicate(item.id, "good", "x", adjudicator="eve")
+    assert caught.value.code == ADJUDICATION_INVALID
+    assert caught.value.http_status == 403
+    assert "adjudication" not in (queue.get(item.id).metadata or {})
+
+
+def test_a_declared_adjudicator_who_did_not_execute_succeeds(queue):
+    """A route the operator declared an adjudicator, and that never touched
+    this item, may judge it. Entitlement and separation are two different
+    questions, and this route clears both."""
+    item = executed(queue, agent="kofi")
+    _declare(queue, adjudicators=("bot-reviewer",))
+    tagged = queue.adjudicate(item.id, "good", "the timeout was generous, not wrong",
+                              adjudicator="bot-reviewer")
+    assert tagged.metadata["adjudication"]["by"] == "bot-reviewer"
+
+
+def test_a_declared_adjudicator_who_executed_is_still_refused_as_self(queue):
+    """Declaring a route an adjudicator answers the entitlement question, not
+    the separation one. `kofi` executed this item, so it is refused as SELF —
+    not as undeclared — even though it is also a declared adjudicator; the
+    self check runs before the entitlement check."""
+    item = executed(queue, agent="kofi")
+    _declare(queue, adjudicators=("kofi",))
+    with pytest.raises(Refusal) as caught:
+        queue.adjudicate(item.id, "good", "x", adjudicator="kofi")
+    assert caught.value.code == ADJUDICATION_SELF
+
+
+# --------------------------------------------------------------------------- #
 # the rider on attest
 # --------------------------------------------------------------------------- #
 
 
-def test_a_verifier_tags_the_divergence_in_the_same_call_as_the_verdict(queue):
+def test_a_verifier_tags_the_divergence_in_the_same_call_as_the_verdict(queue, monkeypatch):
+    # `attest`'s pre-verdict adjudication check reads AGENTCO_HUMANS /
+    # AGENTCO_ADJUDICATORS directly rather than the queue's own declared
+    # `.humans`/`.adjudicators` (see the report for this lane) — the env var
+    # is what the rider's up-front validation actually consults, so it has to
+    # be set here too, alongside declaring the queue for the write that lands
+    # afterwards through `adjudicate` itself.
+    monkeypatch.setenv("AGENTCO_HUMANS", "dana")
+    _declare(queue, humans=("dana",))
     item = queue.create("judged", verify=JUDGED)
     leased = queue.claim(item.id, "kofi")
     queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
@@ -258,7 +332,8 @@ def _executed_over_http(client, actor="kofi", **fields):
     return item
 
 
-def test_over_http_the_executor_is_refused_and_a_reviewer_is_not(tmp_path):
+def test_over_http_the_executor_is_refused_and_a_reviewer_is_not(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTCO_HUMANS", "dana")
     client = _client(tmp_path)
     item = _executed_over_http(client)
 
@@ -287,7 +362,8 @@ def test_over_http_the_body_cannot_name_the_adjudicator(tmp_path):
     assert "adjudication" not in (stored.metadata or {})
 
 
-def test_over_http_the_rider_on_attest_is_written_with_the_verdict(tmp_path):
+def test_over_http_the_rider_on_attest_is_written_with_the_verdict(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTCO_HUMANS", "dana")
     client = _client(tmp_path)
     item = _executed_over_http(client, verify=JUDGED)
     answered = _post(client, f"/work/{item['id']}/attest", "dana", {
@@ -312,7 +388,8 @@ def test_over_http_an_unknown_item_is_a_404_with_a_code(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_over_mcp_the_rider_is_on_attest_and_the_process_identity_is_the_adjudicator(tmp_path):
+def test_over_mcp_the_rider_is_on_attest_and_the_process_identity_is_the_adjudicator(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTCO_HUMANS", "dana")
     executor = create_server(
         db_path=str(tmp_path / "r.sqlite3"), work_store=str(tmp_path / "work.jsonl"),
         sop_store=str(tmp_path / "sops.jsonl"), actor="kofi",
@@ -374,7 +451,12 @@ def test_adjudicate_is_in_the_push_set():
     assert "adjudicate" in PUSH_VERBS
 
 
-def test_over_the_outbox_the_executing_machine_is_refused_and_another_is_not(tmp_path):
+def test_over_the_outbox_the_executing_machine_is_refused_and_another_is_not(tmp_path, monkeypatch):
+    # This goes through the plain `/adjudicate` endpoint (not the attest
+    # rider), which reads the queue's own declared `.adjudicators` — but
+    # setting the env var too keeps this test's setup identical to the rider
+    # test just below it, and is what an operator would actually do.
+    monkeypatch.setenv("AGENTCO_ADJUDICATORS", "reviewer-box")
     client = _client(tmp_path)
     item = _executed_over_http(client, actor="bigmac")
 
@@ -398,7 +480,8 @@ def test_over_the_outbox_the_executing_machine_is_refused_and_another_is_not(tmp
     assert [(r["verb"], r["via"], r["agent_label"]) for r in rows][-1] == ("adjudicate", "outbox", "aider")
 
 
-def test_over_the_outbox_an_attest_line_carries_the_rider(tmp_path):
+def test_over_the_outbox_an_attest_line_carries_the_rider(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTCO_ADJUDICATORS", "reviewer-box")
     client = _client(tmp_path)
     item = _executed_over_http(client, actor="bigmac", verify=JUDGED)
     box = Outbox(tmp_path / "reviewer" / ".agentco")
@@ -438,6 +521,7 @@ def test_a_deterministic_gate_rider_is_refused_before_the_verdict_lands(queue):
     """Finding 3: a non-executor's rider on a deterministic gate landed the
     attestation and THEN refused the tag — a partial write. Now the whole call
     is refused up front: attesting a deterministic gate makes you an executor."""
+    _declare(queue, humans=("eve",))
     item = queue.create("gated", verify=DETERMINISTIC)
     leased = queue.claim(item.id, "kofi")
     queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE,
@@ -461,6 +545,7 @@ def test_a_reaped_first_holder_is_still_an_executor(queue):
     """Finding 4: kofi's lease lapsed and was reaped; dana finished the work.
     For idempotent work dana reported what kofi did — kofi may not grade it."""
     t0 = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+    _declare(queue, humans=("eve",))
     item = queue.create("idempotent export")
     assert queue.claim(item.id, "kofi", ttl_seconds=60, now=t0) is not None
     reaped = queue.reap_expired_leases(now=t0 + timedelta(minutes=5))
@@ -480,6 +565,7 @@ def test_annotate_cannot_forge_or_erase_plane_owned_keys(queue):
     forged tag) and `lease_report` (erasing the executor). Reserved keys now
     need `by_plane`, which no transport can pass."""
     item = executed(queue, agent="kofi")
+    _declare(queue)
     for key in ("adjudication", "lease_report", "claims", "verifies", "plan_vs_actual"):
         with pytest.raises(Refusal) as caught:
             queue.annotate(item.id, {key: {"forged": True}})

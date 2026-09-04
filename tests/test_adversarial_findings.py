@@ -427,6 +427,21 @@ def test_gate1_does_not_count_one_identity_twice_for_a_change_of_case(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def _deploy_body(purpose: str) -> dict:
+    """A one-step ASOP body. v3 records are sequences of gated steps, so a
+    bare `purpose=` is no longer a procedure — but `purpose` is still the
+    field this test tracks across versions, so it stays the thing that moves."""
+    return {
+        "purpose": purpose,
+        "roles": {"deployer": {"kind": "agent"}},
+        "steps": [{
+            "name": "deploy", "role": "deployer", "purpose": purpose,
+            "gate": {"kind": "deterministic", "check": "curl -fsS /healthz",
+                     "max_park_seconds": 900, "on_timeout": "fail"},
+        }],
+    }
+
+
 def test_a_pinned_sop_version_never_resolves_to_different_text(library, tmp_path):
     """A pin must never point at text the instance did not run against. FIXED in a71650a.
 
@@ -470,14 +485,15 @@ def test_a_pinned_sop_version_never_resolves_to_different_text(library, tmp_path
     was never entered and the version-number reissue it enabled was unreachable.
     """
     original_v2 = "the v2 procedure: run the smoke tests first"
-    sop = library.create("Deploy the service", purpose="the original v1 procedure")
-    library.revise(sop.sop_id, purpose=original_v2)
-    library.activate(sop.sop_id, 2)
+    sop = library.create("Deploy the service", **_deploy_body("the original v1 procedure"))
+    library.revise(sop.asop_id, purpose=original_v2)
+    library.activate(sop.asop_id, 2)
 
     queue = Queue(tmp_path / "work.jsonl")
-    item = library.instantiate(sop.sop_id, queue, title="deploy run")
-    pinned = item.metadata["sop_ref"]["version"]
-    assert library.get(sop.sop_id, pinned).purpose == original_v2
+    run = library.run(sop.asop_id, queue, title="deploy run", inputs={},
+                      bindings={"deployer": "alice"})
+    pinned = queue.get(run["runId"]).metadata["sop_ref"]["version"]
+    assert library.get(sop.asop_id, pinned).purpose == original_v2
 
     # A newer writer stores a status this version does not know about, so the
     # pinned row can no longer be parsed by this reader.
@@ -491,16 +507,16 @@ def test_a_pinned_sop_version_never_resolves_to_different_text(library, tmp_path
 
     # Attempt the re-point. Refusing is one of the two honest outcomes.
     try:
-        library.revise(sop.sop_id, purpose="a third, entirely different procedure")
+        library.revise(sop.asop_id, purpose="a third, entirely different procedure")
     except SopError:
         pass
 
     # Ordinary unrelated activity must not open a second route to the same
     # re-point: both of these also rewrite the whole file.
-    library.create("An unrelated procedure", purpose="nothing to do with the above")
-    library.activate(sop.sop_id, 1)
+    library.create("An unrelated procedure", **_deploy_body("nothing to do with the above"))
+    library.activate(sop.asop_id, 1)
 
-    resolved = library.get(sop.sop_id, pinned)
+    resolved = library.get(sop.asop_id, pinned)
     assert resolved is None or resolved.purpose == original_v2, (
         f"the pin resolves to text the instance never ran against: {resolved.purpose!r}"
     )

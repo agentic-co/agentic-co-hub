@@ -104,6 +104,18 @@ class ConformanceError(Exception):
     """A scenario step could not be performed at all — a harness bug, not a finding."""
 
 
+class UnresolvedReference(ConformanceError):
+    """A step names a label an EARLIER step never produced.
+
+    Not a harness bug and not a crash: it is what a scenario looks like on a
+    transport where the producing step refused. Recorded as its own outcome so
+    the comparison reports a difference — the whole point of a mutation test
+    is that dropping a field from one transport is VISIBLE, and a suite that
+    exploded on the follow-up step instead would report a stack trace where a
+    finding belongs.
+    """
+
+
 # --------------------------------------------------------------------------- #
 # scenarios
 # --------------------------------------------------------------------------- #
@@ -281,7 +293,8 @@ SCENARIOS: dict[str, dict] = {
             # The tree: three beads, `after` carried as blocked_by, per-step pins.
             step("operator", "sop_run", save="run1", sop="@dev",
                  inputs={"requirement": "REQ-1"},
-                 bindings={"implementer": "alice", "validator": "bob"}),
+                 bindings={"implementer": "alice", "validator": "bob"},
+                 metadata={"epic": "release-week"}),
             step("operator", "run_get", run="@run1"),
             step("operator", "sop_outcomes", sop="@dev"),
             # A run of a version that is not there at all.
@@ -568,10 +581,10 @@ class World:
             if field:
                 holder = self.saved.get(name)
                 if not isinstance(holder, dict) or field not in holder:
-                    raise ConformanceError(f"{value}: nothing saved under {name!r} with {field!r}")
+                    raise UnresolvedReference(f"{value}: nothing saved under {name!r} with {field!r}")
                 return holder[field]
             if name not in self.labels:
-                raise ConformanceError(f"{value}: nothing saved under {name!r}")
+                raise UnresolvedReference(f"{value}: nothing saved under {name!r}")
             return self.labels[name]
         if isinstance(value, dict):
             return {k: self.resolve(v) for k, v in value.items()}
@@ -1147,7 +1160,13 @@ def run_scenario(name: str, transport: str, root: Optional[Path] = None) -> dict
             with _environment(**world.env()):
                 for s in scenario["steps"]:
                     via = transport if s["verb"] in carries else "core"
-                    outcome = DRIVERS[via](world, s)
+                    try:
+                        outcome = DRIVERS[via](world, s)
+                    except UnresolvedReference as exc:
+                        # The step this one depends on refused on this
+                        # transport. Recorded, so the comparison sees a
+                        # difference the reference run does not have.
+                        outcome = {"state": "unresolved", "reference": str(exc)}
                     outcomes.append({"step": f"{s['actor']} {s['verb']}", "via": via, **outcome})
                 picture = photograph(world)
             world.conn.close()
