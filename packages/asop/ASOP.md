@@ -451,8 +451,10 @@ gates and adjudications, runs the lessons pass across every harness that reports
 and is otherwise advisory: it never executes a check and never blocks a harness.
 
 A **harness** runs standalone against a local ASOP store with the same contract. When a
-plane is configured, it pulls ASOPs from it, reports runs and outcomes to it, attests to
-it — and never publishes without a human-visible prompt.
+plane is configured, **the plane owns the queue**: runs are filed on the plane with
+bindings, and the harness pulls the step beads its bindings name, executes them, reports
+and attests to the plane. It never files a run on the plane unprompted and never
+publishes without a human-visible prompt. Its local store is the standalone path.
 
 A harness is **conforming** when it passes the conformance suite in this package against
 its own store: same verbs, same refusals, same statuses, same pin semantics.
@@ -594,6 +596,14 @@ stack trace. Codes relevant to ASOPs, from `asop.refusals`, plus the ones v3 add
    the operator the only one — the human-only posture is the default, the route is the
    opt-in. Activation stays human regardless: an agent-adjudicated divergence becomes
    a proposal, and a person activates the version it produces.
+8. **Queue ownership when connected.** **DECIDED 2026-09-04: the plane owns the
+   queue.** A run is filed on the plane with bindings; a harness pulls the step beads
+   its bindings name, executes, reports and attests. The alternative — the harness
+   files locally and reports outcomes upward — needs the plane to accept outcomes for
+   runs it did not file and leaves two queues to agree about one run. The wire keeps
+   the verbs it has (`agentco pull` / `agentco report`) as a protocol name, whatever
+   the binary is called.
+
 7. **Promotion authority.** **DECIDED 2026-09-04: humans only in v3.** `promote` is a
    human verb. It drafts an ASOP from a run tree, and is refused when an active ASOP
    already covers the same `task_type` — the path for a variant is a new *version* via
