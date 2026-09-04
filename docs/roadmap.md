@@ -23,7 +23,13 @@ in exactly the place it should have, the connectors.
 | Adoption metrics | ✅ | ✅ | Weekly publishers, time-to-first-event, per-verb latency, L1→L2 conversion (null until there is an L1 publisher, never 0) |
 | Work queue + fenced leases | ✅ | ✅ | CAS + fencing token, **proven across 12 real processes** |
 | Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression |
-| SOPs as versioned templates | 🆕 | ✅ | Pinned per instance; outcomes grouped by version |
+| ASOPs as versioned sequences of gated steps (v3) | 🆕 | ✅ | The ASOP is the sequence, a `Step` is what v2 called the procedure, and the gate is on the step — authored with the version, refused if a filer supplies one. `run()` files a TREE (parent pinned `(asop_id, version)`, one bead per step pinned `(asop_id, version, step)`, `after` carried as `blocked_by`); outcomes are grouped per version AND per step. See [`docs/decisions/0003-asop-v3-adoption.md`](decisions/0003-asop-v3-adoption.md) |
+| Run refusals, all before anything is filed | 🆕 | ✅ | `sop_refused` (draft or retired), `inputs_missing`, `role_unbound`, `constraint_unsatisfiable` — the last also covering a judged step bound to the actor it judges. Bindings come from the CALLER; the plane never invents one |
+| `retired` status | 🆕 | ✅ | Human-only. No new runs file; in-flight runs finish under their pin; the record is kept forever, or every outcome counted against it becomes unreadable |
+| Nested procedures (`uses`) | 🆕 | ✅ | A step may be another ASOP, filed as that step's children pinned to the inner version. Depth checked while the run is PLANNED, so a run that would break the bound files nothing. `next_sop` and the chain walk are gone with v3 §11.4 — sequencing between procedures is the harness's |
+| `promote(run_id)` | 🆕 | ✅ | A completed run tree becomes a draft ASOP: beads to steps, executors to roles, `blocked_by` to `after`. Human-only in v3; refused when an active ASOP already covers the run's `task_type` |
+| Declared adjudicators (`AGENTCO_ADJUDICATORS`) | 🆕 | ✅ | A route may judge a divergence only if the operator declared it. Undeclared fails CLOSED (humans only) — the opposite default from verifiers, because what degrades when it fails open is the evidence base rather than throughput |
+| Legacy v2 records upgraded, never dropped | 🆕 | ✅ | Migration 0009 adds `asops` and copies every `sops` row forward as a one-step ASOP, leaving `sops` byte-identical; the JSONL store applies the same upgrade on read. A v2 record had no gate, so the upgrade fails CLOSED to a `human` gate |
 | ASOP contract package (`agentco-asop`, `packages/asop/`) | 🆕 | ✅ | The gate schema, `Refusal`, and the SOP record shape split out of `agentco/gates.py` \| `errors.py` \| `sop.py` into a standalone package a harness can depend on without depending on this plane; `agentco/{gates,errors,sop}.py` are now thin shims over it. Merges this plane's park-clock gate fields with the AgentCo Harness's staged-check/runtime-hint fields into one normalised schema |
 | Durable storage backend (SQLite) | 🆕 | ✅ | Opt-in via `AGENTCO_DB`; same interfaces, conformance-tested against the JSONL default |
 | Durable storage backend (Postgres) | 🆕 | ✅ | Opt-in via `AGENTCO_DB=postgresql://…`; thin `sqlite3.Connection`-shaped adapter (`agentco/pgadapter.py`) over `psycopg`, no second copy of the SQL; same conformance suite, `psycopg[binary]` is an optional `postgres` extra |
@@ -32,14 +38,14 @@ in exactly the place it should have, the connectors.
 | Silent-schedule audit | ✅ | ✅ | `agentco pulse`: an actor silent past its declared cadence (`AGENTCO_CADENCE`) is a finding; undeclared is `null`, never a guess — and the pulse judges its own gap first. Reservations-style scheduling of work itself is still ⏳ |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ✅ | `agentco pulse` — exit code is the worst class (ok / attention / fatal), never a count; dry-run by default, `--apply` runs the sweeps nobody was running (expired leases, park clocks, quarantine) and records a `PulseObserved` heartbeat — see [`docs/pulse.md`](pulse.md) |
-| MCP surface | ✅ | ✅ | 12 tools of a stated 12 — the ceiling is binding; a byte budget over the schemas is published beside the count |
+| MCP surface | ✅ | ✅ | 12 tools of a stated 12 — the ceiling is binding; a byte budget over the schemas is published beside the count. **v3 puts seven verbs on the wire the surface does not carry, and the byte budget is now at its limit (12,496 of 12,500): a decision, not an oversight — [`docs/decisions/0004-mcp-surface-under-asop-v3.md`](decisions/0004-mcp-surface-under-asop-v3.md), proposed, undecided** |
 | Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
 | Session-hook injection (tier 3) | ✅ | ✅ | Fail-open per dependency; byte-identical uninstall |
 | Outbox + drainer + receipts (L1) | 🆕 | ✅ | `.agentco/outbox.jsonl` plus `agentco drain`; appending a line needs no package on the writer's side. The tier-1 splice carries the instructions, the tier-3 session block carries the receipts — see [`docs/outbox.md`](outbox.md) |
 | Gates + attestation (`verify` payload, `awaiting_verify` / `verify_failed`) | 🆕 | ✅ | Validated at the write boundary; neither status releases `blocked_by` — proven across processes by a real poller; the plane stores the claim and never runs the check |
 | Judged/human verifiers (L3) — routing, park clocks, quarantine digest | 🆕 | ✅ | `verify` counts only for `AGENTCO_VERIFIERS` once declared; a human gate names who answers it; a default is never a verdict |
-| Revision policy | 🆕 | ✅ | Protected tags freeze a step against agents; class ratchets toward human only; no undoing a human. HTTP 403 `revision_policy:<rule>`, proven by mutation |
-| Adjudication + plan-vs-actual + revision proposals | 🆕 | ✅ | Adjudicator ≠ executor enforced on every transport; `metadata.plan_vs_actual` written at completion; `agentco lessons --propose` drafts, never activates |
+| Revision policy | 🆕 | ✅ | Per STEP since v3. Protected tags freeze a step against agents — including against DELETION, the one edit that leaves nothing behind for a rule to protect; class ratchets toward human only (role kind or gate kind), and removing a human step is the same demotion by deletion; no undoing a human. A fourth rule, `human_only`, covers `retire` and `promote`. HTTP 403 `revision_policy:<rule>`, proven by mutation |
+| Adjudication + plan-vs-actual + revision proposals | 🆕 | ✅ | Per STEP since v3: a `good` adjudication feeds that step's `proposals`, a `bad` one that step's `common_mistakes` (capped at three per step), and a step that diverged twice in one pass earns a structural proposal on the sequence. Adjudicator ≠ executor enforced on every transport, and who may adjudicate at all is declared; `metadata.plan_vs_actual` written per step at completion; `agentco lessons --propose` drafts, never activates |
 | Decomposition bounds enforced at create | 🆕 | ✅ | Seven children, three deep, repair beside; HTTP 422 `decomposition_bound` |
 | Write-back to an external record | 🆕 | ✅ | Opt-in, notice-only, off until configured — see [`docs/writeback.md`](writeback.md) |
 | Conformance suite (`agentco conform --level`) | 🆕 | ✅ | One semantic core, four transports; found six drifts on its first two runs, all fixed |
@@ -146,7 +152,7 @@ anything at a live one), run `tools/migrate_sqlite_to_pg.py`, then flip
 
 The two backends are held to one contract by running the same behavioural
 tests against both — `tests/conftest.py` parametrises the queue and library
-fixtures, so every work-queue and SOP test is a conformance test. A contract
+fixtures, so every work-queue and ASOP test is a conformance test. A contract
 proven against one implementation is a description of that implementation.
 
 Twelve tools, and twelve is a ceiling enforced by a test rather than
@@ -161,6 +167,15 @@ the one using it. A thirteenth tool means deleting one. The count is a proxy
 for that cost, and the cost is bytes, not names, so a byte budget over the
 registered tools' schemas is published alongside the count
 (`tests/test_mcp_server.py`) and fails if it grows while the count holds.
+
+**That revisit condition has now fired.** ASOP v3 added seven verbs to the
+HTTP surface and the schemas sit at 12,496 of 12,500 bytes with the count
+still at twelve, so there is no room for a thirteenth tool at any description
+length — the v3 tool docstrings were written down to fit rather than the
+budget being raised. What to do about it is
+[`docs/decisions/0004-mcp-surface-under-asop-v3.md`](decisions/0004-mcp-surface-under-asop-v3.md),
+which is **proposed and undecided**: the surface stays at twelve until it is
+settled.
 
 Over stdio there is no request to sign, so the actor is whatever `AGENTCO_ACTOR`
 asserts at process start — exactly as trustworthy as the process that launched

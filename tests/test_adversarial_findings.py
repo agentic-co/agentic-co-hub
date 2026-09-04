@@ -526,54 +526,56 @@ def test_a_pinned_sop_version_never_resolves_to_different_text(library, tmp_path
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="instantiate() delegates to queue.create(), which returns the pre-existing "
-    "item on a natural-key collision without signalling that it did",
-)
-def test_instantiate_never_silently_returns_an_item_pinned_to_another_version(library, tmp_path):
-    """Asking for a v2 instance can hand back a v1 instance, reported as success.
+def test_a_run_never_silently_adopts_another_runs_parent(library, tmp_path):
+    """FIXED here. Was known issue 4b, and v3 made it worse before it fixed it.
 
-    `instantiate` builds `metadata["sop_ref"]` for the version it resolved, then
-    passes it to `queue.create`. On a natural-key collision `create` discards
-    that metadata entirely and returns the EXISTING item — which carries the pin
-    it was created under. The caller receives a work item whose `sop_ref` names
-    a version it did not ask for, with no exception, no refusal code and no
-    remediation. `outcomes_by_version` then credits the run to the old version.
+    THE ORIGINAL DEFECT. `instantiate` built `metadata["sop_ref"]` for the
+    version it resolved, then passed it to `queue.create`. On a natural-key
+    collision `create` discards that metadata entirely and returns the EXISTING
+    item — which carries the pin IT was created under. The caller received a
+    work item whose `sop_ref` named a version it did not ask for, with no
+    exception, no refusal code and no remediation, and `outcomes_by_version`
+    credited the run to the old version.
 
-    `create` does set `existing.metadata["natural_key_conflict"] = True`, but on
-    the returned object only — it is never written to the store, so nothing
-    downstream can detect the substitution after the fact.
+    WHY v3 RAISED THE STAKES. A run is a tree. Left unfixed, the step beads
+    would have been filed as children of the adopted parent — so one run's
+    tree would grow children pinned to a version that run never used, and the
+    7-child bound would be consumed by another run's steps. The v2 defect
+    mislabelled one item; the v3 version of it corrupts two trees.
 
-    Either resolution satisfies this test: refuse the instantiate when the
-    resolved version does not match the existing item's pin, or return an item
-    that actually carries the requested pin. What must not happen is the current
-    silent mismatch. This is the "never a submission that returns success and
-    produces nothing" rule in `errors.py`, applied to a submission that returns
-    success and produces something ELSE.
-
-    Why the existing tests miss it: `test_instantiating_creates_a_work_item_that_pins_the_version`
-    instantiates once, into an empty queue, with no natural key — so the
-    collision branch is never taken. `test_a_duplicate_natural_key_returns_the_existing_item`
-    covers the collision but goes through `queue.create` directly, where there
-    is no pin to be wrong about. The defect only appears where the two meet, and
-    no test crosses them.
+    THE FIX. `run()` reads `natural_key_conflict` off the item `create`
+    returned and refuses (`work_conflict`) before filing anything, so a refused
+    run leaves the queue exactly as it was — the same posture as every other
+    run refusal. Repairing instead was rejected twice over: filing anyway IS
+    the defect, and filing under a fresh key would hand back a run the caller
+    cannot address by the key they chose, which is what a natural key is for.
     """
     queue = Queue(tmp_path / "work.jsonl")
-    sop = library.create("Nightly reconciliation", purpose="the v1 procedure")
-    library.activate(sop.sop_id, 1)
+    sop = library.create("Nightly reconciliation", **_deploy_body("the v1 procedure"))
+    library.activate(sop.asop_id, 1)
 
-    first = library.instantiate(sop.sop_id, queue, natural_key="nightly-2026-08-28")
-    assert first.metadata["sop_ref"]["version"] == 1
+    first = library.run(sop.asop_id, queue, inputs={}, bindings={"deployer": "alice"},
+                        natural_key="nightly-2026-08-28")
+    assert queue.get(first["runId"]).metadata["sop_ref"]["version"] == 1
+    before = len(queue.list())
 
-    library.revise(sop.sop_id, purpose="the v2 procedure")
-    library.activate(sop.sop_id, 2)
+    library.revise(sop.asop_id, purpose="the v2 procedure")
+    library.activate(sop.asop_id, 2)
 
-    second = library.instantiate(sop.sop_id, queue, natural_key="nightly-2026-08-28")
+    with pytest.raises(Refusal) as exc:
+        library.run(sop.asop_id, queue, inputs={}, bindings={"deployer": "alice"},
+                    natural_key="nightly-2026-08-28")
 
-    assert second.metadata["sop_ref"]["version"] == 2, (
-        "instantiate reported success but returned an item pinned to another version"
+    assert exc.value.code == "work_conflict"
+    assert first["runId"] in str(exc.value), "the refusal names the run that holds the key"
+    assert len(queue.list()) == before, (
+        "a refused run filed something; the whole point is that it leaves the queue "
+        "byte-identical, as every other run refusal does"
     )
+    # And the run that DOES hold the key is untouched — still v1, still its own
+    # steps and no more.
+    assert queue.get(first["runId"]).metadata["sop_ref"]["version"] == 1
+    assert len(library.run_get(first["runId"], queue)["steps"]) == 1
 
 
 # --------------------------------------------------------------------------- #
