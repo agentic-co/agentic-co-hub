@@ -139,47 +139,136 @@ adopt. Where SQLite's DDL is not portable (`AUTOINCREMENT`, `INSERT OR IGNORE`),
 migration carries a Postgres-dialect rewrite (`GENERATED ALWAYS AS IDENTITY`, `ON CONFLICT
 ... DO NOTHING`) alongside it; every other migration's DDL already runs unchanged on both.
 
-### `SOP` — a procedure with a version history
+### `ASOP` — a procedure that is a versioned sequence of gated steps
 
 A standard operating procedure is an object, not a block of text pasted into
-every item that follows it. Work items **pin** the `(sop_id, version)` they were
-created under, and the pin is immutable for the life of the item.
+every item that follows it. Since **ASOP v3** (ratified 2026-09-04,
+[`packages/asop/ASOP.md`](../packages/asop/ASOP.md)) the object is a versioned,
+ordered sequence of **steps**, and a step is what earlier versions called the
+procedure.
 
-**A template is not an instance.** An SOP never enters the queue — if it did it
-would be claimable, and a template that can be completed is a bug. `instantiate()`
-creates work items from it.
+Two things follow from that grain, and they are the whole of what v3 changed.
 
-Pinning is what makes the procedure evaluable at all: an instance that referenced
-"the SOP" rather than "v3" would attribute its outcome to text that has since
-changed. `outcomes_by_version()` groups finished instances by the version they
-ran under, reporting **counts** rather than a bare success rate — a rate is
-gameable in both directions, since a procedure applied to progressively harder
-cases looks like it is degrading, and failures re-filed as new items look like
-improvement. In-flight work counts as neither outcome, and a version with nothing
-finished reports `None`, never `0`.
+**A run is a tree.** `run(asop_id, inputs, bindings)` files a parent work item
+pinned to `(asop_id, version)` carrying the run's inputs, plus one child per
+step pinned to `(asop_id, version, step)`. Each child carries a COPY of its
+step's text, its gate, and `blocked_by` taken from the step's `after` — so a
+plan-vs-actual review reads the words the executor was actually handed even
+after the procedure moves on, and a parent cannot close while a step is open.
+Filing goes through the same parent/child path everything else uses, so the
+decomposition bounds (7 children, 3 deep) apply to a run tree as they do to a
+goal.
+
+**The gate is on the step, authored with the version.** Before v3 the record
+had no gate and whoever filed the work supplied one. Where the filer sits on
+the executor's side — the ordinary case for a single-operator organisation —
+that is the executor's own side authoring the check it will be graded by,
+which is the failure the contract exists to prevent. So a run supplies no gate
+and is **refused** if it passes one.
+
+**Bindings come from the caller.** An ASOP names *roles* — `implementer`,
+`validator` — never agents, which is what makes the artefact shareable: two
+organisations run the same version with different agents and their outcomes
+are still counted against the same thing. Which agent fills a role is a fact
+about a harness's own roster, so the plane never invents one. A role with no
+binding refuses (`role_unbound`), bindings that break a `distinct` constraint
+refuse (`constraint_unsatisfiable`), and so does a judged step bound to the
+same actor as the step it judges — the one constraint the contract requires
+whether or not the author wrote it down.
+
+**A template is not an instance.** An ASOP never enters the queue — if it did
+it would be claimable, and a template that can be completed is a bug.
+
+Every run refusal fires before anything is filed, so a refused run leaves the
+queue byte-identical: a draft or retired version (`sop_refused`), a missing
+declared input (`inputs_missing`), an unbound role, an unsatisfiable
+constraint, and a tree that would break the decomposition bounds.
+
+Pinning is what makes the procedure evaluable at all: a run that referenced
+"the ASOP" rather than "v3" would attribute its outcome to text that has since
+changed. `outcomes_by_version()` groups runs by version **and by step**,
+reporting **counts** rather than a bare success rate — a rate is gameable in
+both directions, since a procedure applied to progressively harder cases looks
+like it is degrading, and failures re-filed as new runs look like improvement.
+In-flight work counts as neither outcome, and a version with nothing finished
+reports `None`, never `0`. The per-step rows are the reason the grain moved:
+"did the rewrite of step 2 help" is a comparison of two step rows, and before
+v3 there was no such row.
 
 That pin is the same relationship a snapshot has to a document, so the same
-question applies: `drifted()` reports in-flight items whose procedure has moved.
+question applies: `drifted()` reports in-flight runs whose procedure has moved.
 It reports and never migrates — re-pointing running work at a newer procedure
 changes the job under whoever is doing it.
 
+**A step may be another ASOP.** `uses: {asop_id, version}` files the inner
+procedure's tree as that step's children, pinned to the inner version. Depth
+counts against the three-deep bound, checked while the run is planned rather
+than half-way through filing it. Sequencing *between* procedures is
+deliberately not here: that is orchestration, and the contract puts it in the
+harness (§11.4). `next_sop` and the chain walk it fed were dropped with v3.
+
+#### Lifecycle
+
 Drafting a revision does not promote it. The version in use stays in use until
 it is explicitly activated, so writing an improvement is a safe act rather than
-one that quietly takes the live procedure out of service.
+one that quietly takes the live procedure out of service. `retire` withdraws a
+version with no successor: no new runs file from it, runs already in flight
+finish under their pin, and the record is kept forever — a retired version that
+stopped resolving would make every outcome counted against it unreadable.
 
-Both are policed when the reviser is an agent (`agentco/policy.py`). A step
-tagged `money` or `irreversible` is frozen against agents; a step's class
-(`executor: human | agent`) ratchets toward human only; and no agent revision
-moves a field into a state a human moved it away from. Who is human is what
-the operator declared in `AGENTCO_HUMANS` — never inferred, and an undeclared
-registry polices everyone. A human or protected step cannot be instantiated
-without a `human` gate, so the class changes what happens, not just what the
-procedure says.
+Revision and activation are policed when the reviser is an agent
+(`agentco/policy.py`), now per step. A step tagged `money` or `irreversible`
+is frozen against agents, and an agent may not *remove* one either — deleting
+a step is the one edit that leaves nothing behind for a rule to protect. A
+step's class ratchets toward human only, where "human" means its role's kind
+or its gate's kind is human, and removing a human step is the same demotion by
+deletion. No agent revision moves a field into a state a human moved it away
+from. Who is human is what the operator declared in `AGENTCO_HUMANS` — never
+inferred, and an undeclared registry polices everyone.
 
-**The improvement loop is deliberately absent.** Nothing proposes a better
-version from observed failures. That machinery is worthless without instances to
-learn from, and building it first would mean tuning against imagination — the
-measurement ships now so the loop is possible later.
+Two verbs are human-only outright, because there is no proposed version to
+compare and so no diff a rule could read: **`retire`**, and **`promote`**.
+
+#### The improvement loop
+
+It exists now, and it is per step. A divergence is **adjudicated** by a party
+that is not the executor: `good` feeds that step's `proposals`, `bad` feeds
+that step's `common_mistakes` (capped at three per step — the cap is the
+discipline). `propose()` drafts the next version from the adjudications nobody
+has consumed, and a step that diverged more than once in one pass also earns a
+structural proposal on the sequence, because the same divergence recurring at
+the same boundary is evidence for a split or a reorder rather than another
+line of prose.
+
+Who may adjudicate is **declared**, like who may verify — `AGENTCO_ADJUDICATORS`
+alongside `AGENTCO_VERIFIERS`. The two defaults point opposite ways on purpose.
+An undeclared verifier set fails open, because the alternative is every judged
+gate resolving on its clock, which is work approved by a timer. An undeclared
+adjudicator set fails **closed** — only declared humans adjudicate — because
+what degrades when an agent grades the loop that revises the procedures it
+follows is not throughput but the evidence base, and nobody notices.
+
+**`promote(run_id)`** is the front door: a completed run tree becomes a draft
+ASOP, beads to steps, executors to roles, `blocked_by` to `after`. It is
+refused when an active ASOP already covers the run's `task_type` — two
+procedures for one type of task means outcomes counted in two places and
+compared in neither, and the path for a variant is a new *version*. Human-only
+in v3; agents may draft revisions, a person decides that a shape is a
+procedure.
+
+#### Legacy records
+
+Rows written before v3 are upgraded, never dropped. Migration 0009 adds an
+`asops` table and copies every `sops` row forward as a one-step ASOP; the
+`sops` table itself is left byte-identical as provenance. The JSONL store
+applies the same upgrade on read, because a file store has no migration runner
+to hang one off. A v2 record carried no gate, so the upgrade has to choose
+one, and it fails **closed** to a `human` gate: a deterministic gate would
+assert that the record's `validation` prose is a command that exits 0, which
+nothing ever checked, and a judged gate would route to a route nobody
+declared. The blast radius is small by construction — only a v2 record that
+was ACTIVE at the moment of the upgrade can be run at all — and one human
+revision replaces it with the real gate.
 
 ### Review routing *(planned)*
 
@@ -227,8 +316,9 @@ organisation's instance is configuration and does not belong in this repository.
 ## The ASOP contract package
 
 The gate schema (`deterministic` / `judged` / `human`, with attestation) and
-the SOP record shape (`SopStatus`, the `SOP` dataclass, `validate_fields`)
-live in `packages/asop/` — a separate distribution, `agentco-asop` (import
+the record shape (`SopStatus`, the `ASOP` and `Step` dataclasses,
+`validate_asop`, `validate_step`, and the legacy `SOP`/`validate_fields` kept
+readable for the upgrade) live in `packages/asop/` — a separate distribution, `agentco-asop` (import
 name `asop`), inside this repo but published independently of it. `Refusal`,
 the one exception type the contract speaks in, moved with them.
 

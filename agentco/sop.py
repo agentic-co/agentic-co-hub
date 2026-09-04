@@ -704,6 +704,31 @@ class SopLibrary:
         parent = queue.create(
             title or asop.title, metadata=parent_metadata, by_plane=True, **work_kwargs
         )
+        if (parent.metadata or {}).get("natural_key_conflict"):
+            # `queue.create` suppresses a duplicate natural key by returning the
+            # EXISTING item, which carries the pin IT was filed under. Under v2
+            # that handed a caller back an instance of a version it did not ask
+            # for (known issue 4b). Under v3 it is worse: the step beads below
+            # would be parented onto somebody else's run, so one run's tree
+            # would grow children pinned to a different version, and
+            # `outcomes_by_version` would count them against it.
+            #
+            # Refused rather than repaired, because both repairs are wrong.
+            # Filing anyway is the defect. Filing under a fresh key would give
+            # the caller a run they cannot address by the key they chose, which
+            # is the thing a natural key is for.
+            existing = pin_of(parent)
+            raise _refuse(
+                "work_conflict",
+                f"natural key {work_kwargs.get('natural_key')!r} is already held by "
+                f"{parent.id}, which is pinned to {existing.get('asop_id')} "
+                f"v{existing.get('version')}",
+                "A run's parent cannot adopt an existing item: its step beads would "
+                "be filed as children of somebody else's run, pinned to a version "
+                "that run never used. Use a natural key that names THIS run, or "
+                "read the existing one with run_get.",
+                status=409,
+            )
         return {
             "runId": parent.id,
             "asopId": asop.asop_id,

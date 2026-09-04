@@ -137,11 +137,15 @@ how your harness works changes.
 **Early, and usable.** The coordination primitives are implemented and tested: scope
 claims with conflict detection, snapshot pointers with divergence delivered at a cadence
 boundary, a resumable change feed, a work queue with a fenced lease protocol proven across
-twelve real processes, versioned SOPs, an MCP surface, and both injection tiers. On top
-of them, all three ASOP properties now have code behind them: gates with attestation
-(deterministic, judged, human — with park clocks and a named verifier), the revision
-policy an agent cannot break, adjudication with adjudicator ≠ executor enforced,
-plan-vs-actual written at completion, and the lessons pass that drafts the next version.
+twelve real processes, versioned ASOPs, an MCP surface, and both injection tiers. On top
+of them, all three ASOP properties now have code behind them, at v3's grain — the ASOP
+is a versioned SEQUENCE and the gate rides on each step, so a run files a tree of beads
+and no filer authors its own check: gates with attestation (deterministic, judged, human
+— with park clocks and a named verifier), the revision policy an agent cannot break
+applied per step, adjudication with adjudicator ≠ executor enforced and who may
+adjudicate declared, plan-vs-actual written per step at completion, the lessons pass
+that drafts the next version, and `promote` turning a run that worked into a draft
+procedure.
 The L1 outbox reaches a harness that configured nothing, and a conformance suite
 (`agentco conform --level`) holds HTTP, MCP and the outbox to one semantic core. See
 [`docs/`](docs/) for the design, [`docs/roadmap.md`](docs/roadmap.md) for what is built
@@ -259,7 +263,11 @@ made — so the ceiling is binding. A
 byte budget over the registered schemas is published alongside the count
 (`tests/test_mcp_server.py`), because the count is a stand-in for context
 cost, not the thing itself, and a ceiling that holds while the bytes behind
-it grow has stopped measuring what it was chosen to measure.
+it grow has stopped measuring what it was chosen to measure. ASOP v3 added
+seven verbs to the HTTP surface and the schemas now sit at 12,496 of 12,500
+bytes, so that condition has fired: what the MCP surface should carry is
+[`docs/decisions/0004-mcp-surface-under-asop-v3.md`](docs/decisions/0004-mcp-surface-under-asop-v3.md),
+proposed and not yet decided. The surface stays at twelve until it is.
 
 That entry points the harness at **local files**, which is right when the
 harness and the registry share a disk. When they do not — a second machine, a
@@ -274,15 +282,28 @@ if pulled["state"] == "leased":
     item = pulled["item"]
     reg.work_report(item["id"], pulled["attempt"], "done", result="…")
 
+# Filing work from a procedure files a TREE — one bead per step, each carrying
+# its step's own gate. No gate is sent: the version already has one.
+run = reg.sop_run(asop_id, inputs={"requirement": "REQ-1"},
+                  bindings={"implementer": "macbook", "validator": "reviewer"})["run"]
+
 # A lesson learned on one machine, active for every reader on the next call.
-reg.sop_revise(sop_id, common_mistakes=["Report with the attempt from work_pull"])
-reg.sop_activate(sop_id, 2)
+# It lands on the STEP that earned it, which is what makes "did this help" a
+# per-step count rather than a per-procedure one.
+reg.sop_revise(asop_id, steps=[{**step, "common_mistakes": ["Report with the attempt from work_pull"]}])
+reg.sop_activate(asop_id, 2)
 ```
 
-Both calls are policed when the caller is an agent — that is, any actor not
-named in `AGENTCO_HUMANS`. A step tagged `money` or `irreversible` is frozen
+`bindings` is required and never guessed. An ASOP names *roles*, never agents —
+that is what lets two organisations run the same version and still count their
+outcomes against the same thing — so which agent fills `validator` is a fact
+about your harness, and a role with no binding is refused rather than filled in.
+
+The revision calls are policed when the caller is an agent — that is, any actor
+not named in `AGENTCO_HUMANS`. A step tagged `money` or `irreversible` is frozen
 against agents, a step's class only ratchets toward `human`, and no agent
-revision undoes a change a human made. `docs/asop.md` § 3 has the rules;
+revision undoes a change a human made. `retire` and `promote` are human-only
+outright. [`packages/asop/ASOP.md`](packages/asop/ASOP.md) § 6.4 has the rules;
 `agentco/policy.py` enforces them, and a refusal comes back as HTTP 403
 `revision_policy:<rule>`.
 
