@@ -221,6 +221,12 @@ def create_app(
     # reason `verifiers` is: a test or an embedder that passed `humans=` and
     # then watched every adjudication refused would be debugging the wrong
     # layer.
+    # The actors this registry can authenticate. A run's bindings must name
+    # identities that will actually be able to pull the beads it files, and
+    # the key file is where that is known — injected here for the same reason
+    # `humans` is, so an embedder that passed `keys=` does not also have to
+    # export the env var for the library to agree with the transport.
+    library.actors = frozenset(keys) if keys is not None else frozenset(auth.load_keys())
     queue.humans = declared_humans
     if adjudicators is not None:
         queue.adjudicators = frozenset(adjudicators)

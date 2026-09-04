@@ -701,12 +701,12 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
     the queue does targeted updates.
     """
 
-    def __init__(self, path: Path | str = "agentco.sqlite3", protected_tags: Optional[Sequence[str]] = None):
+    def __init__(self, path: Path | str = "agentco.sqlite3", protected_tags: Optional[Sequence[str]] = None,
+                 actors: Optional[Sequence[str]] = None):
         self._open(path)
-        self.protected_tags = (
-            frozenset(protected_tags) if protected_tags is not None
-            else policy.protected_tags_from_env()
-        )
+        # One call, so a declaration added to the base reaches this backend
+        # too — see `SopLibrary.declare` for the two times it did not.
+        self.declare(protected_tags=protected_tags, actors=actors)
         # Rows this version cannot model, as raw `sqlite3.Row`s. The JSONL
         # library keeps raw BYTES here for the same reason: the point is to
         # carry the record through untouched, and anything parsed enough to

@@ -134,6 +134,21 @@ LEGACY_VERIFIER = "operator"
 LEGACY_PARK_SECONDS = 86400
 
 
+def _declared_actors() -> frozenset[str]:
+    """The registry's actor names, or empty when none is configured.
+
+    Imported lazily: `agentco.auth` is the HTTP transport's module and this
+    one is the store's, and a store that cannot be opened without the
+    transport loaded would be a dependency the layering does not have.
+    """
+    try:
+        from agentco import auth
+
+        return frozenset(auth.load_keys())
+    except Exception:  # noqa: BLE001 - a key file this build cannot read is not a store failure
+        return frozenset()
+
+
 def resolve_sop_store(path: Optional[str] = None) -> str:
     """Where the library lives — see `work.resolve_work_store` for why here."""
     return path or os.environ.get(SOP_STORE_ENV_VAR) or DEFAULT_SOP_STORE
@@ -287,16 +302,44 @@ def read_record(line: str) -> ASOP:
 class SopLibrary:
     """Versioned ASOP storage. Same JSONL-under-a-lock shape as the work queue."""
 
-    def __init__(self, path: Path | str = "sops.jsonl", protected_tags: Optional[Sequence[str]] = None):
+    def __init__(self, path: Path | str = "sops.jsonl", protected_tags: Optional[Sequence[str]] = None,
+                 actors: Optional[Sequence[str]] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.declare(protected_tags=protected_tags, actors=actors)
+        # Raw BYTES — a line that failed to decode has no faithful string
+        # form, and is carried through every write rather than dropped.
+        self.quarantined: list[bytes] = []
+
+    def declare(self, *, protected_tags: Optional[Sequence[str]] = None,
+                actors: Optional[Sequence[str]] = None) -> None:
+        """Every operator declaration this store reads, set in ONE place.
+
+        `SqlSopLibrary` opens a database instead of a file and so does not
+        call `__init__` above — which means a declaration added here and
+        forgotten there is absent on one backend only, and surfaces as an
+        `AttributeError` from inside the code that was supposed to enforce
+        it. That has now happened twice (`humans`/`adjudicators` on the queue,
+        `actors` here), so the declarations live in a method both
+        constructors call rather than in a constructor one of them skips.
+        """
         self.protected_tags = (
             frozenset(protected_tags) if protected_tags is not None
             else policy.protected_tags_from_env()
         )
-        # Raw BYTES — a line that failed to decode has no faithful string
-        # form, and is carried through every write rather than dropped.
-        self.quarantined: list[bytes] = []
+        # Every identity the registry can authenticate. A run's bindings name
+        # actors that have to PULL the beads it files, and an actor with no
+        # key can never authenticate, so binding one is filing into a void.
+        #
+        # UNDECLARED means no check, like verifiers and unlike adjudicators.
+        # An empty key file is what an in-process caller, a JSONL-only
+        # install and every library test have, and refusing every run on the
+        # absence of a registry would be refusing on missing configuration
+        # rather than on a fact. Where a registry IS declared, an unknown
+        # binding is a fact.
+        self.actors: frozenset[str] = (
+            frozenset(actors) if actors is not None else frozenset(_declared_actors())
+        )
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -848,6 +891,28 @@ class SopLibrary:
                 "agents, and only the harness knows its own.",
                 status=409,
             )
+        # An actor the registry cannot authenticate can never pull the bead
+        # it is bound to, so the run would sit ready forever with nobody able
+        # to claim it. Refused at filing, where the name is still in front of
+        # whoever typed it, rather than discovered as a step that never moves.
+        if self.actors:
+            unknown = sorted(
+                {role: bindings[role] for role in needed
+                 if bindings.get(role) not in self.actors}.items()
+            )
+            if unknown:
+                named = ", ".join(f"{role}={actor!r}" for role, actor in unknown)
+                raise _refuse(
+                    "role_unbound",
+                    f"{asop.asop_id!r} v{asop.version} binds {named}, and this registry "
+                    f"has no key for those actors",
+                    f"Bind a role to an actor the registry can authenticate "
+                    f"({', '.join(sorted(self.actors))}), or add the actor to the key "
+                    f"file. An actor with no key cannot authenticate, so it can never "
+                    f"pull the bead — the step would sit ready with nobody able to "
+                    f"claim it, which is filing into a void.",
+                    status=409,
+                )
         for constraint in asop.constraints or []:
             roles = list(constraint.get("distinct") or ())
             filled = [bindings.get(r) for r in roles]

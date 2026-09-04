@@ -692,13 +692,21 @@ def test_over_http_a_human_step_is_instantiated_with_its_gate(tmp_path):
     assert _post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 1}).status_code == 200
 
     # Bound to someone other than the gate's own verifier ('dana') — a human
-    # gate refuses to resolve on the party it exists to exclude.
+    # gate refuses to resolve on the party it exists to exclude — and to an
+    # actor this registry actually has a key for, because a binding it cannot
+    # authenticate can never pull the bead it is bound to.
     bare = _post(client, f"/sops/{sop['asop_id']}/run", "dana",
-                {"bindings": {"reviewer": "carol"}, "verify": DETERMINISTIC_GATE})
+                {"bindings": {"reviewer": "fixer-bot"}, "verify": DETERMINISTIC_GATE})
     assert bare.status_code == 422
     assert "the gate belongs to the step" in bare.json()["message"]
 
-    filed = _post(client, f"/sops/{sop['asop_id']}/run", "dana", {"bindings": {"reviewer": "carol"}})
+    stranger = _post(client, f"/sops/{sop['asop_id']}/run", "dana",
+                     {"bindings": {"reviewer": "carol"}})
+    assert stranger.status_code == 409, stranger.text
+    assert stranger.json()["code"] == "role_unbound"
+
+    filed = _post(client, f"/sops/{sop['asop_id']}/run", "dana",
+                  {"bindings": {"reviewer": "fixer-bot"}})
     assert filed.status_code == 200, filed.text
     item_id = filed.json()["run"]["steps"][0]["itemId"]
     item = Queue(tmp_path / "work.jsonl").get(item_id)
