@@ -283,3 +283,310 @@ def bind_capabilities(
     if declared and VERIFY_CAPABILITY in held and actor not in declared:
         return held - {VERIFY_CAPABILITY}, True
     return held, False
+
+
+# --------------------------------------------------------------------------- #
+# ASOP v3 — the same three rules, per step
+# --------------------------------------------------------------------------- #
+
+#: Rules 1-3 were written for a record that WAS one step. In v3 the record is a
+#: sequence and the step is the unit, so each rule is evaluated per step and
+#: the record-level fields (title, purpose, trigger, task_type) are diffed the
+#: way a scalar always was. Nothing about what the rules MEAN changed; only
+#: what they range over.
+ASOP_SCALAR_FIELDS = ("title", "task_type", "purpose", "trigger")
+STEP_SCALAR_FIELDS = (
+    "role", "purpose", "entry_check", "inputs", "definition_of_done",
+    "validation", "write_back",
+)
+STEP_LIST_FIELDS = ("common_mistakes", "tags", "proposals")
+
+#: The fourth rule, and the only one that is about a verb rather than a diff:
+#: `retire` and `promote` are human verbs in v3 (ASOP.md §4, §6.5). An agent
+#: may draft; only a human withdraws a procedure or opens the door to a new
+#: one.
+RULE_HUMAN_ONLY = "human_only"
+
+
+def require_human(reviser_kind: str, action: str, *, because: str) -> None:
+    """Refuse `action` unless the operator declared this reviser human.
+
+    Separate from `check_revision` because it is not a diff: there is no
+    proposed version to compare. `retire` and `promote` are refused to an
+    agent whatever they would produce.
+    """
+    if reviser_kind == HUMAN:
+        return
+    raise RevisionPolicyError(
+        RULE_HUMAN_ONLY,
+        f"policy rule '{RULE_HUMAN_ONLY}': '{action}' is a human verb. {because} "
+        f"Who is human is declared by the operator ({HUMANS_ENV_VAR}), never "
+        f"inferred — an undeclared registry polices everyone.",
+    )
+
+
+def _steps_by_key(asop) -> dict:
+    """Steps keyed for comparison across versions.
+
+    By NAME, because a step's position moves the moment one is inserted above
+    it and a positional diff would then read every step below the insertion as
+    rewritten. Where a version repeats a name — nothing in the record contract
+    forbids it — that version falls back to position for ALL of its steps, so
+    the two sides are never compared under two different keying rules.
+    """
+    steps = list(getattr(asop, "steps", None) or ())
+    names = [getattr(s, "name", None) for s in steps]
+    if len(set(names)) == len(names):
+        return {name: step for name, step in zip(names, steps)}
+    return {("#", getattr(s, "step", i + 1)): s for i, s in enumerate(steps)}
+
+
+def _step_class(step) -> str:
+    """`human` when the step is a human one, by either half of what makes it so.
+
+    The role's `kind` says who does it and the gate's `kind` says who closes
+    it. Either being human makes the step human for the ratchet, because
+    demoting either one is the demotion the ratchet exists to refuse: a human
+    step an agent can close is not a human step.
+    """
+    gate = getattr(step, "gate", None) or {}
+    if gate.get("kind") == HUMAN:
+        return HUMAN
+    return AGENT
+
+
+def _role_class(asop, step) -> str:
+    roles = getattr(asop, "roles", None) or {}
+    spec = roles.get(getattr(step, "role", None)) or {}
+    return HUMAN if spec.get("kind") == HUMAN else AGENT
+
+
+def asop_forbidden_states(history: Sequence) -> tuple[set[tuple], set[tuple]]:
+    """`forbidden_states`, walked over the record AND every step.
+
+    Scalars are keyed `(field,)` at the record level and `(step_key, field)`
+    at the step level, so a human's edit to one step's `validation` never
+    freezes another's.
+    """
+    scalars: set[tuple] = set()
+    lists: set[tuple] = set()
+    ordered = sorted(history, key=lambda s: s.version)
+    for prev, cur in zip(ordered, ordered[1:]):
+        if getattr(cur, "author_kind", None) != HUMAN:
+            continue
+        for name in ASOP_SCALAR_FIELDS:
+            before, after = getattr(prev, name, None), getattr(cur, name, None)
+            if before != after:
+                scalars.add((None, name, before))
+                scalars.discard((None, name, after))
+        before_steps, after_steps = _steps_by_key(prev), _steps_by_key(cur)
+        for key in set(before_steps) | set(after_steps):
+            old, new = before_steps.get(key), after_steps.get(key)
+            if old is None or new is None:
+                continue
+            for name in STEP_SCALAR_FIELDS:
+                a, b = getattr(old, name, None), getattr(new, name, None)
+                if a != b:
+                    scalars.add((key, name, a))
+                    scalars.discard((key, name, b))
+            for name in STEP_LIST_FIELDS:
+                a = set(getattr(old, name, None) or ())
+                b = set(getattr(new, name, None) or ())
+                for element in a - b:
+                    lists.add((key, name, element, "present"))
+                    lists.discard((key, name, element, "absent"))
+                for element in b - a:
+                    lists.add((key, name, element, "absent"))
+                    lists.discard((key, name, element, "present"))
+    return scalars, lists
+
+
+def check_asop_revision(
+    *,
+    history: Sequence,
+    baseline,
+    proposed,
+    reviser_kind: str,
+    protected_tags: Iterable[str],
+    action: str = "revise",
+) -> None:
+    """`check_revision` for the v3 record. Same three rules, ranged over steps.
+
+    What is new is only what a sequence makes expressible:
+
+      * a step can be REMOVED. Removing a human step is the ratchet's
+        demotion by deletion, and removing a protected one is touching what
+        only a human touches — both refused, or the rules would hold for
+        every edit except the one that deletes the thing they protect.
+      * a step can be ADDED carrying a protected tag, which is rule 1's
+        "an agent may not add or remove a protected tag" at the new grain.
+    """
+    if reviser_kind == HUMAN:
+        return
+    if reviser_kind != AGENT:
+        raise ValueError(f"reviser_kind must be one of {KINDS}, got {reviser_kind!r}")
+
+    protected = frozenset(protected_tags)
+    before, after = _steps_by_key(baseline), _steps_by_key(proposed)
+    ident = f"{getattr(baseline, 'asop_id', '?')} v{getattr(baseline, 'version', '?')}"
+
+    for key in sorted(before, key=str):
+        old = before[key]
+        frozen = sorted(frozenset(getattr(old, "tags", None) or ()) & protected)
+        if not frozen:
+            continue
+        new = after.get(key)
+        if new is None:
+            raise RevisionPolicyError(
+                RULE_PROTECTED,
+                f"policy rule '{RULE_PROTECTED}': step {old.name!r} of {ident} carries "
+                f"protected tag(s) {frozen}, so an agent may not remove it. A "
+                f"protected step is changed by a human or not at all.",
+            )
+        if _step_body(old) != _step_body(new):
+            raise RevisionPolicyError(
+                RULE_PROTECTED,
+                f"policy rule '{RULE_PROTECTED}': step {old.name!r} of {ident} carries "
+                f"protected tag(s) {frozen}, so an agent may not {action} it. A "
+                f"protected step is changed by a human or not at all.",
+            )
+
+    for key in set(before) | set(after):
+        old_tags = frozenset(getattr(before[key], "tags", None) or ()) if key in before else frozenset()
+        new_tags = frozenset(getattr(after[key], "tags", None) or ()) if key in after else frozenset()
+        touched = sorted((old_tags ^ new_tags) & protected)
+        if touched:
+            raise RevisionPolicyError(
+                RULE_PROTECTED,
+                f"policy rule '{RULE_PROTECTED}': an agent may not add or remove the "
+                f"protected tag(s) {touched} on step "
+                f"{getattr(after.get(key, before.get(key)), 'name', key)!r}. Only a "
+                f"human decides what is protected.",
+            )
+
+    for key in sorted(before, key=str):
+        old = before[key]
+        was_human = _step_class(old) == HUMAN or _role_class(baseline, old) == HUMAN
+        if not was_human:
+            continue
+        new = after.get(key)
+        if new is None:
+            raise RevisionPolicyError(
+                RULE_RATCHET,
+                f"policy rule '{RULE_RATCHET}': step {old.name!r} of {ident} is a human "
+                f"step and an agent may not remove it. Deleting a step is the one "
+                f"demotion that leaves nothing behind to be classified; the class "
+                f"ratchets toward human, and only a human ratchets it back.",
+            )
+        if _step_class(new) != HUMAN and _role_class(proposed, new) != HUMAN:
+            raise RevisionPolicyError(
+                RULE_RATCHET,
+                f"policy rule '{RULE_RATCHET}': step {old.name!r} of {ident} is a human "
+                f"step and an agent may not make it an agent one. The class ratchets "
+                f"toward human; only a human ratchets it back.",
+            )
+
+    scalars, lists = asop_forbidden_states(history)
+    for name in ASOP_SCALAR_FIELDS:
+        a, b = getattr(baseline, name, None), getattr(proposed, name, None)
+        if a != b and (None, name, b) in scalars:
+            raise RevisionPolicyError(
+                RULE_NO_UNDO,
+                f"policy rule '{RULE_NO_UNDO}': a human moved {name!r} away from {b!r} "
+                f"and an agent may not move it back. If the human was wrong, a human "
+                f"says so.",
+            )
+    for key in set(before) & set(after):
+        old, new = before[key], after[key]
+        for name in STEP_SCALAR_FIELDS:
+            a, b = getattr(old, name, None), getattr(new, name, None)
+            if a != b and (key, name, b) in scalars:
+                raise RevisionPolicyError(
+                    RULE_NO_UNDO,
+                    f"policy rule '{RULE_NO_UNDO}': a human moved step {old.name!r}'s "
+                    f"{name!r} away from {b!r} and an agent may not move it back.",
+                )
+        for name in STEP_LIST_FIELDS:
+            a = set(getattr(old, name, None) or ())
+            b = set(getattr(new, name, None) or ())
+            for element in sorted(b - a):
+                if (key, name, element, "present") in lists:
+                    raise RevisionPolicyError(
+                        RULE_NO_UNDO,
+                        f"policy rule '{RULE_NO_UNDO}': a human removed {element!r} from "
+                        f"step {old.name!r}'s {name!r} and an agent may not put it back.",
+                    )
+            for element in sorted(a - b):
+                if (key, name, element, "absent") in lists:
+                    raise RevisionPolicyError(
+                        RULE_NO_UNDO,
+                        f"policy rule '{RULE_NO_UNDO}': a human added {element!r} to step "
+                        f"{old.name!r}'s {name!r} and an agent may not remove it.",
+                    )
+
+
+def _step_body(step) -> tuple:
+    """Everything about a step a revision could change. Used only to decide
+    whether a protected step was touched at all — a no-op revision that
+    carries a protected step through unchanged is not a change to it."""
+    return (
+        getattr(step, "name", None),
+        getattr(step, "role", None),
+        *(getattr(step, f, None) for f in STEP_SCALAR_FIELDS),
+        tuple(getattr(step, "common_mistakes", None) or ()),
+        tuple(sorted(getattr(step, "tags", None) or ())),
+        tuple(getattr(step, "proposals", None) or ()),
+        _hashable(getattr(step, "gate", None)),
+        tuple(getattr(step, "after", None) or ()),
+        _hashable(getattr(step, "uses", None)),
+    )
+
+
+def _hashable(value):
+    if isinstance(value, dict):
+        return tuple(sorted((k, _hashable(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_hashable(v) for v in value)
+    return value
+
+
+# --------------------------------------------------------------------------- #
+# adjudicator binding — who may judge a divergence (ASOP.md §6.1, decision 6)
+# --------------------------------------------------------------------------- #
+
+ADJUDICATORS_ENV_VAR = "AGENTCO_ADJUDICATORS"
+
+
+def adjudicators_from_env(value: Optional[str] = None) -> frozenset[str]:
+    """The routes the operator declared as adjudicators. Same shape as verifiers.
+
+    Empty means UNDECLARED, and undeclared means **only humans adjudicate** —
+    the opposite default from `verifiers_from_env`, and deliberately so. An
+    undeclared verifier set fails open because the alternative is every judged
+    gate resolving on its clock, which is work approved by a timer. An
+    undeclared adjudicator set fails CLOSED because the alternative is an
+    agent grading the loop that revises the procedures it follows, and the
+    thing that would degrade is not throughput but the evidence base. The
+    human-only posture is the default; a declared route is the opt-in.
+    """
+    return _split(value if value is not None else os.environ.get(ADJUDICATORS_ENV_VAR))
+
+
+def may_adjudicate(actor: Optional[str], *, humans: Iterable[str],
+                   adjudicators: Iterable[str]) -> bool:
+    """Whether this actor may write an adjudication at all.
+
+    Distinctness from the executor is a separate check, enforced where the
+    executors are known (`work.adjudication_record`). This answers only the
+    prior question: is this party entitled to judge anything.
+    """
+    if kind_of(actor, humans) == HUMAN:
+        return True
+    return bool(actor) and actor in frozenset(adjudicators)
+
+
+#: Public name for the step-keying rule, so the store's lessons pass can key
+#: its own lookups the same way the policy does. Two different keyings would
+#: mean the pass proposing a text onto a step the policy then measured against
+#: a different one.
+steps_by_key = _steps_by_key

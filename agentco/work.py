@@ -62,7 +62,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Sequence
+from typing import Callable, Iterable, Iterator, Optional, Sequence
 
 from agentco import gates, policy
 from agentco.errors import Refusal
@@ -404,6 +404,11 @@ RESERVED_METADATA_KEYS = frozenset({
     # channel through the pass — a lesson nobody learned, in a procedure nobody
     # followed. Found by the second party on P4.V.
     "sop_ref",
+    # The run record: what inputs a run was given and which binding fills each
+    # role (ASOP v3 §5.1). Written only by `SopLibrary.run` and read back as
+    # fact by `run_get`/`promote`. A caller who could set it could claim a run
+    # was bound to a validator that never saw it.
+    "sop_run",
 })
 PLAN_KEY = "sop_plan"
 PLAN_VS_ACTUAL_KEY = "plan_vs_actual"
@@ -457,7 +462,8 @@ def executors_of(item: "WorkItem") -> list[str]:
 
 
 def adjudication_record(
-    item: "WorkItem", verdict: object, evidence: object, adjudicator: object
+    item: "WorkItem", verdict: object, evidence: object, adjudicator: object,
+    *, humans: Optional[Iterable[str]] = None, adjudicators: Optional[Iterable[str]] = None,
 ) -> dict:
     """Validate an adjudication against the item it judges. Refuses; never repairs.
 
@@ -466,6 +472,14 @@ def adjudication_record(
     item byte-identical. The self check compares against `executors_of`, which
     is derived from what the plane recorded and cannot be self-asserted; that
     is what makes "adjudicator ≠ executor" enforced rather than documented.
+
+    **Two questions, in order.** Whether this party may adjudicate ANYTHING —
+    ASOP v3 §6.1: a human always, a route only when the operator declared it
+    an adjudicator — and then whether it may adjudicate THIS item, which is
+    the separation check. A registry that declares no adjudicators makes the
+    operator the only one, and that default is deliberate: an agent grading
+    the loop that revises the procedures it follows degrades the evidence
+    base, not the throughput, so nobody notices.
     """
     if not isinstance(adjudicator, str) or not adjudicator.strip():
         raise Refusal(
@@ -499,6 +513,28 @@ def adjudication_record(
                 "the plane's name on it, and the next version of the procedure "
                 "would be revised on it."
             ),
+        )
+    declared_humans = policy.humans_from_env() if humans is None else humans
+    declared_adjudicators = (
+        policy.adjudicators_from_env() if adjudicators is None else adjudicators
+    )
+    if not policy.may_adjudicate(adjudicator, humans=declared_humans,
+                                 adjudicators=declared_adjudicators):
+        named = sorted(frozenset(declared_adjudicators))
+        raise Refusal(
+            code=ADJUDICATION_INVALID,
+            message=(
+                f"{adjudicator!r} is neither a declared human nor a declared "
+                f"adjudicator, so it may not judge a divergence"
+            ),
+            remediation=(
+                f"Adjudication is what revises the procedures everyone follows, so "
+                f"who may do it is declared by the operator, never inferred. Declare "
+                f"this route in {policy.ADJUDICATORS_ENV_VAR} "
+                f"(currently: {named or 'nothing — only declared humans adjudicate'}), "
+                f"or route the divergence to a person."
+            ),
+            http_status=403,
         )
     executors = executors_of(item)
     if not executors:
@@ -853,7 +889,9 @@ def build_item(
 class Queue:
     """A JSONL work store with an advisory lock around every mutation."""
 
-    def __init__(self, path: Path | str = "work.jsonl", verifiers: Optional[Sequence[str]] = None):
+    def __init__(self, path: Path | str = "work.jsonl", verifiers: Optional[Sequence[str]] = None,
+                 humans: Optional[Sequence[str]] = None,
+                 adjudicators: Optional[Sequence[str]] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # The operator's declared verifiers (`AGENTCO_VERIFIERS`). Declared,
@@ -862,6 +900,18 @@ class Queue:
         # report says so. Injectable for tests.
         self.verifiers: frozenset[str] = (
             frozenset(verifiers) if verifiers is not None else policy.verifiers_from_env()
+        )
+        # Who may judge a divergence (ASOP v3 §6.1). `humans` is the same
+        # declaration the revision policy reads; `adjudicators` is the opt-in
+        # that lets a ROUTE do it. Undeclared adjudicators means humans only —
+        # unlike verifiers, this one fails closed, because what degrades when
+        # it fails open is the evidence the procedures are revised from.
+        self.humans: frozenset[str] = (
+            frozenset(humans) if humans is not None else policy.humans_from_env()
+        )
+        self.adjudicators: frozenset[str] = (
+            frozenset(adjudicators) if adjudicators is not None
+            else policy.adjudicators_from_env()
         )
         # Raw BYTES, not str — a line that failed to decode has no faithful
         # string form. Read by a health check, and carried through every
@@ -1820,10 +1870,12 @@ class Queue:
             return None
         # Validated on the read, and again inside the lock: the first refuses
         # before anything is touched, the second holds if the item moved.
-        adjudication_record(current, verdict, evidence, adjudicator)
+        adjudication_record(current, verdict, evidence, adjudicator,
+                            humans=self.humans, adjudicators=self.adjudicators)
 
         def tag(item: WorkItem) -> dict:
-            record = adjudication_record(item, verdict, evidence, adjudicator)
+            record = adjudication_record(item, verdict, evidence, adjudicator,
+                                         humans=self.humans, adjudicators=self.adjudicators)
             metadata = dict(item.metadata or {})
             metadata[ADJUDICATION_KEY] = record
             return {"metadata": metadata}

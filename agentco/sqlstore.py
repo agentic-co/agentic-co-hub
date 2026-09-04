@@ -41,14 +41,14 @@ import sys
 import threading
 import uuid
 from contextlib import contextmanager
-from dataclasses import fields
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
 from agentco import migrations, policy
 from agentco.db import BUSY_TIMEOUT_MS
 from agentco.pgadapter import PgConnection, is_postgres_target
-from agentco.sop import SOP, SopLibrary, SopStatus
+from agentco.sop import ASOP, SOP, SopLibrary, SopStatus, Step
 from agentco.work import (
     Queue,
     WorkError,
@@ -117,6 +117,36 @@ SOP_COLUMNS: tuple[str, ...] = (
 )
 _SOP_JSON_COLUMNS = frozenset({"common_mistakes", "tags", "proposals"})
 
+# The v3 record. Every `ASOP` field is a column of the same name, asserted at
+# import for the same reason `WORK_COLUMNS` is: a field with no column does not
+# fail, it silently does not persist. `SOP_COLUMNS` stays above because the
+# `sops` table stays — migration 0009 copies its rows forward as one-step
+# ASOPs rather than rewriting them in place, so the legacy record is still
+# there if a rollback ever needs it.
+ASOP_COLUMNS: tuple[str, ...] = (
+    "asop_id",
+    "version",
+    "title",
+    "status",
+    "task_type",
+    "purpose",
+    "trigger",
+    "inputs",
+    "roles",
+    "constraints",
+    "steps",
+    "author",
+    "author_kind",
+    "proposals",
+    "superseded_by",
+    "created_at",
+)
+_ASOP_JSON_COLUMNS = frozenset({"inputs", "roles", "constraints", "steps", "proposals"})
+# What an EMPTY value of each JSON column serialises to. `roles` is an object
+# and the rest are arrays; one shared `or []` would have written `[]` into a
+# column every reader decodes as a mapping.
+_ASOP_JSON_EMPTY = {"inputs": [], "roles": {}, "constraints": [], "steps": [], "proposals": []}
+
 
 def _check_columns(dataclass_type, columns: Sequence[str]) -> None:
     declared = {f.name for f in fields(dataclass_type)}
@@ -132,6 +162,7 @@ def _check_columns(dataclass_type, columns: Sequence[str]) -> None:
 
 _check_columns(WorkItem, WORK_COLUMNS)
 _check_columns(SOP, SOP_COLUMNS)
+_check_columns(ASOP, ASOP_COLUMNS)
 
 
 def _quote(column: str) -> str:
@@ -598,6 +629,31 @@ def _row_to_sop(row: sqlite3.Row) -> SOP:
     return SOP(**{k: v for k, v in data.items() if k in known})
 
 
+def _asop_to_row(asop: ASOP) -> tuple:
+    values = []
+    for column in ASOP_COLUMNS:
+        value = getattr(asop, column)
+        if column == "status":
+            value = asop.status.value
+        elif column == "steps":
+            value = json.dumps([asdict(step) for step in value or []])
+        elif column in _ASOP_JSON_COLUMNS:
+            value = json.dumps(value if value else _ASOP_JSON_EMPTY[column])
+        values.append(value)
+    return tuple(values)
+
+
+def _row_to_asop(row: sqlite3.Row) -> ASOP:
+    data = dict(json.loads(row["unknown"] or "{}"))
+    for column in ASOP_COLUMNS:
+        value = row[column]
+        data[column] = json.loads(value) if column in _ASOP_JSON_COLUMNS else value
+    data["status"] = SopStatus(data["status"])
+    data["steps"] = [Step(**step) for step in data.get("steps") or []]
+    known = {f.name for f in fields(ASOP)}
+    return ASOP(**{k: v for k, v in data.items() if k in known})
+
+
 class SqlSopLibrary(_SqlBacked, SopLibrary):
     """The SOP library on SQLite.
 
@@ -635,7 +691,7 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
         with self._write_tx():
             yield
 
-    def _read_all(self) -> list[SOP]:
+    def _read_all(self) -> list[ASOP]:
         """Every readable version. An unreadable row is quarantined, not fatal.
 
         The parity that matters is with `SopLibrary._read_all`, which catches
@@ -670,18 +726,18 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
         with self._read_tx() as conn:
             postgres = getattr(conn, "dialect", "sqlite") == "postgres"
             suffix = " FOR UPDATE" if postgres and conn.in_transaction else ""
-            rows = conn.execute(f"SELECT * FROM sops ORDER BY sop_id, version{suffix}").fetchall()
-        out: list[SOP] = []
+            rows = conn.execute(f"SELECT * FROM asops ORDER BY asop_id, version{suffix}").fetchall()
+        out: list[ASOP] = []
         quarantined: list[sqlite3.Row] = []
         for row in rows:
             try:
-                out.append(_row_to_sop(row))
+                out.append(_row_to_asop(row))
             except (ValueError, TypeError):
                 quarantined.append(row)
         self.quarantined = quarantined
         return out
 
-    def _write_all(self, sops: Sequence[SOP], quarantined: Sequence = ()) -> None:
+    def _write_all(self, asops: Sequence[ASOP], quarantined: Sequence = ()) -> None:
         """Replace the table's contents. Called only inside `_locked`.
 
         The delete-then-insert is safe precisely because it is inside the
@@ -705,21 +761,22 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
             refusal stops the NUMBER being reused. Dropping them here would
             make the refusal moot by deleting the thing it protects.
         """
-        columns = SOP_COLUMNS + ("unknown",)
+        columns = ASOP_COLUMNS + ("unknown",)
         quoted = ", ".join(_quote(c) for c in columns)
         placeholders = ", ".join("?" for _ in columns)
-        insert = f"INSERT INTO sops ({quoted}) VALUES ({placeholders})"
+        insert = f"INSERT INTO asops ({quoted}) VALUES ({placeholders})"
+        clear = "DELETE FROM asops"
         with self._read_tx() as conn:
             preserved = {
-                (row["sop_id"], row["version"]): row["unknown"]
-                for row in conn.execute("SELECT sop_id, version, unknown FROM sops")
+                (row["asop_id"], row["version"]): row["unknown"]
+                for row in conn.execute("SELECT asop_id, version, unknown FROM asops")
             }
-            conn.execute("DELETE FROM sops")
-            for sop in sops:
+            conn.execute(clear)
+            for asop in asops:
                 conn.execute(
                     insert,
-                    _sop_to_row(sop)
-                    + (preserved.get((sop.sop_id, sop.version), "{}"),),
+                    _asop_to_row(asop)
+                    + (preserved.get((asop.asop_id, asop.version), "{}"),),
                 )
             for row in quarantined:
                 conn.execute(insert, tuple(row[c] for c in columns))
