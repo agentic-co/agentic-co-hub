@@ -259,11 +259,15 @@ HUMAN_ESCALATE = {
 
 
 def abandoned(queue):
+    # One clock for the park, the routing and the sweep. The park clock is
+    # stamped in `report_result`, not in `route_open_gates` — so injecting a
+    # clock into the router alone, which is where two reviews first pointed,
+    # would have left the start on the wall and the expiry on the fixture.
     item = queue.create("ship the release", verify=HUMAN_ESCALATE)
-    leased = queue.claim(item.id, "executor")
-    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
+    leased = queue.claim(item.id, "executor", now=at(0))
+    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE, now=at(0))
     assert queue.get(item.id).status is WorkStatus.AWAITING_VERIFY
-    verifiers.route_open_gates(queue)
+    verifiers.route_open_gates(queue, now=at(0))
     swept = verifiers.sweep_park_clocks(queue, now=at(120))
     assert [r["item"] for r in swept["escalated"]] == [item.id]
     return item

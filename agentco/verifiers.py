@@ -148,7 +148,13 @@ def origin_of(item: WorkItem) -> dict:
     }
 
 
-def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
+def route_open_gates(
+    queue: Queue,
+    *,
+    conn=None,
+    dry_run: bool = False,
+    now: Optional[datetime] = None,
+) -> dict:
     """Give every judged or human gate still owed an answer a vehicle, and
     retire the moot ones.
 
@@ -198,6 +204,7 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
     Each loss is caught, named in `skipped`, and the pass continues. Same rule
     `reap_expired_leases` has always followed.
     """
+    at = now or _now()
     items = queue.list()
     by_id = {i.id: i for i in items}
     routed_for = {verifies(i): i for i in items if is_vehicle(i)}
@@ -272,7 +279,7 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
             metadata={
                 VEHICLE_MARKER: item.id,
                 "gate": gate,
-                "routed_at": _now().isoformat(),
+                "routed_at": at.isoformat(),
                 "criteria": gate.get("check"),
                 # Carried so a verifier reading only this item knows what it is
                 # judging. A vehicle that says "go decide this" without saying
@@ -313,7 +320,7 @@ def route_open_gates(queue: Queue, *, conn=None, dry_run: bool = False) -> dict:
                 conn,
                 kind="WorkParked",
                 actor=events.PLANE_ACTOR,
-                occurred_at=(_parked_at(item) or _now()).isoformat(),
+                occurred_at=(_parked_at(item) or at).isoformat(),
                 payload={
                     "itemId": item.id,
                     "title": item.title,
