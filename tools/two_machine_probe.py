@@ -210,23 +210,54 @@ def step_work_check(reg: Registry, argv: list[str]) -> int:
 # --- SOPs: a lesson learned on one machine, read on the other -------------
 
 
+#: The one step this probe's procedure has. Held as a constant because a
+#: revision replaces the whole sequence, so the lesson step has to be built
+#: from the same body the create used — hand-copying it would make the probe
+#: report a carry-forward failure it caused itself.
+PROBE_STEP = {
+    "name": "run the lane",
+    "role": "runner",
+    "purpose": "Keep the two-machine lane honest",
+    "definition_of_done": "Both machines report the same outcome for the same item",
+    "gate": {
+        "kind": "deterministic",
+        "check": "agentco work --status done",
+        "max_park_seconds": 900,
+        "on_timeout": "fail",
+    },
+}
+
+
+def _step_of(sop: dict) -> dict:
+    return (sop.get("steps") or [{}])[0]
+
+
 def step_sop_create(reg: Registry, argv: list[str]) -> int:
     sop = reg.sop_create(
         argv[0],
+        task_type="two-machine-lane",
         purpose="Keep the two-machine lane honest",
         trigger="A cross-machine run is starting",
-        definition_of_done="Both machines report the same outcome for the same item",
+        roles={"runner": {"kind": "agent"}},
+        steps=[dict(PROBE_STEP)],
     )["sop"]
-    print(f"      sop={sop['sop_id']} version={sop['version']} status={sop['status']}")
-    reg.sop_activate(sop["sop_id"], sop["version"])
-    print(f"PASS  {reg.actor} authored and activated the SOP")
+    print(f"      sop={sop['asop_id']} version={sop['version']} status={sop['status']}")
+    reg.sop_activate(sop["asop_id"], sop["version"])
+    print(f"PASS  {reg.actor} authored and activated the ASOP")
     return 0
 
 
 def step_sop_lesson(reg: Registry, argv: list[str]) -> int:
-    """Record a lesson learned as a new version, and make it the active one."""
+    """Record a lesson learned as a new version, and make it the active one.
+
+    The lesson lands on the STEP, which is where v3 keeps the lesson channel —
+    so what crosses the machine boundary is a step's `common_mistakes`, not a
+    procedure-level field.
+    """
     sop_id, lesson = argv[0], argv[1]
-    revised = reg.sop_revise(sop_id, common_mistakes=[lesson])["sop"]
+    revised = reg.sop_revise(
+        sop_id, steps=[{**PROBE_STEP, "common_mistakes": [lesson]}]
+    )["sop"]
     reg.sop_activate(sop_id, revised["version"])
     print(f"      sop={sop_id} newVersion={revised['version']}")
     print(f"PASS  {reg.actor} published the lesson as version {revised['version']}")
@@ -239,17 +270,23 @@ def step_sop_read(reg: Registry, argv: list[str]) -> int:
     expect_lesson = argv[2] if len(argv) > 2 else None
     sop = reg.sop_get(sop_id)["sop"]
     if sop is None:
-        print(f"FAIL  {reg.actor} sees no active SOP {sop_id} — the library is not shared")
+        print(f"FAIL  {reg.actor} sees no active ASOP {sop_id} — the library is not shared")
         return 1
-    print(f"      version={sop['version']} mistakes={sop.get('common_mistakes')}")
+    step = _step_of(sop)
+    print(f"      version={sop['version']} mistakes={step.get('common_mistakes')}")
     if sop["version"] != expect_version:
         print(f"FAIL  read version {sop['version']}, expected {expect_version}")
         return 1
-    if expect_lesson and expect_lesson not in (sop.get("common_mistakes") or []):
-        print(f"FAIL  the lesson written on the other machine is not in this SOP")
+    if expect_lesson and expect_lesson not in (step.get("common_mistakes") or []):
+        print("FAIL  the lesson written on the other machine is not on this step")
         return 1
     if sop.get("purpose") is None:
         print("FAIL  revision blanked a field it should have carried forward")
+        return 1
+    # The gate has to cross too. A shared procedure whose steps arrive
+    # ungated is a procedure the other machine cannot be held to.
+    if not (step.get("gate") or {}).get("kind"):
+        print("FAIL  the step arrived with no gate — the version's check did not cross")
         return 1
     print(f"PASS  {reg.actor} reads v{expect_version}"
           f"{' including the lesson' if expect_lesson else ''}")
@@ -258,7 +295,7 @@ def step_sop_read(reg: Registry, argv: list[str]) -> int:
 
 def step_sop_list(reg: Registry, argv: list[str]) -> int:
     expect_id = argv[0]
-    ids = [s["sop_id"] for s in reg.sop_list()["sops"]]
+    ids = [s["asop_id"] for s in reg.sop_list()["sops"]]
     print(f"      active sops={ids}")
     if expect_id not in ids:
         print(f"FAIL  {expect_id} is not discoverable from {reg.actor}")

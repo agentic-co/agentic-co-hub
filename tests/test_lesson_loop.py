@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from agentco.policy import AGENT, HUMAN
-from agentco.sop import PROPOSED_KEY, SopError, lesson_text
+from agentco.sop import PROPOSED_KEY, SopError, lesson_text, step_payload
 from agentco.work import WorkStatus
 from evals.arms import Arm, render
 from evals.ledger import Ledger
@@ -30,24 +30,75 @@ from evals.report import lesson_channel, render_text, verdict
 from evals.runner import run
 from evals.tasks import TaskSet
 
+DETERMINISTIC_GATE = {
+    "kind": "deterministic",
+    "check": "diff -q out.csv expected.csv",
+    "max_park_seconds": 900,
+    "on_timeout": "fail",
+}
+
 
 def procedure(library, **over):
-    body = {"definition_of_done": "the export matches the fixture", "validation": "diff -q out.csv expected.csv"}
+    from asop.sop import STEP_TEXT_FIELDS
+
+    step = {
+        "name": "export",
+        "role": "implementer",
+        "gate": DETERMINISTIC_GATE,
+        "definition_of_done": "the export matches the fixture",
+        "validation": "diff -q out.csv expected.csv",
+    }
+    for key in list(over):
+        if key in STEP_TEXT_FIELDS or key == "common_mistakes":
+            step[key] = over.pop(key)
+    body = {"roles": {"implementer": {"kind": "agent"}}, "steps": [step]}
     body.update(over)
     sop = library.create("export the ledger", author="dana", author_kind=HUMAN, **body)
-    library.activate(sop.sop_id, 1, author="dana", author_kind=HUMAN)
+    library.activate(sop.asop_id, 1, author="dana", author_kind=HUMAN)
     return sop
+
+
+def _step(asop, i=0, **override):
+    """`asop.steps[i]` back as a revise-able payload, with fields overridden
+    or (when the value is None) dropped."""
+    payload = step_payload(asop.steps[i])
+    for key, value in override.items():
+        if value is None:
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+    return payload
+
+
+def _declare(queue, humans=("dana",)):
+    """Who the operator declared. Undeclared, only humans adjudicate — so a
+    test that adjudicates has to say who its human is (ASOP.md §6.1)."""
+    queue.humans = frozenset(humans)
+    queue.adjudicators = frozenset()
+    return queue
+
+
+def _finish(queue, item_id, actor="kofi"):
+    queue.claim(item_id, actor)
+    item = queue.get(item_id)
+    queue.report_result(
+        item_id, item.lease_attempt, WorkStatus.DONE, result="did it",
+        attestation={"check": item.verify["check"], "exit_status": 0,
+                    "environment": "test", "at": "2026-09-04T00:00:00+00:00"},
+        submitted_by=actor,
+    )
 
 
 def loop_once(library, queue, sop, evidence="reported done without running the diff"):
     """One turn of the loop: execute, adjudicate bad, propose, activate the draft."""
-    item = library.instantiate(sop.sop_id, queue)
-    leased = queue.claim(item.id, "kofi")
-    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
-    queue.adjudicate(item.id, "bad", evidence, adjudicator="dana")
-    draft = library.propose(sop.sop_id, queue, author="agentco-lessons", author_kind=AGENT)
-    library.activate(sop.sop_id, draft.version, author="dana", author_kind=HUMAN)
-    return item, library.get(sop.sop_id)
+    run = library.run(sop.asop_id, queue, inputs={}, bindings={"implementer": "kofi"})
+    item_id = run["steps"][0]["itemId"]
+    _finish(queue, item_id)
+    _declare(queue)
+    queue.adjudicate(item_id, "bad", evidence, adjudicator="dana")
+    draft = library.propose(sop.asop_id, queue, author="agentco-lessons", author_kind=AGENT)
+    library.activate(sop.asop_id, draft.version, author="dana", author_kind=HUMAN)
+    return queue.get(item_id), library.get(sop.asop_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -60,13 +111,14 @@ def test_a_lesson_the_loop_wrote_is_attributed_to_the_loop(library, queue):
     item, active = loop_once(library, queue, sop)
     assert active.version == 2
 
-    provenance = library.lesson_provenance(sop.sop_id, queue)
+    provenance = library.lesson_provenance(sop.asop_id, queue)
     assert provenance["version"] == 2
     assert provenance["loopFed"] and provenance["handFed"]
-    assert provenance["hand"] == ["typed by a person"]
-    assert [entry["itemId"] for entry in provenance["loop"]] == [item.id]
-    assert provenance["loop"][0]["lesson"] == lesson_text(item.id, "dana", "reported done without running the diff")
-    assert provenance["loop"][0]["proposedIn"] == 2
+    step = provenance["steps"][0]
+    assert step["hand"] == ["typed by a person"]
+    assert [entry["itemId"] for entry in step["loop"]] == [item.id]
+    assert step["loop"][0]["lesson"] == lesson_text(item.id, "dana", "reported done without running the diff")
+    assert step["loop"][0]["proposedIn"] == 2
 
 
 def test_the_same_sentence_typed_by_a_person_is_still_a_hand(library, queue):
@@ -76,40 +128,46 @@ def test_the_same_sentence_typed_by_a_person_is_still_a_hand(library, queue):
     loop_line = lesson_text(item.id, "dana", "reported done without running the diff")
 
     other = procedure(library, common_mistakes=[loop_line])   # a person copies the exact text
-    provenance = library.lesson_provenance(other.sop_id, queue)
-    assert provenance["loop"] == [] and provenance["hand"] == [loop_line]
+    provenance = library.lesson_provenance(other.asop_id, queue)
+    assert provenance["steps"][0]["loop"] == [] and provenance["steps"][0]["hand"] == [loop_line]
 
 
 def test_an_adjudication_nobody_proposed_yet_feeds_nothing(library, queue):
     sop = procedure(library)
-    item = library.instantiate(sop.sop_id, queue)
-    leased = queue.claim(item.id, "kofi")
-    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
-    queue.adjudicate(item.id, "bad", "skipped the diff", adjudicator="dana")
-    provenance = library.lesson_provenance(sop.sop_id, queue)
-    assert provenance == {"sopId": sop.sop_id, "version": 1, "loop": [], "hand": [],
-                          "loopFed": False, "handFed": False}
+    run = library.run(sop.asop_id, queue, inputs={}, bindings={"implementer": "kofi"})
+    item_id = run["steps"][0]["itemId"]
+    _finish(queue, item_id)
+    _declare(queue)
+    queue.adjudicate(item_id, "bad", "skipped the diff", adjudicator="dana")
+    provenance = library.lesson_provenance(sop.asop_id, queue)
+    assert provenance == {
+        "asopId": sop.asop_id, "version": 1,
+        "steps": [{"step": 1, "name": "export", "loop": [], "hand": []}],
+        "loopFed": False, "handFed": False,
+    }
 
 
 def test_provenance_is_per_version_and_the_loop_cannot_reach_back(library, queue):
     """The lesson entered at v2. Asking about v1 must not attribute it there."""
     sop = procedure(library)
     loop_once(library, queue, sop)
-    assert library.lesson_provenance(sop.sop_id, queue, version=1)["loop"] == []
-    assert len(library.lesson_provenance(sop.sop_id, queue, version=2)["loop"]) == 1
+    assert library.lesson_provenance(sop.asop_id, queue, version=1)["steps"][0]["loop"] == []
+    assert len(library.lesson_provenance(sop.asop_id, queue, version=2)["steps"][0]["loop"]) == 1
     with pytest.raises(SopError):
-        library.lesson_provenance(sop.sop_id, queue, version=9)
+        library.lesson_provenance(sop.asop_id, queue, version=9)
     with pytest.raises(SopError):
-        library.lesson_provenance("sop-deadbeef", queue)
+        library.lesson_provenance("asop-deadbeef", queue)
 
 
 def test_a_human_pruning_the_loops_lesson_leaves_it_out(library, queue):
     sop = procedure(library)
     loop_once(library, queue, sop)
-    pruned = library.revise(sop.sop_id, common_mistakes=None, author="dana", author_kind=HUMAN)
-    library.activate(sop.sop_id, pruned.version, author="dana", author_kind=HUMAN)
-    provenance = library.lesson_provenance(sop.sop_id, queue)
-    assert provenance["loop"] == [] and not provenance["loopFed"]
+    active = library.get(sop.asop_id)
+    pruned = library.revise(sop.asop_id, steps=[_step(active, 0, common_mistakes=None)],
+                            author="dana", author_kind=HUMAN)
+    library.activate(sop.asop_id, pruned.version, author="dana", author_kind=HUMAN)
+    provenance = library.lesson_provenance(sop.asop_id, queue)
+    assert provenance["steps"][0]["loop"] == [] and not provenance["loopFed"]
 
 
 def test_a_hand_that_copies_the_loops_wording_before_the_loop_ran_is_still_a_hand(library, queue):
@@ -117,44 +175,48 @@ def test_a_hand_that_copies_the_loops_wording_before_the_loop_ran_is_still_a_han
     version a person typed it into, and the loop's only from the draft that
     consumed the adjudication onward."""
     sop = procedure(library)
-    item = library.instantiate(sop.sop_id, queue)
-    leased = queue.claim(item.id, "kofi")
-    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
-    queue.adjudicate(item.id, "bad", "skipped the diff", adjudicator="dana")
-    line = lesson_text(item.id, "dana", "skipped the diff")
+    run = library.run(sop.asop_id, queue, inputs={}, bindings={"implementer": "kofi"})
+    item_id = run["steps"][0]["itemId"]
+    _finish(queue, item_id)
+    _declare(queue)
+    queue.adjudicate(item_id, "bad", "skipped the diff", adjudicator="dana")
+    line = lesson_text(item_id, "dana", "skipped the diff")
 
-    typed = library.revise(sop.sop_id, common_mistakes=[line], author="dana", author_kind=HUMAN)
-    library.activate(sop.sop_id, typed.version, author="dana", author_kind=HUMAN)
-    assert library.lesson_provenance(sop.sop_id, queue, version=typed.version)["hand"] == [line], (
+    typed = library.revise(sop.asop_id, steps=[_step(sop, 0, common_mistakes=[line])],
+                           author="dana", author_kind=HUMAN)
+    library.activate(sop.asop_id, typed.version, author="dana", author_kind=HUMAN)
+    assert library.lesson_provenance(sop.asop_id, queue, version=typed.version)["steps"][0]["hand"] == [line], (
         "nothing has consumed the adjudication yet"
     )
 
-    assert library.propose(sop.sop_id, queue, author="agentco-lessons", author_kind=AGENT) is None, (
+    assert library.propose(sop.asop_id, queue, author="agentco-lessons", author_kind=AGENT) is None, (
         "same text already there; nothing to draft"
     )
-    marked = queue.get(item.id).metadata["adjudication"]
+    marked = queue.get(item_id).metadata["adjudication"]
     assert marked[PROPOSED_KEY] == typed.version and marked["already_present"] is True
-    assert library.lesson_provenance(sop.sop_id, queue, version=typed.version)["hand"] == [line], (
+    assert library.lesson_provenance(sop.asop_id, queue, version=typed.version)["steps"][0]["hand"] == [line], (
         "the pass found it there; it did not write it — still the person's"
     )
-    assert library.proposals(sop.sop_id, queue)["pending"] == 0
+    assert library.proposals(sop.asop_id, queue)["pending"] == 0
 
 
 def test_a_good_adjudication_never_counts_as_a_lesson(library, queue):
     """Good divergence feeds `proposals`, not the lesson channel. A person who
     copies the lesson wording for a good-adjudicated item is a hand."""
     sop = procedure(library)
-    item = library.instantiate(sop.sop_id, queue)
-    leased = queue.claim(item.id, "kofi")
-    queue.report_result(item.id, leased.lease_attempt, WorkStatus.DONE)
-    queue.adjudicate(item.id, "good", "the diff was redundant", adjudicator="dana")
-    draft = library.propose(sop.sop_id, queue, author="agentco-lessons", author_kind=AGENT)
-    assert draft.common_mistakes == [] and len(draft.proposals) == 1
+    run = library.run(sop.asop_id, queue, inputs={}, bindings={"implementer": "kofi"})
+    item_id = run["steps"][0]["itemId"]
+    _finish(queue, item_id)
+    _declare(queue)
+    queue.adjudicate(item_id, "good", "the diff was redundant", adjudicator="dana")
+    draft = library.propose(sop.asop_id, queue, author="agentco-lessons", author_kind=AGENT)
+    assert draft.steps[0].common_mistakes == [] and len(draft.steps[0].proposals) == 1
 
-    line = lesson_text(item.id, "dana", "the diff was redundant")
-    typed = library.revise(sop.sop_id, common_mistakes=[line], author="dana", author_kind=HUMAN)
-    provenance = library.lesson_provenance(sop.sop_id, queue, version=typed.version)
-    assert provenance["loop"] == [] and provenance["hand"] == [line]
+    line = lesson_text(item_id, "dana", "the diff was redundant")
+    typed = library.revise(sop.asop_id, steps=[_step(sop, 0, common_mistakes=[line])],
+                           author="dana", author_kind=HUMAN)
+    provenance = library.lesson_provenance(sop.asop_id, queue, version=typed.version)
+    assert provenance["steps"][0]["loop"] == [] and provenance["steps"][0]["hand"] == [line]
 
 
 # --------------------------------------------------------------------------- #
@@ -195,9 +257,12 @@ def _fleet():
 def test_the_ledger_records_where_the_lesson_arms_lessons_came_from(library, queue, tmp_path):
     sop = procedure(library)
     _, active = loop_once(library, queue, sop)
-    base = library.get(sop.sop_id, version=1)
-    provenance = library.lesson_provenance(sop.sop_id, queue, version=active.version)
-    source = {"loop": len(provenance["loop"]), "hand": len(provenance["hand"])}
+    base = library.get(sop.asop_id, version=1)
+    provenance = library.lesson_provenance(sop.asop_id, queue, version=active.version)
+    source = {
+        "loop": sum(len(s["loop"]) for s in provenance["steps"]),
+        "hand": sum(len(s["hand"]) for s in provenance["steps"]),
+    }
 
     ledger = Ledger(tmp_path / "ledger" / "trials.jsonl")
     run(_taskset(tmp_path / "tasks"), _fleet(), ledger, "r1",
@@ -219,8 +284,8 @@ def test_the_ledger_records_where_the_lesson_arms_lessons_came_from(library, que
 
 def test_a_run_with_no_provenance_reports_unknown_rather_than_either_answer(library, tmp_path):
     sop = procedure(library, common_mistakes=["typed by a person"])
-    base = library.get(sop.sop_id, version=1)
-    lesson = library.revise(sop.sop_id, common_mistakes=["typed by a person", "and another"],
+    base = library.get(sop.asop_id, version=1)
+    lesson = library.revise(sop.asop_id, steps=[_step(sop, 0, common_mistakes=["typed by a person", "and another"])],
                             author="dana", author_kind=HUMAN)
     ledger = Ledger(tmp_path / "ledger" / "trials.jsonl")
     run(_taskset(tmp_path / "tasks"), _fleet(), ledger, "r2",
@@ -233,7 +298,7 @@ def test_a_run_with_no_provenance_reports_unknown_rather_than_either_answer(libr
 
 def test_a_hand_fed_run_is_named_as_measuring_a_person(library, tmp_path):
     sop = procedure(library, common_mistakes=["typed by a person"])
-    base = library.get(sop.sop_id, version=1)
+    base = library.get(sop.asop_id, version=1)
     ledger = Ledger(tmp_path / "ledger" / "trials.jsonl")
     run(_taskset(tmp_path / "tasks"), _fleet(), ledger, "r3",
         sop_for_arm={Arm.ASOP: base, Arm.ASOP_LESSON: base},
@@ -264,10 +329,11 @@ def test_the_lesson_source_is_for_the_version_asked_not_the_active_one(library, 
     active version and nobody would have known."""
     sop = procedure(library)
     _, active = loop_once(library, queue, sop)          # v2 active, loop-fed
-    draft = library.revise(sop.sop_id, common_mistakes=None, author="dana", author_kind=HUMAN)  # v3 draft, empty
-    assert lesson_source_for(library, queue, sop.sop_id, active.version) == {"loop": 1, "hand": 0}
-    assert lesson_source_for(library, queue, sop.sop_id, draft.version) == {"loop": 0, "hand": 0}
-    assert lesson_source_for(library, queue, sop.sop_id, 1) == {"loop": 0, "hand": 0}
+    draft = library.revise(sop.asop_id, steps=[_step(active, 0, common_mistakes=None)],
+                           author="dana", author_kind=HUMAN)  # v3 draft, empty
+    assert lesson_source_for(library, queue, sop.asop_id, active.version) == {"loop": 1, "hand": 0}
+    assert lesson_source_for(library, queue, sop.asop_id, draft.version) == {"loop": 0, "hand": 0}
+    assert lesson_source_for(library, queue, sop.asop_id, 1) == {"loop": 0, "hand": 0}
 
 
 def test_a_mix_is_reported_as_a_mix(tmp_path):
@@ -284,9 +350,10 @@ def test_a_loop_lesson_carried_into_a_later_version_stays_the_loops(library, que
     """Mutant M8 survived (`>` → `!=`): the lesson entered at v2 and a human's
     unrelated v3 carried it forward — at v3 it is still the loop's."""
     sop = procedure(library)
-    item, _ = loop_once(library, queue, sop)
-    later = library.revise(sop.sop_id, inputs="the export id", author="dana", author_kind=HUMAN)
-    library.activate(sop.sop_id, later.version, author="dana", author_kind=HUMAN)
-    provenance = library.lesson_provenance(sop.sop_id, queue, version=later.version)
-    assert [e["itemId"] for e in provenance["loop"]] == [item.id]
-    assert provenance["hand"] == []
+    item, active = loop_once(library, queue, sop)
+    later = library.revise(sop.asop_id, steps=[_step(active, 0, inputs="the export id")],
+                           author="dana", author_kind=HUMAN)
+    library.activate(sop.asop_id, later.version, author="dana", author_kind=HUMAN)
+    provenance = library.lesson_provenance(sop.asop_id, queue, version=later.version)
+    assert [e["itemId"] for e in provenance["steps"][0]["loop"]] == [item.id]
+    assert provenance["steps"][0]["hand"] == []

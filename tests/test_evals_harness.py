@@ -46,15 +46,31 @@ def fleet():
     )
 
 
+DETERMINISTIC_GATE = {
+    "kind": "deterministic", "check": "true",
+    "max_park_seconds": 900, "on_timeout": "fail",
+}
+
+
 def sop(**body):
     from agentco.sop import SopLibrary
+    from asop.sop import STEP_TEXT_FIELDS
 
     import tempfile
 
+    title = body.pop("title", "Do the thing")
+    step_fields = {k: body.pop(k) for k in list(body) if k in STEP_TEXT_FIELDS or k == "common_mistakes"}
+    gate = body.pop("gate", None) or DETERMINISTIC_GATE
+
     lib = SopLibrary(Path(tempfile.mkdtemp()) / "sops.jsonl")
-    created = lib.create(body.pop("title", "Do the thing"), **body)
-    lib.activate(created.sop_id, created.version)
-    return lib.get(created.sop_id)
+    created = lib.create(
+        title,
+        roles={"implementer": {"kind": "agent"}},
+        steps=[{"name": "do it", "role": "implementer", "gate": gate, **step_fields}],
+        **body,
+    )
+    lib.activate(created.asop_id, created.version)
+    return lib.get(created.asop_id)
 
 
 # --------------------------------------------------------------------------- #

@@ -16,7 +16,7 @@ the copy, never the original.
 
 **Idempotent.** Every insert is `ON CONFLICT DO NOTHING` keyed on the same
 uniqueness the source already enforces (`events.uid`, `leases.uid`,
-`snapshots.uid`, `work_items.id`, `sops.(sop_id, version)`, and a
+`snapshots.uid`, `work_items.id`, `asops.(asop_id, version)`, and a
 content-addressed key for `calls`/`conflict_actions`, which the SQLite
 schema leaves otherwise unconstrained). Running this twice against the same
 source and target changes nothing the second time — printed counts show
@@ -55,8 +55,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agentco import db  # noqa: E402
 from agentco.pgadapter import is_postgres_target  # noqa: E402
-from agentco.sop import SOP, SopLibrary  # noqa: E402
-from agentco.sqlstore import SOP_COLUMNS, WORK_COLUMNS, _item_to_row, _sop_to_row  # noqa: E402
+from agentco.sop import ASOP, SopLibrary  # noqa: E402
+from agentco.sqlstore import ASOP_COLUMNS, WORK_COLUMNS, _asop_to_row, _item_to_row  # noqa: E402
 from agentco.work import Queue, WorkItem  # noqa: E402
 
 # `calls`/`conflict_actions` have no natural key in the SQLite schema — no
@@ -183,7 +183,7 @@ def copy_conflict_actions(src, dst) -> dict:
 
 
 _WORK_KNOWN_FIELDS = {f.name for f in fields(WorkItem)}
-_SOP_KNOWN_FIELDS = {f.name for f in fields(SOP)}
+_ASOP_KNOWN_FIELDS = {f.name for f in fields(ASOP)}
 
 
 def copy_work_items(work_jsonl_path: Path, dst) -> dict:
@@ -215,28 +215,36 @@ def copy_work_items(work_jsonl_path: Path, dst) -> dict:
 
 
 def copy_sops(sop_jsonl_path: Path, dst) -> dict:
-    """Every modelled version in `sops.jsonl`. `unknown` is not carried
-    forward by this path — `SopLibrary._read_all` (JSONL) hands back typed
-    `SOP` objects, not the raw dict a per-version `unknown` would need to be
-    read from, and adding that second read path is not worth it for a
-    field nothing in the current schema writes yet. Quarantined lines are
+    """Every modelled version in `sops.jsonl`, into `asops`.
+
+    The destination is the v3 table, and the source may hold either
+    generation: `SopLibrary._read_all` upgrades a legacy v2 line to a one-step
+    ASOP on the way out (`agentco.sop.upgrade_legacy`), so a file written
+    before v3 lands in Postgres already migrated rather than needing a second
+    pass afterwards.
+
+    `unknown` is not carried forward by this path — the JSONL reader hands
+    back typed `ASOP` objects, not the raw dict a per-version `unknown` would
+    have to be read from, and adding that second read path is not worth it for
+    a field nothing in the current schema writes yet. Quarantined lines are
     counted and reported.
     """
     library = SopLibrary(sop_jsonl_path)
-    sops = library._read_all()
+    asops = library._read_all()
     inserted = 0
-    columns = SOP_COLUMNS + ("unknown",)
+    columns = ASOP_COLUMNS + ("unknown",)
+    quoted = ", ".join(f'"{c}"' for c in columns)
     placeholders = ", ".join("?" for _ in columns)
-    for sop in sops:
-        values = _sop_to_row(sop) + ("{}",)
+    for asop in asops:
+        values = _asop_to_row(asop) + ("{}",)
         cur = dst.execute(
-            f"INSERT INTO sops ({', '.join(columns)}) VALUES ({placeholders}) "
-            f"ON CONFLICT (sop_id, version) DO NOTHING",
+            f"INSERT INTO asops ({quoted}) VALUES ({placeholders}) "
+            f"ON CONFLICT (asop_id, version) DO NOTHING",
             values,
         )
         if cur.rowcount and cur.rowcount > 0:
             inserted += 1
-    return {"source_rows": len(sops), "quarantined": len(library.quarantined), "inserted": inserted}
+    return {"source_rows": len(asops), "quarantined": len(library.quarantined), "inserted": inserted}
 
 
 def main(argv: list[str]) -> int:

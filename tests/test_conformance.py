@@ -250,19 +250,41 @@ def test_the_photograph_sees_the_result_and_the_attestation_body(monkeypatch):
     assert any("attestation.environment" in d for d in result["diffs"]), result["diffs"]
 
 
-def test_instantiate_carries_its_gate_over_http(monkeypatch):
-    """Mutant C: HTTP `sop_instantiate` dropping `verify` survived because no
-    scenario instantiated with a gate. The procedure scenario does now."""
+def test_run_carries_its_bindings_over_http(monkeypatch):
+    """Mutant C, restated for v3.
+
+    The v2 mutant dropped `verify` from `sop_instantiate` — a mutation the
+    contract has since made unexpressible, because a filer no longer sends a
+    gate at all. What a transport CAN still silently send less of is the
+    bindings, and the consequence is worse than a missing gate: a tree filed
+    with nobody bound to its roles. So that is the mutation now.
+    """
     real = conformance._http
 
-    def http_that_drops_the_gate(world, s):
-        if s["verb"] == "sop_instantiate":
-            s = {**s, "args": {k: v for k, v in s["args"].items() if k != "verify"}}
+    def http_that_drops_the_bindings(world, s):
+        if s["verb"] == "sop_run":
+            s = {**s, "args": {k: v for k, v in s["args"].items() if k != "bindings"}}
         return real(world, s)
 
-    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_the_gate)
-    result = compare("procedure", transports=("http",))["transports"]["http"]
-    assert not result["conforms"], "a human step's instance lost its gate and nobody noticed"
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_the_bindings)
+    result = compare("run-tree", transports=("http",))["transports"]["http"]
+    assert not result["conforms"], "a run lost its role bindings and nobody noticed"
+
+
+def test_run_carries_its_declared_inputs_over_http(monkeypatch):
+    """The other half: a transport that drops the run's inputs files nothing at
+    all (`inputs_missing`), and a suite that did not notice would be blessing a
+    transport on which no procedure with declared inputs can ever be run."""
+    real = conformance._http
+
+    def http_that_drops_the_inputs(world, s):
+        if s["verb"] == "sop_run":
+            s = {**s, "args": {k: v for k, v in s["args"].items() if k != "inputs"}}
+        return real(world, s)
+
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_the_inputs)
+    result = compare("run-tree", transports=("http",))["transports"]["http"]
+    assert not result["conforms"], "a run lost its declared inputs and nobody noticed"
 
 
 def test_the_lease_length_requires_and_instance_metadata_are_conformed(monkeypatch):
@@ -289,11 +311,11 @@ def test_the_lease_length_requires_and_instance_metadata_are_conformed(monkeypat
     result = compare("work", transports=("http",))["transports"]["http"]
     assert any(".requires" in d for d in result["diffs"]), result["diffs"]
 
-    def http_that_drops_instance_metadata(world, s):
-        if s["verb"] == "sop_instantiate":
+    def http_that_drops_run_metadata(world, s):
+        if s["verb"] == "sop_run":
             s = {**s, "args": {k: v for k, v in s["args"].items() if k != "metadata"}}
         return real(world, s)
 
-    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_instance_metadata)
-    result = compare("procedure", transports=("http",))["transports"]["http"]
+    monkeypatch.setitem(conformance.DRIVERS, "http", http_that_drops_run_metadata)
+    result = compare("run-tree", transports=("http",))["transports"]["http"]
     assert any("other_metadata" in d for d in result["diffs"]), result["diffs"]

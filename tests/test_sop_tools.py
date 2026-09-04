@@ -13,6 +13,14 @@ floor (outbox), behind the revision policy on both. What these tests defend:
     human by configuring a proxy;
   * the outbox drains both verbs as drafts under the machine credential, and a
     protected step is refused at the registry with a receipt that says so.
+
+**ASOP v3.** `sop_revise`'s `changes` is no longer a bag of flat fields — a
+step's text lives inside `steps` now, so touching one field of one step means
+sending the WHOLE `steps` list back (`agentco/sop.py`'s `revise()` carries
+everything else forward unchanged). Every ASOP still needs at least one role
+and one gated step to exist at all (`validate_asop`), so the fixtures below
+build a minimal one-step body rather than the bare `purpose="p"` v2 used to
+accept.
 """
 
 from __future__ import annotations
@@ -32,6 +40,9 @@ from agentco.publish import Registry
 
 KEYS = {"dana": "dana-secret", "bot": "bot-secret", "bigmac": "bigmac-secret", "operator": "op-secret"}
 
+DETERMINISTIC_GATE = {"kind": "deterministic", "check": "pytest -q",
+                      "max_park_seconds": 900, "on_timeout": "fail"}
+
 
 def tool(server, name):
     return server._tool_manager.get_tool(name).fn
@@ -42,6 +53,23 @@ def local(tmp_path, actor):
         db_path=str(tmp_path / "r.sqlite3"), work_store=str(tmp_path / "work.jsonl"),
         sop_store=str(tmp_path / "sops.jsonl"), actor=actor,
     )
+
+
+def a_step(**over):
+    """The one step of a minimal one-step ASOP body — enough to satisfy
+    `validate_asop` (a role, a step, a gate) while keeping every test's own
+    field of interest easy to see."""
+    step = {"name": "ship", "role": "implementer", "purpose": "deploy the release",
+            "definition_of_done": "released", "gate": DETERMINISTIC_GATE}
+    step.update(over)
+    return step
+
+
+def a_body(*, step_over=None, **over):
+    step = a_step(**(step_over or {}))
+    body = {"roles": {"implementer": {"kind": "agent"}}, "steps": [step]}
+    body.update(over)
+    return body, step
 
 
 # --------------------------------------------------------------------------- #
@@ -60,54 +88,81 @@ def test_a_lesson_travels_over_mcp_as_a_draft_and_activates_deliberately(tmp_pat
     human, agent = local(tmp_path, "dana"), local(tmp_path, "bot")
     # A human authors v1 over the HTTP-less path used elsewhere in these tests.
     from agentco.sop import SopLibrary
-    sop = SopLibrary(tmp_path / "sops.jsonl").create("deploy", purpose="ship it", author="dana", author_kind=HUMAN)
-    assert tool(human, "sop_activate")(sop_id=sop.sop_id, version=1)["status"] == "active"
+    body, step = a_body(purpose="ship it")
+    sop = SopLibrary(tmp_path / "sops.jsonl").create("deploy", author="dana", author_kind=HUMAN, **body)
+    assert tool(human, "sop_activate")(sop_id=sop.asop_id, version=1)["status"] == "active"
 
-    draft = tool(agent, "sop_revise")(sop_id=sop.sop_id,
-                                       changes={"common_mistakes": ["forgot to run the migration first"]})
+    draft = tool(agent, "sop_revise")(
+        sop_id=sop.asop_id,
+        changes={"steps": [{**step, "common_mistakes": ["forgot to run the migration first"]}]},
+    )
     assert draft["version"] == 2 and draft["status"] == "draft"
     assert draft["author"] == "bot" and draft["author_kind"] == AGENT
-    assert draft["purpose"] == "ship it", "unset fields carry forward"
-    assert tool(agent, "sop_get")(sop_id=sop.sop_id)["version"] == 1, "a draft is not promoted"
+    assert draft["purpose"] == "ship it", "unset ASOP-level fields carry forward"
+    assert draft["steps"][0]["common_mistakes"] == ["forgot to run the migration first"]
+    assert tool(agent, "sop_get")(sop_id=sop.asop_id)["version"] == 1, "a draft is not promoted"
 
-    active = tool(agent, "sop_activate")(sop_id=sop.sop_id, version=2)
-    assert active["status"] == "active" and tool(agent, "sop_get")(sop_id=sop.sop_id)["version"] == 2
+    active = tool(agent, "sop_activate")(sop_id=sop.asop_id, version=2)
+    assert active["status"] == "active" and tool(agent, "sop_get")(sop_id=sop.asop_id)["version"] == 2
 
 
 def test_the_policy_reaches_the_mcp_tools(tmp_path, monkeypatch):
+    """`activate` is policed against whichever version is (or would become)
+    active, so a fresh, never-activated protected draft has to be made
+    active once — by a human — before there is a baseline for an agent's
+    attempt to diverge from it to be measured against."""
     monkeypatch.setenv("AGENTCO_HUMANS", "dana")
     from agentco.sop import SopLibrary
-    sop = SopLibrary(tmp_path / "sops.jsonl").create("pay the vendor", purpose="p", tags=["money"],
-                                                     author="dana", author_kind=HUMAN)
+    body, step = a_body(step_over={"name": "pay", "purpose": "p", "tags": ["money"]})
+    library = SopLibrary(tmp_path / "sops.jsonl")
+    sop = library.create("pay the vendor", author="dana", author_kind=HUMAN, **body)
+    library.activate(sop.asop_id, 1, author="dana", author_kind=HUMAN)
+    revised = library.revise(sop.asop_id, steps=[{**step, "purpose": "a sharper purpose"}],
+                             author="dana", author_kind=HUMAN)
+
     agent = local(tmp_path, "bot")
     with pytest.raises(Exception) as caught:
-        tool(agent, "sop_revise")(sop_id=sop.sop_id, changes={"purpose": "skip approval"})
+        tool(agent, "sop_revise")(sop_id=sop.asop_id, changes={"steps": [{**step, "purpose": "skip approval"}]})
     assert "policy rule 'protected'" in str(caught.value)
     with pytest.raises(Exception) as caught:
-        tool(agent, "sop_activate")(sop_id=sop.sop_id, version=1)
+        tool(agent, "sop_activate")(sop_id=sop.asop_id, version=revised.version)
     assert "policy rule 'protected'" in str(caught.value)
 
     human = local(tmp_path, "dana")
-    assert tool(human, "sop_revise")(sop_id=sop.sop_id, changes={"purpose": "sharper"})["author_kind"] == HUMAN
+    changed = tool(human, "sop_revise")(sop_id=sop.asop_id, changes={"steps": [{**step, "purpose": "sharper"}]})
+    assert changed["author_kind"] == HUMAN
 
 
 def test_who_is_human_is_the_operators_declaration_not_the_process_name(tmp_path, monkeypatch):
     """Same actor name, different declaration, different kind. The MCP process
     cannot promote itself; only the environment the operator set can."""
     from agentco.sop import SopLibrary
-    sop = SopLibrary(tmp_path / "sops.jsonl").create("t", purpose="p", author="dana", author_kind=HUMAN)
+    body, step = a_body()
+    sop = SopLibrary(tmp_path / "sops.jsonl").create("t", author="dana", author_kind=HUMAN, **body)
     monkeypatch.delenv("AGENTCO_HUMANS", raising=False)
-    assert tool(local(tmp_path, "dana"), "sop_revise")(sop_id=sop.sop_id, changes={"inputs": "x"})["author_kind"] == AGENT
+    agent_kind = tool(local(tmp_path, "dana"), "sop_revise")(
+        sop_id=sop.asop_id, changes={"steps": [{**step, "inputs": "x"}]})["author_kind"]
+    assert agent_kind == AGENT
     monkeypatch.setenv("AGENTCO_HUMANS", "dana")
-    assert tool(local(tmp_path, "dana"), "sop_revise")(sop_id=sop.sop_id, changes={"inputs": "y"})["author_kind"] == HUMAN
+    human_kind = tool(local(tmp_path, "dana"), "sop_revise")(
+        sop_id=sop.asop_id, changes={"steps": [{**step, "inputs": "y"}]})["author_kind"]
+    assert human_kind == HUMAN
 
 
 def test_a_malformed_change_is_a_refusal_not_a_crash(tmp_path):
+    """A malformed `changes` payload is a contract refusal, not a stack
+    trace — the same property v2 defended, now against the v3 body shape."""
     from agentco.sop import SopLibrary
-    sop = SopLibrary(tmp_path / "sops.jsonl").create("t", purpose="p")
+    body, _ = a_body()
+    sop = SopLibrary(tmp_path / "sops.jsonl").create("t", **body)
+
     with pytest.raises(Exception) as caught:
-        tool(local(tmp_path, "bot"), "sop_revise")(sop_id=sop.sop_id, changes={"steps": ["not a field"]})
-    assert "unknown SOP field" in str(caught.value)
+        tool(local(tmp_path, "bot"), "sop_revise")(sop_id=sop.asop_id, changes={"steps": ["not a field"]})
+    assert "must be a mapping" in str(caught.value)
+
+    with pytest.raises(Exception) as caught:
+        tool(local(tmp_path, "bot"), "sop_revise")(sop_id=sop.asop_id, changes={"not_a_real_field": "x"})
+    assert "unknown ASOP field" in str(caught.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -145,22 +200,24 @@ def test_in_remote_mode_the_proxy_does_not_decide_who_is_human(tmp_path, monkeyp
     """The MCP process declares dana human; the registry does not. The
     registry wins, because the signature is the identity and the registry's
     declaration is the policy — a proxy's env is neither."""
+    from agentco.sop import SopLibrary
+    body, step = a_body(step_over={"name": "pay", "purpose": "p", "tags": ["money"]})
+
     client = _registry_app(tmp_path, humans=[])
     monkeypatch.setenv("AGENTCO_HUMANS", "dana")
     proxy = create_server(registry=LoopbackRegistry("dana", client))
-    sop = tool(proxy, "sop_revise")  # exists in remote mode too
-    from agentco.sop import SopLibrary
-    created = SopLibrary(tmp_path / "sops.jsonl").create("t", purpose="p", tags=["money"])
+    sop_revise = tool(proxy, "sop_revise")  # exists in remote mode too
+    created = SopLibrary(tmp_path / "sops.jsonl").create("t", **body)
     with pytest.raises(Exception) as caught:
-        sop(sop_id=created.sop_id, changes={"purpose": "x"})
+        sop_revise(sop_id=created.asop_id, changes={"steps": [{**step, "purpose": "x"}]})
     assert "revision_policy:protected" in str(caught.value) or "policy rule 'protected'" in str(caught.value)
 
     declared = _registry_app(tmp_path / "declared", humans=["dana"])
     proxy2 = create_server(registry=LoopbackRegistry("dana", declared))
-    created2 = SopLibrary(tmp_path / "declared" / "sops.jsonl").create("t", purpose="p", tags=["money"])
-    revised = tool(proxy2, "sop_revise")(sop_id=created2.sop_id, changes={"purpose": "x"})
+    created2 = SopLibrary(tmp_path / "declared" / "sops.jsonl").create("t", **body)
+    revised = tool(proxy2, "sop_revise")(sop_id=created2.asop_id, changes={"steps": [{**step, "purpose": "x"}]})
     assert revised["author_kind"] == HUMAN and revised["author"] == "dana"
-    assert tool(proxy2, "sop_activate")(sop_id=created2.sop_id, version=2)["status"] == "active"
+    assert tool(proxy2, "sop_activate")(sop_id=created2.asop_id, version=2)["status"] == "active"
 
 
 # --------------------------------------------------------------------------- #
@@ -176,33 +233,36 @@ def test_over_the_outbox_a_lesson_becomes_a_draft_and_activation_is_a_separate_l
     client = _registry_app(tmp_path, humans=["dana"])
     from agentco.sop import SopLibrary
     library = SopLibrary(tmp_path / "sops.jsonl")
-    sop = library.create("deploy", purpose="ship it", author="dana", author_kind=HUMAN)
-    library.activate(sop.sop_id, 1, author="dana", author_kind=HUMAN)
+    body, step = a_body(purpose="ship it")
+    sop = library.create("deploy", author="dana", author_kind=HUMAN, **body)
+    library.activate(sop.asop_id, 1, author="dana", author_kind=HUMAN)
 
     box = Outbox(tmp_path / "bigmac" / ".agentco")
-    box.push("sop_revise", {"sopId": sop.sop_id, "changes": {"common_mistakes": ["ran the migration last"]}},
+    box.push("sop_revise", {"sopId": sop.asop_id,
+                            "changes": {"steps": [{**step, "common_mistakes": ["ran the migration last"]}]}},
              agent_label="aider")
     result = drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))
     assert result["published"] == 1, result
-    draft = library.get(sop.sop_id, version=2)
+    draft = library.get(sop.asop_id, version=2)
     assert draft.status.value == "draft" and draft.author == "bigmac" and draft.author_kind == AGENT
-    assert draft.common_mistakes == ["ran the migration last"], "the changes travelled, not just the verb"
+    assert draft.steps[0].common_mistakes == ["ran the migration last"], "the changes travelled, not just the verb"
     assert draft.purpose == "ship it"
-    assert library.get(sop.sop_id).version == 1, "drained as a draft; nothing promoted"
+    assert library.get(sop.asop_id).version == 1, "drained as a draft; nothing promoted"
 
-    box.push("sop_activate", {"sopId": sop.sop_id, "version": 2})
+    box.push("sop_activate", {"sopId": sop.asop_id, "version": 2})
     result = drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))
     assert result["published"] == 1, result
-    assert library.get(sop.sop_id).version == 2
+    assert library.get(sop.asop_id).version == 2
 
 
 def test_over_the_outbox_a_protected_step_is_refused_at_the_registry(tmp_path):
     client = _registry_app(tmp_path, humans=["dana"])
     from agentco.sop import SopLibrary
     library = SopLibrary(tmp_path / "sops.jsonl")
-    sop = library.create("pay", purpose="p", tags=["money"], author="dana", author_kind=HUMAN)
+    body, step = a_body(step_over={"name": "pay", "purpose": "p", "tags": ["money"]})
+    sop = library.create("pay", author="dana", author_kind=HUMAN, **body)
     box = Outbox(tmp_path / "bigmac" / ".agentco")
-    box.push("sop_revise", {"sopId": sop.sop_id, "changes": {"purpose": "skip approval"}})
+    box.push("sop_revise", {"sopId": sop.asop_id, "changes": {"steps": [{**step, "purpose": "skip approval"}]}})
     result = drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))
     assert result["published"] == 0 and result["refused"] == 1, result
-    assert library.history(sop.sop_id)[-1].version == 1
+    assert library.history(sop.asop_id)[-1].version == 1

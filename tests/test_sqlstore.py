@@ -55,22 +55,49 @@ def test_work_survives_reopening_the_database(tmp_path):
     assert found.metadata["a"] == 1
 
 
+def _close_body(**over) -> dict:
+    """A minimal one-step ASOP body.
+
+    A v3 record cannot be a bare `purpose` any more — it is a sequence, and a
+    step without a gate is advice — so every test that used to pass
+    `purpose=...` alone needs a step to hang it on. One helper, because what
+    these tests are about is the BACKEND, and a hand-copied step body per test
+    would be four chances to diverge on something none of them is asking.
+    """
+    step = {
+        "name": "reconcile",
+        "role": "closer",
+        "purpose": "shut the books",
+        "gate": {"kind": "deterministic", "check": "close --check",
+                 "max_park_seconds": 900, "on_timeout": "fail"},
+    }
+    if "common_mistakes" in over:
+        step["common_mistakes"] = over.pop("common_mistakes")
+    body = {"purpose": "shut the books", "roles": {"closer": {"kind": "agent"}}, "steps": [step]}
+    body.update(over)
+    return body
+
+
 def test_sops_survive_reopening_the_database(tmp_path):
     path = tmp_path / "agentco.sqlite3"
     first = SqlSopLibrary(path)
-    sop = first.create("weekly close", purpose="shut the books", common_mistakes=["skip the reconcile"])
-    first.revise(sop.sop_id, purpose="shut the books, properly")
-    first.activate(sop.sop_id, 2)
+    sop = first.create("weekly close", **_close_body(common_mistakes=["skip the reconcile"]))
+    first.revise(sop.asop_id, purpose="shut the books, properly")
+    first.activate(sop.asop_id, 2)
     first.close()
 
     reopened = SqlSopLibrary(path)
-    history = reopened.history(sop.sop_id)
+    history = reopened.history(sop.asop_id)
     assert [s.version for s in history] == [1, 2]
     assert history[0].status is SopStatus.SUPERSEDED or history[0].superseded_by == 2
-    active = reopened.get(sop.sop_id)
+    active = reopened.get(sop.asop_id)
     assert active is not None and active.version == 2
-    # Carry-forward survived the round trip through columns, not just memory.
-    assert active.common_mistakes == ["skip the reconcile"]
+    # Carry-forward survived the round trip through columns, not just memory —
+    # and in v3 the lesson channel lives on the STEP, inside a JSON column,
+    # which is the half a naive column-per-field schema would have dropped.
+    assert active.steps[0].common_mistakes == ["skip the reconcile"]
+    assert active.steps[0].gate["kind"] == "deterministic"
+    assert active.roles == {"closer": {"kind": "agent"}}
 
 
 def test_a_cursor_handed_out_before_a_restart_still_resumes_after_it(tmp_path):
@@ -305,12 +332,14 @@ def test_the_two_stores_can_share_one_file_with_the_registry(tmp_path):
     events.append(conn, kind="SnapshotTaken", actor="a", repo="r", payload={})
     queue = SqlQueue(path)
     library = SqlSopLibrary(path)
-    sop = library.create("procedure", purpose="do the thing")
-    library.activate(sop.sop_id, 1)
-    item = library.instantiate(sop.sop_id, queue)
-    assert item.metadata["sop_ref"] == {"sop_id": sop.sop_id, "version": 1}
+    sop = library.create("procedure", **_close_body())
+    library.activate(sop.asop_id, 1)
+    run = library.run(sop.asop_id, queue, inputs={}, bindings={"closer": "alice"})
+    parent = queue.get(run["runId"])
+    step = queue.get(run["steps"][0]["itemId"])
+    assert parent.metadata["sop_ref"] == {"asop_id": sop.asop_id, "version": 1}
+    assert step.metadata["sop_ref"] == {"asop_id": sop.asop_id, "version": 1, "step": 1}
     assert events.read(conn)["events"]
-    assert queue.get(item.id) is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -481,8 +510,8 @@ def _forge_unreadable_sop_row(library: SqlSopLibrary, sop_id: str, version: int)
     at which point the fixture stopped being unreadable and this test
     started asserting the wrong thing. 'archived' is nobody's status."""
     library._conn.execute(
-        "INSERT INTO sops (sop_id, version, title, status, created_at, "
-        "common_mistakes, unknown) VALUES (?, ?, ?, 'archived', 't', '[]', '{}')",
+        "INSERT INTO asops (asop_id, version, title, status, created_at, unknown) "
+        "VALUES (?, ?, ?, 'archived', 't', '{}')",
         (sop_id, version, "written by a newer version"),
     )
 
@@ -498,17 +527,17 @@ def test_a_newer_writers_sop_field_survives_a_revision(tmp_path):
     proves it for work items only.
     """
     library = SqlSopLibrary(tmp_path / "agentco.sqlite3")
-    sop = library.create("weekly close", purpose="shut the books")
+    sop = library.create("weekly close", **_close_body())
     library._conn.execute(
-        "UPDATE sops SET unknown = ? WHERE sop_id = ? AND version = 1",
-        (json.dumps({"future_field": 1}), sop.sop_id),
+        "UPDATE asops SET unknown = ? WHERE asop_id = ? AND version = 1",
+        (json.dumps({"future_field": 1}), sop.asop_id),
     )
 
-    library.revise(sop.sop_id, purpose="shut the books, properly")
-    library.activate(sop.sop_id, 2)
+    library.revise(sop.asop_id, purpose="shut the books, properly")
+    library.activate(sop.asop_id, 2)
 
     row = library._conn.execute(
-        "SELECT unknown FROM sops WHERE sop_id = ? AND version = 1", (sop.sop_id,)
+        "SELECT unknown FROM asops WHERE asop_id = ? AND version = 1", (sop.asop_id,)
     ).fetchone()
     assert json.loads(row["unknown"]) == {"future_field": 1}
 
@@ -527,32 +556,32 @@ def test_one_unreadable_sop_row_does_not_brick_the_library(tmp_path):
     for the database.
     """
     sql_library = SqlSopLibrary(tmp_path / "agentco.sqlite3")
-    good = sql_library.create("readable", purpose="a procedure this version knows")
-    _forge_unreadable_sop_row(sql_library, "sop-newer", 1)
+    good = sql_library.create("readable", **_close_body())
+    _forge_unreadable_sop_row(sql_library, "asop-newer", 1)
 
     # Reading still works, minus the row this version cannot model.
-    assert [s.sop_id for s in sql_library._read_all()] == [good.sop_id]
+    assert [a.asop_id for a in sql_library._read_all()] == [good.asop_id]
     assert len(sql_library.quarantined) == 1
-    assert sql_library.get(good.sop_id, 1) is not None
+    assert sql_library.get(good.asop_id, 1) is not None
     # And authoring something unrelated still works.
-    other = sql_library.create("another procedure", purpose="unrelated")
-    assert sql_library.get(other.sop_id, 1) is not None
+    other = sql_library.create("another procedure", **_close_body())
+    assert sql_library.get(other.asop_id, 1) is not None
     # The unreadable row is still there afterwards — quarantined, not deleted.
     assert sql_library._conn.execute(
-        "SELECT COUNT(*) FROM sops WHERE sop_id = 'sop-newer'"
+        "SELECT COUNT(*) FROM asops WHERE asop_id = 'asop-newer'"
     ).fetchone()[0] == 1
 
     with pytest.raises(SopError) as sql_error:
-        sql_library.revise(good.sop_id, purpose="a revision that must be refused")
+        sql_library.revise(good.asop_id, purpose="a revision that must be refused")
 
     # The JSONL backend, same scenario, for parity.
     jsonl_library = SopLibrary(tmp_path / "sops.jsonl")
-    jsonl_good = jsonl_library.create("readable", purpose="a procedure this version knows")
+    jsonl_good = jsonl_library.create("readable", **_close_body())
     with jsonl_library.path.open("a", encoding="utf-8") as handle:
         handle.write(
             json.dumps(
                 {
-                    "sop_id": "sop-newer",
+                    "asop_id": "asop-newer",
                     "version": 1,
                     "title": "written by a newer version",
                     "status": "archived",   # a status no version names; was 'retired' until v3 did
@@ -561,9 +590,9 @@ def test_one_unreadable_sop_row_does_not_brick_the_library(tmp_path):
             )
             + "\n"
         )
-    assert [s.sop_id for s in jsonl_library._read_all()] == [jsonl_good.sop_id]
+    assert [a.asop_id for a in jsonl_library._read_all()] == [jsonl_good.asop_id]
     with pytest.raises(SopError) as jsonl_error:
-        jsonl_library.revise(jsonl_good.sop_id, purpose="a revision that must be refused")
+        jsonl_library.revise(jsonl_good.asop_id, purpose="a revision that must be refused")
 
     for error in (sql_error, jsonl_error):
         assert "could not be parsed" in str(error.value)

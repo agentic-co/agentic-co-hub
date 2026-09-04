@@ -255,18 +255,33 @@ def test_a_duplicate_natural_key_returns_the_existing_item(client):
 # --------------------------------------------------------------------------- #
 
 
-def create_sop(client, actor="dana"):
-    response = post(
-        client,
-        "/sops",
-        actor,
-        {
-            "title": "Restore a stalled export",
-            "purpose": "Get a stuck export moving without losing the partial run",
-            "trigger": "An export sits in_progress past its lease",
-            "definition_of_done": "The export reports done or failed, with a reason",
-        },
-    )
+EXPORT_STEP = {
+    "name": "restart the export",
+    "role": "operator",
+    "purpose": "get a stuck export moving without losing the partial run",
+    "definition_of_done": "The export reports done or failed, with a reason",
+    "gate": {"kind": "deterministic", "check": "agentco work --status done",
+             "max_park_seconds": 900, "on_timeout": "fail"},
+}
+
+
+def create_sop(client, actor="dana", **over):
+    """One ASOP, over the wire, in the v3 shape.
+
+    The body is now one object carrying the whole sequence — steps and their
+    gates included. That is the wire half of v3's §2.2: there is no second
+    call where a filer supplies the check.
+    """
+    body = {
+        "title": "Restore a stalled export",
+        "task_type": "export-repair",
+        "purpose": "Get a stuck export moving without losing the partial run",
+        "trigger": "An export sits in_progress past its lease",
+        "roles": {"operator": {"kind": "agent"}},
+        "steps": [dict(EXPORT_STEP)],
+    }
+    body.update(over)
+    response = post(client, "/sops", actor, body)
     assert response.status_code == 200, response.text
     return response.json()["sop"]
 
@@ -276,10 +291,10 @@ def test_a_draft_is_not_served_as_active_until_it_is_activated(client):
     person who will follow it before it starts producing work for them."""
     sop = create_sop(client)
     assert sop["status"] == "draft"
-    assert get(client, f"/sops/{sop['sop_id']}", "kofi").json()["sop"] is None
+    assert get(client, f"/sops/{sop['asop_id']}", "kofi").json()["sop"] is None
 
-    post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 1})
-    served = get(client, f"/sops/{sop['sop_id']}", "kofi").json()["sop"]
+    post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 1})
+    served = get(client, f"/sops/{sop['asop_id']}", "kofi").json()["sop"]
     assert served["version"] == 1
     assert served["status"] == "active"
 
@@ -287,32 +302,39 @@ def test_a_draft_is_not_served_as_active_until_it_is_activated(client):
 def test_a_lesson_learned_reaches_a_second_reader_as_a_new_active_version(client):
     """The cross-machine case, minus the machines: dana revises, kofi reads it."""
     sop = create_sop(client)
-    post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 1})
+    post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 1})
 
     revised = post(
         client,
-        f"/sops/{sop['sop_id']}/revise",
+        f"/sops/{sop['asop_id']}/revise",
         "dana",
-        {"common_mistakes": ["Re-running the export before releasing the stale lease"]},
+        {"steps": [{**EXPORT_STEP,
+                    "common_mistakes": ["Re-running the export before releasing the stale lease"]}]},
     ).json()["sop"]
     assert revised["version"] == 2
-    post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 2})
+    post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 2})
 
-    read = get(client, f"/sops/{sop['sop_id']}", "kofi").json()["sop"]
+    read = get(client, f"/sops/{sop['asop_id']}", "kofi").json()["sop"]
     assert read["version"] == 2
-    assert read["common_mistakes"] == ["Re-running the export before releasing the stale lease"]
+    # The lesson lands on the STEP that earned it, which is what makes "did
+    # this lesson help" a per-step count rather than a per-procedure one.
+    assert read["steps"][0]["common_mistakes"] == [
+        "Re-running the export before releasing the stale lease"
+    ]
     # Unset fields carry forward — a one-line lesson must not blank the rest.
     assert read["purpose"] == sop["purpose"]
     assert read["trigger"] == sop["trigger"]
+    assert read["steps"][0]["gate"]["kind"] == "deterministic"
 
 
 def test_a_superseded_version_stays_readable_by_the_instances_pinned_to_it(client):
     sop = create_sop(client)
-    post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 1})
-    post(client, f"/sops/{sop['sop_id']}/revise", "dana", {"inputs": "the export id"})
-    post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 2})
+    post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 1})
+    post(client, f"/sops/{sop['asop_id']}/revise", "dana",
+         {"inputs": [{"name": "export_id", "description": "the export that stalled"}]})
+    post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 2})
 
-    pinned = get(client, f"/sops/{sop['sop_id']}", "kofi", "?version=1").json()["sop"]
+    pinned = get(client, f"/sops/{sop['asop_id']}", "kofi", "?version=1").json()["sop"]
     assert pinned["version"] == 1
     assert pinned["status"] == "superseded"
 
@@ -320,21 +342,21 @@ def test_a_superseded_version_stays_readable_by_the_instances_pinned_to_it(clien
 def test_the_active_list_is_what_a_second_machine_discovers(client):
     sop = create_sop(client)
     assert get(client, "/sops", "kofi").json()["sops"] == []
-    post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 1})
+    post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 1})
     listed = get(client, "/sops", "kofi").json()["sops"]
-    assert [s["sop_id"] for s in listed] == [sop["sop_id"]]
+    assert [s["asop_id"] for s in listed] == [sop["asop_id"]]
 
 
 def test_an_unknown_sop_reads_as_null_rather_than_failing(client):
     """Resolving a pin must never fail loudly, or a caller stops asking."""
-    response = get(client, "/sops/sop-deadbeef", "kofi")
+    response = get(client, "/sops/asop-deadbeef", "kofi")
     assert response.status_code == 200
     assert response.json()["sop"] is None
 
 
 def test_activating_a_version_that_does_not_exist_is_refused_with_a_remediation(client):
     sop = create_sop(client)
-    response = post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 9})
+    response = post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 9})
     assert response.status_code == 422, response.text
     assert response.json()["code"] == "sop_refused"
     assert response.json()["remediation"].strip()
@@ -342,7 +364,7 @@ def test_activating_a_version_that_does_not_exist_is_refused_with_a_remediation(
 
 def test_activate_without_a_version_is_refused_rather_than_guessing(client):
     sop = create_sop(client)
-    response = post(client, f"/sops/{sop['sop_id']}/activate", "dana", {})
+    response = post(client, f"/sops/{sop['asop_id']}/activate", "dana", {})
     assert response.status_code == 400
     assert response.json()["code"] == "version_required"
 
@@ -380,34 +402,59 @@ def test_work_requiring_a_capability_is_invisible_to_a_worker_without_it(client)
     assert pulled["item"]["requires"] == ["billing-erp"]
 
 
-def test_an_sop_instance_carries_the_pin_and_the_capability(client):
+def test_a_run_files_a_tree_whose_beads_carry_the_pin_and_the_capability(client):
     sop = create_sop(client)
-    post(client, f"/sops/{sop['sop_id']}/activate", "dana", {"version": 1})
+    post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 1})
 
-    filed = post(client, f"/sops/{sop['sop_id']}/instantiate", "dana", {
+    run = post(client, f"/sops/{sop['asop_id']}/run", "dana", {
         "title": "[User Story 91166] Expose Client COA",
-        "assignedAgent": "kofi",
+        "inputs": {},
+        "bindings": {"operator": "kofi"},
         "requires": ["billing-erp"],
         "source": "ado",
         "sourceId": "example-org/91166",
-    }).json()["item"]
-    assert filed["metadata"]["sop_ref"] == {"sop_id": sop["sop_id"], "version": 1}
-    assert filed["requires"] == ["billing-erp"]
+    }).json()["run"]
+    assert run["asopId"] == sop["asop_id"] and run["version"] == 1
+    assert [st["step"] for st in run["steps"]] == [1]
+    assert run["steps"][0]["binding"] == "kofi"
 
-    # And the worker that pulls it can read the procedure it is pinned to.
+    # The worker pulls the STEP bead — the parent is blocked behind it — and
+    # can read the exact version and step it is pinned to.
     pulled = post(client, "/work/pull", "kofi", {"capabilities": ["billing-erp"]}).json()["item"]
+    assert pulled["id"] == run["steps"][0]["itemId"]
     ref = pulled["metadata"]["sop_ref"]
-    procedure = get(client, f"/sops/{ref['sop_id']}", "kofi", f"?version={ref['version']}").json()["sop"]
-    assert procedure["definition_of_done"]
+    assert ref == {"asop_id": sop["asop_id"], "version": 1, "step": 1}
+    procedure = get(client, f"/sops/{ref['asop_id']}", "kofi", f"?version={ref['version']}").json()["sop"]
+    assert procedure["steps"][ref["step"] - 1]["definition_of_done"]
+    # And the gate came from the version, not from the filer.
+    assert pulled["verify"]["kind"] == "deterministic"
 
 
-def test_instantiating_a_draft_is_refused_across_http(client):
-    """The check that makes instantiate worth having as an endpoint."""
+def test_running_a_draft_is_refused_across_http(client):
+    """The check that makes `run` worth having as an endpoint rather than a
+    pin the caller assembles."""
     sop = create_sop(client)
-    response = post(client, f"/sops/{sop['sop_id']}/instantiate", "dana", {"title": "too early"})
+    response = post(client, f"/sops/{sop['asop_id']}/run", "dana",
+                    {"title": "too early", "inputs": {}, "bindings": {"operator": "kofi"}})
     assert response.status_code == 422
     assert "draft" in response.json()["message"].lower()
     assert response.json()["remediation"].strip()
+
+
+def test_a_filer_may_not_author_the_gate_over_http(client):
+    """The whole of v3 §2.2, on the wire: a body naming `verify` is refused
+    rather than ignored, because ignoring it would let a caller believe the
+    check it wrote is the one that will run."""
+    sop = create_sop(client)
+    post(client, f"/sops/{sop['asop_id']}/activate", "dana", {"version": 1})
+    response = post(client, f"/sops/{sop['asop_id']}/run", "dana", {
+        "inputs": {}, "bindings": {"operator": "kofi"},
+        "verify": {"kind": "deterministic", "check": "true",
+                   "max_park_seconds": 60, "on_timeout": "pass"},
+    })
+    assert response.status_code == 422
+    assert response.json()["code"] == "sop_refused"
+    assert post(client, "/work/pull", "kofi", {}).json()["state"] == "empty"
 
 
 # --------------------------------------------------------------------------- #
