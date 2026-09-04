@@ -184,6 +184,9 @@ filing, where the name is still in front of whoever typed it. An empty key
 file means UNDECLARED and checks nothing — that is what an in-process caller
 and a JSONL-only install have, and refusing every run on the absence of a
 registry would be refusing on missing configuration rather than on a fact.
+The four declaration postures (humans, verifiers, adjudicators, actors) differ
+deliberately and are stated side by side in `agentco/policy.py`'s module
+docstring, so that nobody changes one to match another.
 
 The other half of that is time, and it is `agentco pulse`'s: a step bead
 sitting ready, bound to an actor that has never pulled it, past that actor's
