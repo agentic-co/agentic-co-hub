@@ -30,7 +30,7 @@ runs the sweeps that already existed, and says in one place what it found.
 | **plane** | the registry file carries no schema version this build does not know; SQLite `quick_check` is `ok`; a write lock can be taken; age of the last event | schema / integrity / lock failures are **fatal** |
 | **keys** | if `AGENTCO_REGISTRY_KEYS` is set, keys actually loaded | set-but-empty is **fatal** (the HTTP surface is refusing everyone). Unset is not a finding — a stdio-only deployment has no key file |
 | **stores** | the work store and SOP library open and parse, with counts by status | unreadable is **fatal** — every surface would show an *empty* queue, not an error |
-| **housekeeping** | expired leases, park clocks, quarantine — previewed, or run under `--apply` | none of these is a finding on its own: that is the system working. Gates abandoned past quarantine, and a queue resolving gates on the clock with no verdict behind any (`verifier_status`'s warning), are **attention** |
+| **housekeeping** | expired leases, park clocks, quarantine, stranded runs — previewed, or run under `--apply` | none of these is a finding on its own: that is the system working. Gates abandoned past quarantine, and a queue resolving gates on the clock with no verdict behind any (`verifier_status`'s warning), are **attention** |
 | **participants** | every actor the plane has seen, with their last activity and, if declared, their expected cadence | declared and silent past cadence, or declared and never seen, is **attention**. Undeclared is reported with `expectedEverySeconds: null` and never raises |
 | **self** | the gap since the last recorded pulse, against the interval that run declared | over twice the interval is **attention** — the thing that watches for silence went silent |
 
@@ -50,6 +50,11 @@ is a test that fails if it stops being true. `--apply`:
 - runs `reap_expired_leases` (items back to `pending`, attempt advanced so the
   reaped holder's late report is fenced out),
 - runs `sweep_park_clocks` and `sweep_quarantine`,
+- closes run containers whose every step is done but which never heard about
+  it — a REPAIR, not a second implementation: it calls the same
+  `finished_containers` the report path cascades through, for the runs that
+  finished before that shipped and for the crash window between a child's
+  write and its container's,
 - appends one `PulseObserved` event, attributed to the plane's reserved actor.
 
 That event is the pulse's own heartbeat. It is written **after** the checks, so a

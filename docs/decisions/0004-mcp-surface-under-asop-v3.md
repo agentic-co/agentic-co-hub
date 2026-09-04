@@ -1,7 +1,9 @@
 # 0004 — The MCP surface under ASOP v3
 
-**Date:** 2026-09-04 · **Status:** proposed — needs a decision before anything
-changes · **Relates to:** [`0002-participation-ladder.md`](0002-participation-ladder.md)
+**Date:** 2026-09-04 · **Status:** NOT TAKEN — recommendation C noted, the
+surface stays at twelve for now (mabidoli, 2026-09-04). HTTP is what the
+runtime uses for P3; revisit when an MCP-only harness needs one of these
+verbs. · **Relates to:** [`0002-participation-ladder.md`](0002-participation-ladder.md)
 (the ceiling), [`0003-asop-v3-adoption.md`](0003-asop-v3-adoption.md)
 
 ## The problem

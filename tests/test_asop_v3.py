@@ -400,13 +400,31 @@ def _declare(queue, humans=("carol",), adjudicators=()):
     return queue
 
 
-def _finish(queue, item_id, actor="alice", result="did it"):
+def _finish(queue, item_id, actor="alice", result="did it", verifier="dave"):
+    """Take one step bead all the way to `done`, whatever gate it carries.
+
+    A deterministic gate is answered by the executor's own attestation. A
+    judged or human one is not — that is the whole difference — so the step is
+    reported without an attestation, parks, and a party other than the
+    executor answers it.
+    """
     queue.claim(item_id, actor, capabilities=["verify"])
     item = queue.get(item_id)
-    queue.report_result(item_id, item.lease_attempt, WorkStatus.DONE, result=result,
-                        attestation={"check": item.verify["check"], "exit_status": 0,
-                                     "environment": "test", "at": "2026-09-04T00:00:00+00:00"},
-                        submitted_by=actor)
+    kind = (item.verify or {}).get("kind")
+    attestation = {"check": item.verify["check"], "exit_status": 0,
+                   "environment": "test", "at": "2026-09-04T00:00:00+00:00"}
+    queue.report_result(
+        item_id, item.lease_attempt, WorkStatus.DONE, result=result,
+        attestation=attestation if kind == "deterministic" else None,
+        submitted_by=actor,
+    )
+    if queue.get(item_id).status is not WorkStatus.AWAITING_VERIFY:
+        return
+    # A parked gate is answered by whoever it names — the verifier for a human
+    # gate, any declared verifier for a judged one — never by the executor.
+    answerer = (item.verify or {}).get("verifier") if kind == "human" else verifier
+    queue.attest(item_id, attestation, submitted_by=answerer or verifier,
+                 capabilities=["verify"])
 
 
 def test_outcomes_are_counted_per_version_and_per_step(library, queue):
@@ -747,3 +765,157 @@ def test_the_attest_rider_reads_the_queues_own_declarations(library, queue, monk
                        adjudication={"verdict": "good", "evidence": "the step was redundant"})
     assert out is not None
     assert queue.get(judged).metadata["adjudication"]["by"] == "bob"
+
+
+# --------------------------------------------------------------------------- #
+# §5.5 — a run's container closes when its steps do
+# --------------------------------------------------------------------------- #
+
+
+def test_a_run_closes_itself_when_its_last_step_lands(library, queue):
+    """The run's parent is not somebody's to remember to close.
+
+    Before this, a run whose every step was `done` sat `pending` until a human
+    claimed and reported it — and `outcomes_by_version`, which reads the
+    parent's status as the RUN's outcome, counted a finished run as in-flight.
+    The per-version counting is the whole reason the grain moved, so a run
+    that finishes and does not say so is the measurement quietly not working.
+    """
+    asop = an_active_asop(library)
+    run = a_run(library, queue, asop)
+
+    for entry in run["steps"][:-1]:
+        _finish(queue, entry["itemId"], actor=entry["binding"])
+        assert queue.get(run["runId"]).status is WorkStatus.PENDING, (
+            "a run must not close while a step is still open"
+        )
+
+    _finish(queue, run["steps"][-1]["itemId"], actor=run["steps"][-1]["binding"])
+
+    parent = queue.get(run["runId"])
+    assert parent.status is WorkStatus.DONE
+    row = library.outcomes_by_version(asop.asop_id, queue)[0]
+    assert (row["runs"], row["done"], row["inFlight"]) == (1, 1, 0)
+    assert row["successRate"] == 1.0
+
+
+def test_the_runs_review_is_written_from_its_steps(library, queue):
+    """§6.2: the run-level plan-vs-actual is assembled from the per-step ones,
+    at the moment the run closes, while each step's own review still says what
+    happened in it."""
+    asop = an_active_asop(library)
+    run = a_run(library, queue, asop)
+    for entry in run["steps"]:
+        _finish(queue, entry["itemId"], actor=entry["binding"])
+
+    review = queue.get(run["runId"]).metadata["plan_vs_actual"]
+    assert review["sop_ref"] == {"asop_id": asop.asop_id, "version": 1}
+    assert [s["step"] for s in review["steps"]] == [1, 2, 3]
+    assert all(s["landed"] == "done" and s["reviewed"] for s in review["steps"])
+    assert review["run"]["inputs"] == RUN_INPUTS
+
+
+def test_a_parked_or_failed_gate_holds_the_run_open(library, queue):
+    """`awaiting_verify` and `verify_failed` release nothing downstream (§5.2),
+    and a run that closed over a parked gate would be reported finished while
+    somebody is still being asked to look at it."""
+    body = feature_dev_body(
+        inputs=[], constraints=[],
+        roles={"implementer": {"kind": "agent"}, "owner": {"kind": "human"}},
+        steps=[
+            {"name": "implement", "role": "implementer", "purpose": "write it",
+             "gate": DETERMINISTIC_GATE, "after": []},
+            {"name": "sign-off", "role": "owner", "purpose": "approve it",
+             "gate": HUMAN_GATE, "after": []},
+        ],
+    )
+    asop = library.create("release", **body)
+    library.activate(asop.asop_id, 1, author="carol", author_kind="human")
+    # `owner` is dave, not carol: a human gate may not name its own executor
+    # as verifier, which is the one party it exists to exclude.
+    run = library.run(asop.asop_id, queue, inputs={},
+                      bindings={"implementer": "alice", "owner": "dave"})
+
+    _finish(queue, run["steps"][0]["itemId"])
+    parked = run["steps"][1]["itemId"]
+    queue.claim(parked, "dave")
+    queue.report_result(parked, queue.get(parked).lease_attempt, WorkStatus.DONE,
+                        result="signed", submitted_by="dave")
+    assert queue.get(parked).status is WorkStatus.AWAITING_VERIFY
+    assert queue.get(run["runId"]).status is WorkStatus.PENDING, (
+        "a parked human gate is not an answer, and the run is not finished"
+    )
+
+    # The verifier answers, and THAT is what closes the run.
+    queue.attest(parked, {"check": HUMAN_GATE["check"], "exit_status": 0,
+                          "environment": "test", "at": "2026-09-04T00:00:00+00:00"},
+                 submitted_by="carol", capabilities=["verify"])
+    assert queue.get(parked).status is WorkStatus.DONE
+    assert queue.get(run["runId"]).status is WorkStatus.DONE
+
+
+def test_a_nested_run_closes_bottom_up(library, queue):
+    """A nested step is a container of the inner ASOP's steps, and once closed
+    it counts as done for the container above it. The close walks up."""
+    inner = an_active_asop(library)
+    outer = library.create(
+        "release",
+        task_type="release",
+        roles={"owner": {"kind": "agent"}},
+        steps=[{"name": "develop", "uses": {"asop_id": inner.asop_id, "version": 1}}],
+    )
+    library.activate(outer.asop_id, 1)
+    run = library.run(outer.asop_id, queue, inputs=RUN_INPUTS,
+                      bindings={"owner": "alice", "implementer": "alice", "validator": "bob"})
+
+    nested = run["steps"][0]
+    for entry in nested["children"]:
+        _finish(queue, entry["itemId"], actor=entry["binding"])
+
+    assert queue.get(nested["itemId"]).status is WorkStatus.DONE, "the container closed"
+    assert queue.get(run["runId"]).status is WorkStatus.DONE, "and so did the run above it"
+
+
+def test_an_ordinary_goal_is_never_closed_for_you(library, queue):
+    """Only a run container closes itself. Nobody said an ad-hoc goal's
+    children are the whole of it, and closing one because they happened to
+    finish would be the plane deciding somebody's goal was met."""
+    goal = queue.create("ship the thing")
+    child = queue.create("do the work", metadata={"parent": goal.id},
+                         assigned_agent="alice", verify=DETERMINISTIC_GATE)
+    _finish(queue, child.id)
+    assert queue.get(goal.id).status is WorkStatus.PENDING
+
+
+def test_the_pulse_sweep_repairs_a_run_stranded_before_the_cascade(library, queue):
+    """The repair path, on the state it exists for: a run whose steps are all
+    done and whose container never heard about it — either because it finished
+    before the cascade shipped, or because the process died between the
+    child's write and the container's.
+
+    Simulated by reopening the container after the fact, which is the only way
+    to reach that state now that the report path closes it.
+    """
+    asop = an_active_asop(library)
+    run = a_run(library, queue, asop)
+    for entry in run["steps"]:
+        _finish(queue, entry["itemId"], actor=entry["binding"])
+    assert queue.get(run["runId"]).status is WorkStatus.DONE
+
+    queue._mutate(run["runId"], lambda _i: {"status": WorkStatus.PENDING, "result": None})
+    assert queue.get(run["runId"]).status is WorkStatus.PENDING
+
+    assert queue.close_finished_runs(dry_run=True) == [run["runId"]], "the dry run names it"
+    assert queue.get(run["runId"]).status is WorkStatus.PENDING, "and changes nothing"
+
+    assert queue.close_finished_runs() == [run["runId"]]
+    assert queue.get(run["runId"]).status is WorkStatus.DONE
+    # Idempotent: a second sweep finds nothing, because there is nothing left.
+    assert queue.close_finished_runs() == []
+
+
+def test_the_sweep_leaves_an_unfinished_run_alone(library, queue):
+    asop = an_active_asop(library)
+    run = a_run(library, queue, asop)
+    _finish(queue, run["steps"][0]["itemId"])
+    assert queue.close_finished_runs(dry_run=True) == []
