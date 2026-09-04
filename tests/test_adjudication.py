@@ -249,14 +249,11 @@ def test_a_declared_adjudicator_who_executed_is_still_refused_as_self(queue):
 # --------------------------------------------------------------------------- #
 
 
-def test_a_verifier_tags_the_divergence_in_the_same_call_as_the_verdict(queue, monkeypatch):
-    # `attest`'s pre-verdict adjudication check reads AGENTCO_HUMANS /
-    # AGENTCO_ADJUDICATORS directly rather than the queue's own declared
-    # `.humans`/`.adjudicators` (see the report for this lane) — the env var
-    # is what the rider's up-front validation actually consults, so it has to
-    # be set here too, alongside declaring the queue for the write that lands
-    # afterwards through `adjudicate` itself.
-    monkeypatch.setenv("AGENTCO_HUMANS", "dana")
+def test_a_verifier_tags_the_divergence_in_the_same_call_as_the_verdict(queue):
+    # Declaring the QUEUE is enough. `attest`'s pre-verdict rider check reads
+    # the queue's own `.humans`/`.adjudicators`, the same sets the write path
+    # reads a moment later — it used to read the process environment instead,
+    # which meant the two halves of one call could disagree.
     _declare(queue, humans=("dana",))
     item = queue.create("judged", verify=JUDGED)
     leased = queue.claim(item.id, "kofi")
@@ -305,10 +302,18 @@ KEYS = {"kofi": "kofi-secret", "dana": "dana-secret", "operator": "op-secret",
         "bigmac": "bigmac-secret", "reviewer-box": "reviewer-secret"}
 
 
-def _client(tmp_path):
+def _client(tmp_path, humans=(), adjudicators=()):
+    """The app, with the operator's declarations injected rather than exported.
+
+    `create_app(humans=..., adjudicators=...)` is how an embedder declares who
+    may adjudicate, and it now reaches every path — including `attest`'s
+    pre-verdict rider check, which used to read the process environment and so
+    disagreed with the write path a moment later.
+    """
     return TestClient(create_app(
         db_path=str(tmp_path / "api.sqlite3"), keys=KEYS, operator="operator",
         work_store=str(tmp_path / "work.jsonl"), sop_store=str(tmp_path / "sops.jsonl"),
+        humans=list(humans), adjudicators=list(adjudicators),
     ))
 
 
@@ -332,9 +337,8 @@ def _executed_over_http(client, actor="kofi", **fields):
     return item
 
 
-def test_over_http_the_executor_is_refused_and_a_reviewer_is_not(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENTCO_HUMANS", "dana")
-    client = _client(tmp_path)
+def test_over_http_the_executor_is_refused_and_a_reviewer_is_not(tmp_path):
+    client = _client(tmp_path, humans=("dana",))
     item = _executed_over_http(client)
 
     own = _post(client, f"/work/{item['id']}/adjudicate", "kofi",
@@ -362,9 +366,13 @@ def test_over_http_the_body_cannot_name_the_adjudicator(tmp_path):
     assert "adjudication" not in (stored.metadata or {})
 
 
-def test_over_http_the_rider_on_attest_is_written_with_the_verdict(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENTCO_HUMANS", "dana")
-    client = _client(tmp_path)
+def test_over_http_the_rider_on_attest_is_written_with_the_verdict(tmp_path):
+    """The rider path specifically: `create_app(humans=[...])` and no env var.
+
+    This is the test that would have caught the pre-verdict check reading the
+    environment — it refused the rider while the plain `/adjudicate` endpoint
+    on the same app accepted the identical adjudication."""
+    client = _client(tmp_path, humans=("dana",))
     item = _executed_over_http(client, verify=JUDGED)
     answered = _post(client, f"/work/{item['id']}/attest", "dana", {
         "attestation": attestation(), "capabilities": ["verify"],
@@ -389,6 +397,10 @@ def test_over_http_an_unknown_item_is_a_404_with_a_code(tmp_path):
 
 
 def test_over_mcp_the_rider_is_on_attest_and_the_process_identity_is_the_adjudicator(tmp_path, monkeypatch):
+    # The env var is not a workaround here: over stdio there is no request to
+    # sign and no embedder to inject declarations, so the operator's
+    # environment IS how the MCP surface is configured — `create_server` reads
+    # it the way `create_app` reads its arguments.
     monkeypatch.setenv("AGENTCO_HUMANS", "dana")
     executor = create_server(
         db_path=str(tmp_path / "r.sqlite3"), work_store=str(tmp_path / "work.jsonl"),
@@ -451,13 +463,10 @@ def test_adjudicate_is_in_the_push_set():
     assert "adjudicate" in PUSH_VERBS
 
 
-def test_over_the_outbox_the_executing_machine_is_refused_and_another_is_not(tmp_path, monkeypatch):
-    # This goes through the plain `/adjudicate` endpoint (not the attest
-    # rider), which reads the queue's own declared `.adjudicators` — but
-    # setting the env var too keeps this test's setup identical to the rider
-    # test just below it, and is what an operator would actually do.
-    monkeypatch.setenv("AGENTCO_ADJUDICATORS", "reviewer-box")
-    client = _client(tmp_path)
+def test_over_the_outbox_the_executing_machine_is_refused_and_another_is_not(tmp_path):
+    # The drainer relays into the HTTP app, so the app's own declaration is
+    # what decides — no environment involved on either side.
+    client = _client(tmp_path, adjudicators=("reviewer-box",))
     item = _executed_over_http(client, actor="bigmac")
 
     same_machine = Outbox(tmp_path / "bigmac" / ".agentco")
@@ -480,9 +489,8 @@ def test_over_the_outbox_the_executing_machine_is_refused_and_another_is_not(tmp
     assert [(r["verb"], r["via"], r["agent_label"]) for r in rows][-1] == ("adjudicate", "outbox", "aider")
 
 
-def test_over_the_outbox_an_attest_line_carries_the_rider(tmp_path, monkeypatch):
-    monkeypatch.setenv("AGENTCO_ADJUDICATORS", "reviewer-box")
-    client = _client(tmp_path)
+def test_over_the_outbox_an_attest_line_carries_the_rider(tmp_path):
+    client = _client(tmp_path, adjudicators=("reviewer-box",))
     item = _executed_over_http(client, actor="bigmac", verify=JUDGED)
     box = Outbox(tmp_path / "reviewer" / ".agentco")
     box.push("attest", {
