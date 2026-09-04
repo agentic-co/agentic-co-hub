@@ -411,3 +411,96 @@ def test_the_unauthenticated_placeholder_is_not_a_participant(conn, queue):
     metrics.record_call(conn, verb="events", actor="kofi", status="accepted", latency_ms=1.0)
     report = run(conn, queue)
     assert [p["actor"] for p in report["participants"]] == ["kofi"]
+
+
+# --------------------------------------------------------------------------- #
+# stranded steps — a run bound to a label nobody pulls as (P3.4)
+# --------------------------------------------------------------------------- #
+
+
+DETERMINISTIC = {"kind": "deterministic", "check": "pytest -q",
+                 "max_park_seconds": 900, "on_timeout": "fail"}
+
+
+def a_step_bead(queue, *, actor: str, step: int = 1, **over):
+    """A bead shaped like one a run files: pinned to a step, bound to an actor.
+
+    Filed through the plane's own writer, because `sop_ref` is reserved — a
+    caller cannot set it, which is exactly the property that makes the pin
+    trustworthy to read back here.
+    """
+    return queue.create(
+        f"step {step}", assigned_agent=actor, verify=DETERMINISTIC, by_plane=True,
+        metadata={"sop_ref": {"asop_id": "asop-1", "version": 1, "step": step}},
+        **over,
+    )
+
+
+def test_a_step_bound_to_a_label_nobody_pulls_as_is_a_finding(conn, queue):
+    """Filing refuses a binding the registry has no key for. This is the other
+    half, and the half a key file cannot answer: an actor CAN authenticate and
+    still never run. Only time says so."""
+    a_step_bead(queue, actor="ghost-worker")
+    report = run(conn, queue, now=at(pulse.DEFAULT_STRANDED_SECONDS + 60))
+
+    stranded = [f for f in report["findings"] if f["check"] == "housekeeping.stranded-steps"]
+    assert len(stranded) == 1, report["findings"]
+    assert stranded[0]["class"] == "attention", "a slow worker is not an outage"
+    assert "ghost-worker" in stranded[0]["detail"]
+    assert "never pulled" in stranded[0]["detail"]
+    assert report["strandedSteps"][0]["actor"] == "ghost-worker"
+
+
+def test_a_step_within_its_actors_cadence_is_reported_and_not_a_finding(conn, queue):
+    """Reported either way — `strandedSteps` is the row, the finding is the
+    verdict — so a reader can see what is waiting before it is late."""
+    a_step_bead(queue, actor="slow-worker")
+    report = run(conn, queue, now=at(3600), cadences={"slow-worker": 86400})
+
+    assert [r["actor"] for r in report["strandedSteps"]] == ["slow-worker"]
+    assert report["strandedSteps"][0]["expectedEverySeconds"] == 86400
+    assert not [f for f in report["findings"] if f["check"] == "housekeeping.stranded-steps"]
+
+
+def test_a_step_that_was_pulled_is_not_stranded(conn, queue):
+    """This is about the ones NOBODY has pulled. A bead somebody claimed and
+    released is a lease question, and the lease sweep already owns it."""
+    item = a_step_bead(queue, actor="alice")
+    queue.claim(item.id, "alice")
+    report = run(conn, queue, now=at(pulse.DEFAULT_STRANDED_SECONDS + 60))
+    assert report["strandedSteps"] == []
+
+
+def test_a_step_still_waiting_on_a_blocker_is_not_stranded(conn, queue):
+    """Waiting on the step before it is not being stranded, and the clock does
+    not start until the last blocker closes — otherwise every step of a long
+    run would report as stranded on the strength of its filing time."""
+    first = a_step_bead(queue, actor="alice", step=1)
+    second = a_step_bead(queue, actor="bob", step=2, blocked_by=[first.id])
+    late = at(pulse.DEFAULT_STRANDED_SECONDS + 60)
+
+    assert [r["itemId"] for r in run(conn, queue, now=late)["strandedSteps"]] == [first.id]
+
+    leased = queue.claim(first.id, "alice")
+    queue.report_result(first.id, leased.lease_attempt, WorkStatus.DONE,
+                        attestation={"check": DETERMINISTIC["check"], "exit_status": 0,
+                                     "environment": "test", "at": NOW.isoformat()},
+                        submitted_by="alice")
+    # Ready only NOW: it appears as a ROW immediately (that is what the rows
+    # are for — seeing what is waiting before it is late) and is not yet a
+    # finding.
+    fresh = run(conn, queue, now=at(1))
+    assert [r["itemId"] for r in fresh["strandedSteps"]] == [second.id]
+    assert not [f for f in fresh["findings"] if f["check"] == "housekeeping.stranded-steps"]
+    # ...and it becomes late measured from when its blocker closed, not from
+    # when it was filed.
+    later = run(conn, queue, now=at(pulse.DEFAULT_STRANDED_SECONDS + 120))
+    late = [f for f in later["findings"] if f["check"] == "housekeeping.stranded-steps"]
+    assert len(late) == 1 and second.id in late[0]["detail"]
+
+
+def test_an_ordinary_unpinned_item_is_never_stranded(conn, queue):
+    """Only a STEP bead. An ordinary assigned item waiting a long time is a
+    backlog, and the plane does not have an opinion about somebody's backlog."""
+    queue.create("do the thing", assigned_agent="ghost-worker")
+    assert run(conn, queue, now=at(pulse.DEFAULT_STRANDED_SECONDS + 60))["strandedSteps"] == []

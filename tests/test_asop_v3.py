@@ -919,3 +919,69 @@ def test_the_sweep_leaves_an_unfinished_run_alone(library, queue):
     run = a_run(library, queue, asop)
     _finish(queue, run["steps"][0]["itemId"])
     assert queue.close_finished_runs(dry_run=True) == []
+
+
+# --------------------------------------------------------------------------- #
+# P3.4 — a binding names an actor that will actually pull
+# --------------------------------------------------------------------------- #
+
+
+def test_a_binding_the_registry_cannot_authenticate_is_refused(library, queue):
+    """A run's bindings are actor LABELS, and the runtime pulls as its own
+    configured actor. Bind a label the registry has no key for — a typo, a
+    renamed worker, a decommissioned machine — and the step is filed, ready,
+    correct in every other respect, and claimable by nobody: it can never
+    authenticate, so it can never pull. Refused at filing, where the name is
+    still in front of whoever typed it."""
+    library.actors = frozenset({"alice", "bob"})
+    asop = an_active_asop(library)
+
+    with pytest.raises(Refusal) as exc:
+        a_run(library, queue, asop, bindings={"implementer": "alice", "validator": "carol"})
+    assert exc.value.code == "role_unbound"
+    assert "validator" in str(exc.value) and "carol" in str(exc.value)
+    assert queue.list() == [], "a refused run files nothing, like every other run refusal"
+
+    # And the honest binding still files.
+    assert a_run(library, queue, asop)["runId"]
+
+
+def test_an_undeclared_registry_checks_no_bindings(library, queue):
+    """Empty means UNDECLARED, and undeclared means no check — the same
+    posture as verifiers and the opposite of adjudicators. An in-process
+    caller, a JSONL-only install and every library test have no key file, and
+    refusing every run on the absence of a registry would be refusing on
+    missing configuration rather than on a fact."""
+    library.actors = frozenset()
+    asop = an_active_asop(library)
+    assert a_run(library, queue, asop, bindings={"implementer": "nobody", "validator": "nobody2"})
+
+
+def test_the_check_reaches_a_nested_asops_roles_too(library, queue):
+    """The inner procedure's roles are bound from the same map, so an actor
+    the registry does not know is just as unpullable one level down."""
+    inner = an_active_asop(library)
+    outer = library.create(
+        "release",
+        roles={"owner": {"kind": "agent"}},
+        steps=[{"name": "develop", "uses": {"asop_id": inner.asop_id, "version": 1}}],
+    )
+    library.activate(outer.asop_id, 1)
+    library.actors = frozenset({"alice", "bob"})
+
+    with pytest.raises(Refusal) as exc:
+        library.run(outer.asop_id, queue, inputs=RUN_INPUTS,
+                    bindings={"owner": "alice", "implementer": "alice", "validator": "ghost"})
+    assert exc.value.code == "role_unbound"
+    assert "ghost" in str(exc.value)
+    assert queue.list() == []
+
+
+def test_every_backend_carries_the_actor_declaration(library):
+    """`SqlSopLibrary` opens a database instead of a file and does not call
+    the base `__init__`, so a declaration added there and forgotten here is
+    absent on one backend only — an AttributeError from inside the code meant
+    to enforce it. That has happened twice; `declare()` is why it should not
+    happen again, and this is what says so."""
+    assert isinstance(library.actors, frozenset)
+    assert isinstance(library.protected_tags, frozenset)

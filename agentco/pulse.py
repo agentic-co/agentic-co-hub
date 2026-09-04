@@ -63,7 +63,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 from agentco import events, migrations, verifiers
-from agentco.work import WorkStatus, executors_of
+from agentco.work import WorkStatus, executors_of, pin_of
 
 EVENT_KIND = "PulseObserved"
 
@@ -82,6 +82,13 @@ EXIT_BY_CLASS = {name: code for code, name in enumerate(CLASSES)}
 #: many declared intervals. Two, not one: a scheduler that runs slightly long
 #: is not an outage, and an audit that pages on jitter is an audit people mute.
 OVERDUE_FACTOR = 2
+
+#: How long a step bead may sit ready, bound to an actor that never pulls it,
+#: before the pulse says so — used only for an actor with no declared cadence.
+#: A day, because the failure this catches is a run bound to a label nobody
+#: runs as, and nobody notices that in an hour; a shorter default would page
+#: on every overnight queue. An actor WITH a cadence is judged against its own.
+DEFAULT_STRANDED_SECONDS = 86400
 
 _DURATION = re.compile(r"^\s*(\d+)\s*([smhd]?)\s*$", re.IGNORECASE)
 _UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -475,6 +482,88 @@ def check_participants(
     return rows, findings
 
 
+def check_stranded_steps(
+    queue, *, now: datetime, cadences: dict[str, int]
+) -> tuple[list[dict], list[dict]]:
+    """Step beads sitting ready, bound to an actor that has never pulled them.
+
+    A run's bindings name actor labels, and the runtime pulls as its own
+    configured actor. Get the label wrong — a typo, a renamed worker, a
+    binding written for a machine that was decommissioned — and the step is
+    filed, ready, correct in every other respect, and claimed by nobody. It
+    is `pending` forever, which looks exactly like a queue with nothing in it.
+
+    Filing already refuses a binding the registry has no key for; this is the
+    other half, and it is the half a key file cannot answer: an actor CAN
+    authenticate and still never run. Only the passage of time says so.
+
+    `attention`, never fatal — a step waiting on a worker that is starting up,
+    or on a person who has not read their queue yet, is not an outage. What
+    makes it a finding is that nothing else in the plane will ever mention it.
+
+    "Ready since" is derived, because the queue records no such moment: it is
+    the later of the bead's own creation and the last of its blockers closing.
+    A bead with an unmet blocker is not ready and is not counted.
+    """
+    items = queue.list()
+    by_id = {i.id: i for i in items}
+    rows: list[dict] = []
+    findings: list[dict] = []
+
+    for item in items:
+        actor = item.assigned_agent
+        ref = pin_of(item)
+        if not actor or "step" not in ref or item.status is not WorkStatus.PENDING:
+            continue
+        blockers = [by_id.get(b) for b in (item.blocked_by or [])]
+        if any(b is None or b.status is not WorkStatus.DONE for b in blockers):
+            continue  # not ready yet; waiting on a step is not being stranded
+        if item.leased_by or (item.metadata or {}).get("claims"):
+            continue  # somebody has pulled it; this is about the ones nobody has
+        ready_since = max(
+            [_parse_at(item.created_at)]
+            + [_parse_at(b.updated_at) for b in blockers if b is not None]
+        )
+        if ready_since is None:
+            continue
+        waited = int((now - ready_since).total_seconds())
+        expected = cadences.get(actor, DEFAULT_STRANDED_SECONDS)
+        rows.append({
+            "itemId": item.id,
+            "title": item.title,
+            "actor": actor,
+            "asopId": ref.get("asop_id"),
+            "step": ref.get("step"),
+            "readySince": _iso(ready_since),
+            "waitingSeconds": waited,
+            "expectedEverySeconds": cadences.get(actor),
+        })
+        if waited <= expected:
+            continue
+        declared = (f"declared every {human_duration(expected)}" if actor in cadences
+                    else f"no declared cadence, so the {human_duration(expected)} default applies")
+        findings.append(_finding(
+            "housekeeping.stranded-steps", "attention",
+            f"stranded step: {item.id} bound to {actor!r}, ready since "
+            f"{_iso(ready_since)} ({human_duration(waited)}), never pulled — {declared}",
+            f"Check that something actually pulls as {actor!r}: the binding is a LABEL, "
+            f"and a run bound to a label nobody runs as is filed, ready, and claimed by "
+            f"nobody. Re-file the run with a binding that matches the worker's configured "
+            f"actor, or start the worker.",
+        ))
+    return rows, findings
+
+
+def _parse_at(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def last_observed(conn: sqlite3.Connection) -> Optional[dict]:
     """The most recent recorded pulse, or None. Read by the session hook."""
     row = conn.execute(
@@ -572,6 +661,8 @@ def run(
         findings.append(cadence_finding)
     participants, f = check_participants(conn, queue, now=at, cadences=cadences)
     findings += f
+    stranded, f = check_stranded_steps(queue, now=at, cadences=cadences)
+    findings += f
     own, f = self_audit(conn, now=at, every=every)
     findings += f
 
@@ -587,6 +678,7 @@ def run(
         "stores": stores,
         "housekeeping": house,
         "participants": participants,
+        "strandedSteps": stranded,
         "self": own,
     }
 
@@ -607,6 +699,10 @@ def run(
                 "findings": by_class,
                 "every": every,
                 "silentParticipants": sum(1 for p in participants if p["state"] == "silent"),
+                "strandedSteps": sum(
+                    1 for r in stranded
+                    if r["waitingSeconds"] > (r["expectedEverySeconds"] or DEFAULT_STRANDED_SECONDS)
+                ),
                 "housekeeping": {
                     "expiredLeases": len(house["expiredLeases"]),
                     "routed": house["routing"]["created"],

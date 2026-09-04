@@ -176,6 +176,23 @@ refuse (`constraint_unsatisfiable`), and so does a judged step bound to the
 same actor as the step it judges — the one constraint the contract requires
 whether or not the author wrote it down.
 
+So does a binding naming an actor the registry has no key for. A binding is a
+LABEL and the runtime pulls as its own configured actor; get the label wrong
+and the step is filed, ready, correct in every other respect, and claimable by
+nobody, because an actor that cannot authenticate can never pull. Refused at
+filing, where the name is still in front of whoever typed it. An empty key
+file means UNDECLARED and checks nothing — that is what an in-process caller
+and a JSONL-only install have, and refusing every run on the absence of a
+registry would be refusing on missing configuration rather than on a fact.
+
+The other half of that is time, and it is `agentco pulse`'s: a step bead
+sitting ready, bound to an actor that has never pulled it, past that actor's
+declared cadence (or a day, undeclared), is an `attention` finding naming the
+actor and how long it has waited. A key file cannot answer this one — an actor
+can authenticate and still never run — and nothing else in the plane would
+ever mention it, because a run nobody pulls looks exactly like a queue with
+nothing in it.
+
 **A template is not an instance.** An ASOP never enters the queue — if it did
 it would be claimable, and a template that can be completed is a bug.
 
