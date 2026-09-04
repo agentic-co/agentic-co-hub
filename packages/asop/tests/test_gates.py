@@ -292,3 +292,21 @@ def test_a_gate_that_is_not_a_dict_is_refused():
     with pytest.raises(Refusal) as caught:
         gates.validate_gate("deterministic")
     assert caught.value.code == gates.GATE_INVALID
+
+
+def test_a_normalised_gate_validates_as_itself():
+    """A store re-validates on every write. If the contract refused its own
+    output, every gated bead would be rejected the first time anything else
+    on it changed — found adopting the schema in the Harness, 2026-09-04."""
+    from asop.gates import validate_gate, SCHEMA_VERSION
+    once = validate_gate({"class": "deterministic", "check": "pytest -q", "timeout_s": 5})
+    assert once["schema_version"] == SCHEMA_VERSION
+    assert validate_gate(once) == once
+
+
+def test_a_foreign_schema_version_is_refused():
+    from asop.gates import validate_gate
+    from asop.errors import Refusal
+    import pytest
+    with pytest.raises(Refusal, match="schema_version=99"):
+        validate_gate({"kind": "deterministic", "check": "x", "schema_version": 99})

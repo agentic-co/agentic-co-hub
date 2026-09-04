@@ -137,7 +137,22 @@ def validate_gate(
             f"Send a gate object: {known}.",
         )
 
-    unknown = sorted(set(payload) - set(GATE_FIELDS))
+    # A gate this function already normalised carries `schema_version`, and
+    # a store re-validates on every write. Its own output is not an unknown
+    # field; a DIFFERENT schema version is a different contract and refused.
+    declared = payload.get("schema_version")
+    if declared is not None and declared != SCHEMA_VERSION:
+        _refuse(
+            GATE_INVALID,
+            f"gate declares schema_version={declared!r}; this build speaks {SCHEMA_VERSION}",
+            "Regenerate the gate with the current contract, or upgrade the reader.",
+        )
+    # `None` is absent. The normalised output carries every known field,
+    # `None` where the author wrote nothing, and a store re-validates on
+    # every write — so presence must mean "has a value", or the contract
+    # refuses its own output the first time anything else on the bead moves.
+    payload = {k: v for k, v in payload.items() if v is not None}
+    unknown = sorted(set(payload) - set(GATE_FIELDS) - {"schema_version"})
     if unknown:
         _refuse(
             GATE_INVALID,
