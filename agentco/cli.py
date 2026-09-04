@@ -271,8 +271,8 @@ def cmd_ado_pull(args) -> int:
     for row in dropped:
         print(f"  {'dropped':<10} {'':<22} {row['title']}  — {row['reason']}")
 
+    assignee = args.assign or (routes.assign if routes else None)
     if not args.write:
-        assignee = args.assign or (routes.assign if routes else None)
         print(
             f"\n{len(plan)} item(s) would be filed"
             + (f", assigned to {assignee}" if assignee else "")
@@ -301,10 +301,15 @@ def cmd_ado_pull(args) -> int:
                 **({"assignedAgent": p["assignedAgent"]} if p["assignedAgent"] else {}),
             )
             if row["sop_id"]:
-                item = registry.sop_instantiate(row["sop_id"], **common)["item"]
-            else:
-                title = common.pop("title")
-                item = registry.work_create(title, **common)["item"]
+                run = registry.sop_run(
+                    row["sop_id"],
+                    inputs=p.get("inputs") or {},
+                    bindings=_bindings_for(routes, p["assignedAgent"] or assignee),
+                    **{k: v for k, v in common.items() if k != "assignedAgent"},
+                )["run"]
+                return run["runId"], _run_assignees(run), row["sop_key"] or "-"
+            title = common.pop("title")
+            item = registry.work_create(title, **common)["item"]
             return item["id"], item.get("assigned_agent") or "-", row["sop_key"] or "-"
     else:
         queue = open_queue(args.work_store)
@@ -317,16 +322,59 @@ def cmd_ado_pull(args) -> int:
                 assigned_agent=p["assignedAgent"], requires=requires,
             )
             if row["sop_id"]:
-                item = library.instantiate(row["sop_id"], queue, title=p["title"], **common)
-            else:
-                item = queue.create(p["title"], **common)
+                run = library.run(
+                    row["sop_id"], queue, title=p["title"],
+                    inputs=p.get("inputs") or {},
+                    bindings=_bindings_for(
+                        routes, p["assignedAgent"] or assignee, library, row["sop_id"]
+                    ),
+                    **{k: v for k, v in common.items() if k != "assigned_agent"},
+                )
+                return run["runId"], _run_assignees(run), row["sop_key"] or "-"
+            item = queue.create(p["title"], **common)
             return item.id, item.assigned_agent or "-", row["sop_key"] or "-"
 
     filed = [file_one(row) for row in plan]
     print(f"\nfiled {len(filed)} item(s):")
-    for item_id, assignee, sop_key in filed:
-        print(f"  {item_id}  assigned={assignee:<10} sop={sop_key}")
+    for item_id, who, sop_key in filed:
+        print(f"  {item_id}  assigned={who:<10} sop={sop_key}")
     return 0
+
+
+def _bindings_for(routes, fallback, library=None, sop_id=None) -> dict:
+    """Which actor fills each ROLE of the procedure an intake item routes to.
+
+    Since ASOP v3 a procedure names roles and the plane never invents a
+    binding, so an intake pass filing runs has to say who its implementer and
+    its validator are. The routes file's `bindings` map is the answer; where it
+    is silent, every role the ASOP declares falls back to the assignee.
+
+    That fallback is right for a single-role procedure and WRONG for one with
+    a separation of duties — and it is wrong loudly: `run` refuses the whole
+    thing with `constraint_unsatisfiable` naming the roles, rather than
+    quietly binding the same agent to implementer and validator, which is the
+    one outcome the constraint exists to prevent.
+    """
+    declared = dict(getattr(routes, "bindings", None) or {})
+    if library is not None and sop_id:
+        asop = library.get(sop_id)
+        for role in (asop.roles if asop else {}):
+            declared.setdefault(role, fallback)
+    return {role: actor for role, actor in declared.items() if actor}
+
+
+def _run_assignees(run: dict) -> str:
+    """Every distinct binding the filed run used, for the one-line report.
+
+    A run has one bead per step and they are not all the same actor's, so
+    there is no single "assigned=" to print any more.
+    """
+    seen: list[str] = []
+    for step in run.get("steps") or []:
+        binding = step.get("binding")
+        if binding and binding not in seen:
+            seen.append(binding)
+    return ",".join(seen) or "-"
 
 
 def _ado_connector(args) -> "ado.Connector":
@@ -527,7 +575,7 @@ def cmd_lessons(args) -> int:
 
     queue = Queue(resolve_work_store(args.work_store))
     library = SopLibrary(resolve_sop_store(args.sop_store))
-    targets = [args.sop] if args.sop else sorted({s.sop_id for s in library.list_active()})
+    targets = [args.sop] if args.sop else sorted({a.asop_id for a in library.list_active()})
     actor = os.environ.get("AGENTCO_ACTOR") or "agentco-lessons"
     report: dict = {"sops": []}
     status = 0
@@ -556,14 +604,14 @@ def cmd_lessons(args) -> int:
         return status
     for entry in report["sops"]:
         view = entry["proposals"]
-        print(f"{view['sopId']}: active v{view['activeVersion']}, latest v{view['latestVersion']} "
+        print(f"{view['asopId']}: active v{view['activeVersion']}, latest v{view['latestVersion']} "
               f"({view['latestStatus']}); {view['pending']} adjudication(s) pending")
         for e in view["revisions"]:
             mark = f"→ v{e['proposedIn']}" if e["proposedIn"] else "pending"
-            print(f"  good  {e['itemId']} v{e['pinnedVersion']} [{mark}] {e['evidence']}")
+            print(f"  good  {e['itemId']} v{e['pinnedVersion']} step {e['step']} [{mark}] {e['evidence']}")
         for e in view["rootCause"]:
             mark = f"→ v{e['proposedIn']}" if e["proposedIn"] else "pending"
-            print(f"  bad   {e['itemId']} v{e['pinnedVersion']} [{mark}] {e['evidence']}")
+            print(f"  bad   {e['itemId']} v{e['pinnedVersion']} step {e['step']} [{mark}] {e['evidence']}")
         for line in view["openProposals"]:
             print(f"  open proposal: {line}")
         if "drafted" in entry and entry["drafted"]:
@@ -634,19 +682,22 @@ LEVELS: dict[str, dict] = {
         "means": "publisher — the outbox push set means what the core means",
         "transports": ("outbox",),
         "scenarios": ["scope", "work", "judged-gate", "deterministic-gate", "adjudication", "procedure",
-                      "verifier-binding", "lessons"],
+                      "verifier-binding", "lessons", "run-tree", "run-refusals", "nesting",
+                      "promotion"],
     },
     "L2": {
         "means": "worker — the MCP roster and the HTTP surface are the core, within the published budget",
         "transports": ("mcp", "mcp-remote", "http"),
         "scenarios": ["scope", "work", "judged-gate", "deterministic-gate", "adjudication", "procedure",
-                      "decomposition", "verifier-binding", "lessons"],
+                      "decomposition", "verifier-binding", "lessons", "run-tree", "run-refusals",
+                      "nesting", "promotion"],
         "budget": True,
     },
     "L3": {
         "means": "verifier — gates park, route, and close identically on every transport",
         "transports": ("http", "mcp", "mcp-remote", "outbox"),
-        "scenarios": ["judged-gate", "deterministic-gate", "adjudication", "verifier-binding"],
+        "scenarios": ["judged-gate", "deterministic-gate", "adjudication", "verifier-binding",
+                      "run-tree", "run-refusals"],
     },
 }
 

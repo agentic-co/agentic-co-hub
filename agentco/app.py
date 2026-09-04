@@ -22,10 +22,13 @@ is one for a laptop.
     `POST /work/pull`             — claim the next ready item, fenced
     `POST /work/{id}/report`      — terminal outcome, fenced on the attempt
     `GET  /work?status=|ready=`   — the queue as it stands
-    `POST /sops`                  — author version 1, as a draft
+    `POST /sops`                  — author version 1 of an ASOP, as a draft
     `POST /sops/{id}/revise`      — the next version; this is how a lesson travels
     `POST /sops/{id}/activate`    — make one version the default for every reader
-    `GET  /sops`, `GET /sops/{id}?version=`
+    `POST /sops/{id}/retire`      — withdraw it with no successor (human-only)
+    `POST /sops/{id}/run`         — file a run: one bead per step, gates from the version
+    `GET  /sops`, `GET /sops/{id}?version=`, `GET /sops/{id}/outcomes`
+    `GET  /runs`, `GET /runs/{id}`, `POST /runs/{id}/promote`
 
 On the default backend the queue and the library are FILES under an OS lock,
 not tables. One process holds that lock, which is why the MCP server must not
@@ -64,15 +67,11 @@ from agentco.keys import NaturalKeyError
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
 from agentco.refusals import classify
 from agentco.sop import (
-    EXECUTOR_FIELD,
-    LINK_FIELD,
-    PROPOSALS_FIELD,
-    TAGS_FIELD,
-    TEXT_FIELDS,
     SopError,
     SopLibrary,
     resolve_sop_store,
 )
+from asop.sop import ASOP_TEXT_FIELDS
 from agentco.stores import open_queue, open_sop_library, resolve_registry_db
 from agentco.work import (
     DEFAULT_LEASE_TTL_S,
@@ -88,9 +87,12 @@ from agentco.work import (
 )
 
 # Derived, never hand-kept: a literal list here would silently drop any field
-# added to sop.py, and the symptom is an SOP that saves without the half the
-# author just wrote.
-SOP_BODY_KEYS = (*TEXT_FIELDS, "common_mistakes", LINK_FIELD, EXECUTOR_FIELD, TAGS_FIELD, PROPOSALS_FIELD)
+# added to the record contract, and the symptom is an ASOP that saves without
+# the half the author just wrote. `steps` carries the gates, so the wire shape
+# of a procedure is one object rather than a body plus a gate the filer supplies
+# — which is the v3 change this list is the wire half of.
+SOP_BODY_KEYS = (*ASOP_TEXT_FIELDS, "task_type", "inputs", "roles", "constraints",
+                 "steps", "proposals")
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
@@ -188,6 +190,7 @@ def create_app(
     humans: Optional[Iterable[str]] = None,
     protected_tags: Optional[Iterable[str]] = None,
     verifiers: Optional[Iterable[str]] = None,
+    adjudicators: Optional[Iterable[str]] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -195,6 +198,9 @@ def create_app(
     policy exempts them and polices everyone else. Unset, it is read from
     `AGENTCO_HUMANS`; unset there too, it is empty and every reviser is an
     agent. `protected_tags` ADDS to the policy's defaults; it cannot remove them.
+    `adjudicators` is the set of ROUTES allowed to judge a divergence
+    (ASOP v3 §6.1); unset it is `AGENTCO_ADJUDICATORS`, and empty means only
+    declared humans adjudicate.
 
     One connection for the process, shared across worker threads: SQLite in
     WAL mode with short transactions handles this, and a connection pool for a
@@ -210,6 +216,14 @@ def create_app(
     queue = open_queue(work_store)
     library = open_sop_library(sop_store)
     declared_humans = frozenset(humans) if humans is not None else policy.humans_from_env()
+    # The queue answers "who may adjudicate" and reads the same two
+    # declarations. Injected rather than left to the environment for the
+    # reason `verifiers` is: a test or an embedder that passed `humans=` and
+    # then watched every adjudication refused would be debugging the wrong
+    # layer.
+    queue.humans = declared_humans
+    if adjudicators is not None:
+        queue.adjudicators = frozenset(adjudicators)
     if verifiers is not None:
         # The `verify` capability is bound to these identities on claim and
         # verdict (agentco/policy.py `bind_capabilities`); unset, the queue read
@@ -722,49 +736,158 @@ def create_app(
 
         return await _handle(request, "sop_activate", work)
 
-    @app.post("/sops/{sop_id}/instantiate")
-    async def post_sop_instantiate(sop_id: str, request: Request) -> JSONResponse:
-        """File work that PINS this SOP version.
+    @app.post("/sops/{sop_id}/retire")
+    async def post_sop_retire(sop_id: str, request: Request) -> JSONResponse:
+        """Withdraw the active version with no successor. Human-only.
 
-        Here rather than assembled by the caller because the check that matters
-        is `instantiate`'s own: a draft is refused. Building the pin client-side
-        from a `GET /sops/{id}` would work right up until someone passed an
-        explicit version, and then it would hand somebody a half-written
-        procedure carrying the authority of a published one.
-
-        The pin is immutable for the life of the item. Later revisions do not
-        reach back — that is what makes outcomes comparable across versions.
+        The record is kept: a run pinned to a retired version has to stay
+        resolvable, or every outcome counted against it becomes unreadable.
         """
 
         def work(actor: str, payload: dict) -> dict:
+            _reject_author_in_body(payload)
+            try:
+                asop = library.retire(
+                    sop_id,
+                    author=actor,
+                    author_kind=policy.kind_of(actor, declared_humans),
+                )
+            except (SopError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+            return {"state": "accepted", "sop": json.loads(asop.to_json())}
+
+        return await _handle(request, "sop_retire", work)
+
+    @app.post("/sops/{sop_id}/run")
+    async def post_sop_run(sop_id: str, request: Request) -> JSONResponse:
+        """File a RUN of this ASOP version: a tree, one bead per step.
+
+        Here rather than assembled by the caller because everything that
+        matters is `run`'s own — a draft or retired version is refused, every
+        declared input must be supplied, every role must be bound, and each
+        step bead gets its step's gate from the version rather than from
+        whoever is filing. A client assembling this from a `GET /sops/{id}`
+        would be the filer authoring the gate again, which is the whole of
+        what v3 changed.
+
+        `bindings` is required and never defaulted: which agent fills
+        `validator` is a fact about the caller's harness, and a plane that
+        guessed would be guessing at a roster it cannot see.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            named = sorted({"verify", "gate"} & set(payload))
+            if named:
+                raise Refusal(
+                    code="sop_refused",
+                    message=f"the body names {named}; in v3 the gate belongs to the step",
+                    remediation=(
+                        "Remove it. Every step bead already carries its own step's "
+                        "gate, authored with the version — a filer who could supply "
+                        "one would be the executor's side writing the check it is "
+                        "graded by, which is the failure this contract prevents."
+                    ),
+                    http_status=422,
+                )
             version = payload.get("version")
             try:
-                item = library.instantiate(
+                run = library.run(
                     sop_id,
                     queue,
-                    title=payload.get("title"),
+                    inputs=payload.get("inputs") or {},
+                    bindings=payload.get("bindings") or {},
                     version=int(version) if version is not None else None,
+                    title=payload.get("title"),
+                    metadata=payload.get("metadata"),
                     requires=payload.get("requires") or (),
-                    blocked_by=payload.get("blockedBy") or (),
-                    assigned_agent=payload.get("assignedAgent"),
                     natural_key=payload.get("naturalKey"),
                     source=payload.get("source"),
                     source_id=payload.get("sourceId"),
                     kind=payload.get("kind"),
                     subject=payload.get("subject"),
                     period=payload.get("period"),
-                    metadata=payload.get("metadata"),
-                    # Forwarded, not assembled: a human step's instance MUST
-                    # carry a human gate, and before this line no gate at all
-                    # could reach an instance filed over HTTP — which would have
-                    # made every human step unreachable from the wire.
-                    verify=payload.get("verify"),
                 )
             except (SopError, WorkError, NaturalKeyError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
-            return {"state": "accepted", "item": json.loads(item.to_json())}
+            return {"state": "accepted", "run": run}
 
-        return await _handle(request, "sop_instantiate", work)
+        return await _handle(request, "sop_run", work)
+
+    @app.get("/sops/{sop_id}/outcomes")
+    async def get_sop_outcomes(sop_id: str, request: Request) -> JSONResponse:
+        """Per version and per step: how many runs, and how they ended."""
+
+        def work(actor: str, payload: dict) -> dict:
+            try:
+                return {"state": "accepted", "outcomes": library.outcomes_by_version(sop_id, queue)}
+            except (SopError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+
+        return await _handle(request, "sop_outcomes", work)
+
+    @app.get("/runs")
+    async def get_runs(request: Request) -> JSONResponse:
+        """Runs, newest first. `?asop=` and `?status=` narrow it."""
+
+        def work(actor: str, payload: dict) -> dict:
+            raw_status = request.query_params.get("status")
+            status = None
+            if raw_status:
+                try:
+                    status = WorkStatus(raw_status)
+                except ValueError:
+                    raise Refusal(
+                        code="invalid_request",
+                        message=f"unknown status {raw_status!r}",
+                        remediation=f"Use one of {[s.value for s in WorkStatus]}.",
+                        http_status=400,
+                    ) from None
+            return {
+                "state": "accepted",
+                "runs": library.run_list(
+                    queue, asop_id=request.query_params.get("asop"), status=status
+                ),
+            }
+
+        return await _handle(request, "run_list", work)
+
+    @app.get("/runs/{run_id}")
+    async def get_run(run_id: str, request: Request) -> JSONResponse:
+        """One run's tree, with statuses and pins."""
+
+        def work(actor: str, payload: dict) -> dict:
+            try:
+                return {"state": "accepted", "run": library.run_get(run_id, queue)}
+            except (SopError, WorkError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+
+        return await _handle(request, "run_get", work)
+
+    @app.post("/runs/{run_id}/promote")
+    async def post_run_promote(run_id: str, request: Request) -> JSONResponse:
+        """Draft an ASOP from a completed run tree. Human-only in v3.
+
+        The front door of the loop: a shape that worked becomes a standard.
+        Refused when an active ASOP already covers the run's `task_type` — the
+        path for a variant is a new version, not a second procedure counting
+        the same work somewhere else.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            _reject_author_in_body(payload)
+            try:
+                draft = library.promote(
+                    run_id, queue,
+                    task_type=payload.get("taskType"),
+                    title=payload.get("title"),
+                    author=actor,
+                    author_kind=policy.kind_of(actor, declared_humans),
+                )
+            except (SopError, WorkError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+            return {"state": "drafted", "sop": json.loads(draft.to_json())}
+
+        return await _handle(request, "promote", work)
 
     @app.get("/sops/{sop_id}/proposals")
     async def get_sop_proposals(sop_id: str, request: Request) -> JSONResponse:
@@ -803,25 +926,12 @@ def create_app(
 
         return await _handle(request, "sop_propose", work)
 
-    @app.get("/sops/{sop_id}/chain")
-    async def get_sop_chain(sop_id: str, request: Request) -> JSONResponse:
-        """The process this SOP starts, one step per entry.
-
-        Served rather than walked client-side because the interesting answers
-        are the negative ones — a link naming an SOP that does not exist, or one
-        with no active version — and a client walking `next_sop` with
-        `GET /sops/{id}` would see both as an ordinary end of chain.
-        """
-
-        def work(actor: str, payload: dict) -> dict:
-            steps = library.chain(sop_id)
-            return {
-                "state": "accepted",
-                "steps": steps,
-                "broken": [s for s in steps if s["state"] != "active"],
-            }
-
-        return await _handle(request, "sop_chain", work)
+    # `GET /sops/{id}/chain` is gone with v3. It walked `next_sop`, and v3
+    # dropped that field (ASOP.md §11.4): composition INSIDE a procedure is
+    # nesting, which `GET /sops/{id}` already returns in `steps`, and
+    # sequencing BETWEEN procedures is orchestration, which the contract puts
+    # in the harness rather than the artefact. A route that walked a link
+    # nothing writes any more would answer every call with a one-entry chain.
 
     @app.get("/sops")
     async def get_sops(request: Request) -> JSONResponse:
