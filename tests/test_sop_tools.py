@@ -42,6 +42,8 @@ KEYS = {"dana": "dana-secret", "bot": "bot-secret", "bigmac": "bigmac-secret", "
 
 DETERMINISTIC_GATE = {"kind": "deterministic", "check": "pytest -q",
                       "max_park_seconds": 900, "on_timeout": "fail"}
+HUMAN_GATE = {"kind": "human", "check": "the owner signs the payment off", "verifier": "dana",
+              "max_park_seconds": 86400, "on_timeout": "escalate", "escalate_to": "dana"}
 
 
 def tool(server, name):
@@ -62,6 +64,14 @@ def a_step(**over):
     step = {"name": "ship", "role": "implementer", "purpose": "deploy the release",
             "definition_of_done": "released", "gate": DETERMINISTIC_GATE}
     step.update(over)
+    # A step tagged `money`/`irreversible` is gated by a person, by
+    # construction (ASOP.md §6.4) — the record refuses any other gate on it,
+    # so the fixture follows what the step IS rather than making every caller
+    # remember to pass a gate alongside the tag.
+    if frozenset(t.lower() for t in step.get("tags") or ()) & {"money", "irreversible"}:
+        step.setdefault("gate", DETERMINISTIC_GATE)
+        if step["gate"].get("kind") != "human":
+            step["gate"] = HUMAN_GATE
     return step
 
 
