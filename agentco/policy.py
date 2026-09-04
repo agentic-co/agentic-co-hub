@@ -401,6 +401,45 @@ def asop_forbidden_states(history: Sequence) -> tuple[set[tuple], set[tuple]]:
     return scalars, lists
 
 
+def _refuse_first_activation(proposed, protected_tags: Iterable[str]) -> None:
+    """The absolute form of the ratchet, for a version nobody has run yet.
+
+    The differential rules answer "may an agent make THIS change". On a first
+    activation there is no change to measure — the version being activated is
+    the only one there has ever been — so the question becomes the simpler
+    one the contract already answers: may an agent put a procedure carrying a
+    protected step or a human role into service at all. It may not. A step
+    tagged `money` is changed by a human or not at all, and a human role's
+    step is one a person closes; putting either live is the same act as
+    authoring it, and §6.4 reserves it either way.
+
+    Note this refuses on the PROPOSED version's own content rather than on a
+    diff, which is the whole point: the draft an agent wrote is exactly what
+    nobody has reviewed.
+    """
+    # The protected half is handled absolutely by `check_asop_revision` itself
+    # and needs nothing here. What a first activation uniquely exposes is the
+    # RATCHET, which is differential everywhere else: there is no earlier
+    # version whose class this one could be a demotion of.
+    del protected_tags
+    ident = f"{getattr(proposed, 'asop_id', '?')} v{getattr(proposed, 'version', '?')}"
+    roles = getattr(proposed, "roles", None) or {}
+    for step in getattr(proposed, "steps", None) or ():
+        role = getattr(step, "role", None)
+        human_role = (roles.get(role) or {}).get("kind") == HUMAN
+        human_gate = (getattr(step, "gate", None) or {}).get("kind") == HUMAN
+        if human_role or human_gate:
+            raise RevisionPolicyError(
+                RULE_RATCHET,
+                f"policy rule '{RULE_RATCHET}': {ident} has never been active, and its "
+                f"step {step.name!r} is a human step "
+                f"({'human role' if human_role else 'human gate'}). An agent may not put "
+                f"it into service: the class ratchets toward human, and a first "
+                f"activation has no earlier version for that ratchet to read. A human "
+                f"activates this one.",
+            )
+
+
 def check_asop_revision(
     *,
     history: Sequence,
@@ -409,6 +448,7 @@ def check_asop_revision(
     reviser_kind: str,
     protected_tags: Iterable[str],
     action: str = "revise",
+    first_activation: bool = False,
 ) -> None:
     """`check_revision` for the v3 record. Same three rules, ranged over steps.
 
@@ -420,36 +460,29 @@ def check_asop_revision(
         every edit except the one that deletes the thing they protect.
       * a step can be ADDED carrying a protected tag, which is rule 1's
         "an agent may not add or remove a protected tag" at the new grain.
+
+    `first_activation` closes the hole a diff-shaped rule leaves open. Every
+    check below compares `baseline` with `proposed`, and on a version's FIRST
+    activation those are the same object — there is no prior active version to
+    measure against — so an agent could activate a brand-new draft carrying a
+    `money` step or a human role and no rule would fire, because nothing
+    changed. That is the unpoliced door §6.4 exists to close: agents may
+    draft, only humans activate. When the flag is set the checks are
+    ABSOLUTE rather than differential.
     """
     if reviser_kind == HUMAN:
         return
+    if first_activation:
+        # Absolute, then fall through: activating an OLDER version while none
+        # is active also lands here with a real diff to check, so the
+        # differential rules below still have work to do.
+        _refuse_first_activation(proposed, protected_tags)
     if reviser_kind != AGENT:
         raise ValueError(f"reviser_kind must be one of {KINDS}, got {reviser_kind!r}")
 
     protected = frozenset(protected_tags)
     before, after = _steps_by_key(baseline), _steps_by_key(proposed)
     ident = f"{getattr(baseline, 'asop_id', '?')} v{getattr(baseline, 'version', '?')}"
-
-    for key in sorted(before, key=str):
-        old = before[key]
-        frozen = sorted(frozenset(getattr(old, "tags", None) or ()) & protected)
-        if not frozen:
-            continue
-        new = after.get(key)
-        if new is None:
-            raise RevisionPolicyError(
-                RULE_PROTECTED,
-                f"policy rule '{RULE_PROTECTED}': step {old.name!r} of {ident} carries "
-                f"protected tag(s) {frozen}, so an agent may not remove it. A "
-                f"protected step is changed by a human or not at all.",
-            )
-        if _step_body(old) != _step_body(new):
-            raise RevisionPolicyError(
-                RULE_PROTECTED,
-                f"policy rule '{RULE_PROTECTED}': step {old.name!r} of {ident} carries "
-                f"protected tag(s) {frozen}, so an agent may not {action} it. A "
-                f"protected step is changed by a human or not at all.",
-            )
 
     for key in set(before) | set(after):
         old_tags = frozenset(getattr(before[key], "tags", None) or ()) if key in before else frozenset()
@@ -463,6 +496,28 @@ def check_asop_revision(
                 f"{getattr(after.get(key, before.get(key)), 'name', key)!r}. Only a "
                 f"human decides what is protected.",
             )
+
+    # ABSOLUTE, not differential. This module's own opening rule says a version
+    # carrying a protected tag "cannot be revised or activated by an agent at
+    # all", and an earlier draft of this function weakened it to "unless the
+    # step's body is unchanged" — which let an agent rewrite everything AROUND
+    # a `money` step and then activate the result, on the reasoning that it had
+    # not touched the step itself. It had changed the procedure the step runs
+    # in, which is the thing a person was meant to look at. A protected step is
+    # changed by a human or not at all, and so is the procedure holding one.
+    for source, where in ((before, "carries"), (after, "would carry")):
+        for key in sorted(source, key=str):
+            step = source[key]
+            frozen = sorted(frozenset(getattr(step, "tags", None) or ()) & protected)
+            if frozen:
+                raise RevisionPolicyError(
+                    RULE_PROTECTED,
+                    f"policy rule '{RULE_PROTECTED}': {ident} {where} a step "
+                    f"({step.name!r}) with protected tag(s) {frozen}, so an agent may "
+                    f"not {action} it. A protected step is changed by a human or not "
+                    f"at all — and so is the procedure it sits in, because changing "
+                    f"what runs around a `money` step changes what that step does.",
+                )
 
     for key in sorted(before, key=str):
         old = before[key]
@@ -523,23 +578,6 @@ def check_asop_revision(
                         f"policy rule '{RULE_NO_UNDO}': a human added {element!r} to step "
                         f"{old.name!r}'s {name!r} and an agent may not remove it.",
                     )
-
-
-def _step_body(step) -> tuple:
-    """Everything about a step a revision could change. Used only to decide
-    whether a protected step was touched at all — a no-op revision that
-    carries a protected step through unchanged is not a change to it."""
-    return (
-        getattr(step, "name", None),
-        getattr(step, "role", None),
-        *(getattr(step, f, None) for f in STEP_SCALAR_FIELDS),
-        tuple(getattr(step, "common_mistakes", None) or ()),
-        tuple(sorted(getattr(step, "tags", None) or ())),
-        tuple(getattr(step, "proposals", None) or ()),
-        _hashable(getattr(step, "gate", None)),
-        tuple(getattr(step, "after", None) or ()),
-        _hashable(getattr(step, "uses", None)),
-    )
 
 
 def _hashable(value):

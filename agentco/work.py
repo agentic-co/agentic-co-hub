@@ -1647,8 +1647,17 @@ class Queue:
                     ),
                     http_status=403,
                 )
+            # The queue's OWN declarations, not the environment's. This
+            # pre-check exists so a bad rider refuses the whole `attest` call
+            # before the verdict lands, and it has to answer the same question
+            # the write path answers a moment later in `self.adjudicate` —
+            # otherwise a queue declared through `create_app(humans=[...])`
+            # with nothing exported would refuse the rider here and accept the
+            # identical adjudication there, which is two answers to one
+            # question depending on how the caller reached the plane.
             adjudication_record(
-                current, adjudication.get("verdict"), adjudication.get("evidence"), submitted_by
+                current, adjudication.get("verdict"), adjudication.get("evidence"), submitted_by,
+                humans=self.humans, adjudicators=self.adjudicators,
             )
 
         def verdict(item: WorkItem) -> dict:

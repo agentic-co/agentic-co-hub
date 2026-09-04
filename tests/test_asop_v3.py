@@ -614,3 +614,139 @@ def test_a_legacy_sop_row_reads_back_as_a_one_step_asop(legacy_row):
     # one: it fails closed to a human gate, which a human can revise.
     assert asop.steps[0].gate["kind"] == "human"
     assert asop.status is SopStatus.ACTIVE
+
+
+# --------------------------------------------------------------------------- #
+# first activation — the door a differential rule leaves open (§6.4)
+# --------------------------------------------------------------------------- #
+
+
+def _pay_body(**over) -> dict:
+    body = feature_dev_body(
+        task_type="payment",
+        inputs=[],
+        roles={"payer": {"kind": "agent"}},
+        constraints=[],
+        steps=[{"name": "pay", "role": "payer", "purpose": "pay the vendor",
+                "tags": ["money"], "gate": DETERMINISTIC_GATE}],
+    )
+    body.update(over)
+    return body
+
+
+def test_an_agent_may_not_first_activate_a_protected_step(library):
+    """The rule is differential everywhere else, and on a FIRST activation
+    there is nothing to differ from: baseline and target are the same object,
+    so every diff-shaped check passes over a `money` step an agent wrote and
+    is now putting into service. Activating it IS the change."""
+    asop = library.create("pay the vendor", author="alice", author_kind="agent", **_pay_body())
+    with pytest.raises(RevisionPolicyError) as exc:
+        library.activate(asop.asop_id, 1, author="alice", author_kind="agent")
+    assert exc.value.rule == "protected"
+    assert library.get(asop.asop_id) is None, "a refused activation activated nothing"
+
+
+def test_an_agent_may_not_first_activate_a_human_step(library):
+    """Same door, the other rule. A human role's step is one a person closes;
+    putting it live without a person is the demotion the ratchet forbids, and
+    a first activation has no earlier version for the ratchet to read."""
+    body = feature_dev_body(
+        inputs=[], constraints=[],
+        roles={"implementer": {"kind": "agent"}, "owner": {"kind": "human"}},
+        steps=[
+            {"name": "implement", "role": "implementer", "purpose": "write it",
+             "gate": DETERMINISTIC_GATE},
+            {"name": "sign-off", "role": "owner", "purpose": "approve it", "gate": HUMAN_GATE},
+        ],
+    )
+    asop = library.create("release", author="alice", author_kind="agent", **body)
+    with pytest.raises(RevisionPolicyError) as exc:
+        library.activate(asop.asop_id, 1, author="alice", author_kind="agent")
+    assert exc.value.rule == "ratchet"
+    assert library.get(asop.asop_id) is None
+
+
+def test_a_human_may_first_activate_either(library):
+    """The rule is about who, never about what. A human is bound by none of it."""
+    asop = library.create("pay the vendor", author="carol", author_kind="human", **_pay_body())
+    activated = library.activate(asop.asop_id, 1, author="carol", author_kind="human")
+    assert activated.status is SopStatus.ACTIVE
+
+
+def test_an_agent_may_first_activate_an_ordinary_procedure(library):
+    """The absolute check is narrow on purpose: it refuses protected and human
+    steps, not every draft an agent wrote. Widening it to all first activations
+    would make `sop_activate` a human verb, which §6.4 does not say."""
+    asop = an_asop(library, author="alice", author_kind="agent")
+    activated = library.activate(asop.asop_id, 1, author="alice", author_kind="agent")
+    assert activated.status is SopStatus.ACTIVE
+
+
+def test_the_second_activation_of_a_protected_step_is_still_refused(library):
+    """The absolute check must not have replaced the differential one — the
+    ordinary path (an active version exists) still refuses on the diff."""
+    asop = library.create("pay the vendor", author="carol", author_kind="human", **_pay_body())
+    library.activate(asop.asop_id, 1, author="carol", author_kind="human")
+    library.revise(asop.asop_id, purpose="pay, faster", author="carol", author_kind="human")
+    with pytest.raises(RevisionPolicyError) as exc:
+        library.activate(asop.asop_id, 2, author="alice", author_kind="agent")
+    assert exc.value.rule == "protected"
+
+
+# --------------------------------------------------------------------------- #
+# the adjudicator declarations reach every backend and every path
+# --------------------------------------------------------------------------- #
+
+
+def test_every_backend_answers_adjudication_with_a_refusal_not_an_attribute_error(library, queue):
+    """`SqlQueue` does not call `Queue.__init__` — it opens a database instead
+    of a file — so a declaration added to the base and missed here surfaces as
+    an AttributeError from inside `adjudicate`, on one backend only, where a
+    refusal belonged. Parity is the assertion."""
+    assert isinstance(queue.humans, frozenset)
+    assert isinstance(queue.adjudicators, frozenset)
+
+    asop = an_active_asop(library)
+    run = a_run(library, queue, asop)
+    _finish(queue, run["steps"][0]["itemId"])
+    with pytest.raises(Refusal) as exc:
+        queue.adjudicate(run["steps"][0]["itemId"], "bad", "nothing", adjudicator="carol")
+    assert exc.value.code == "adjudication_invalid"
+
+
+def test_the_attest_rider_reads_the_queues_own_declarations(library, queue, monkeypatch):
+    """`attest`'s pre-verdict rider check has to answer the same question the
+    write path answers a moment later. Reading the environment instead meant a
+    queue declared through `create_app(humans=[...])` refused the rider here
+    and would have accepted the identical adjudication there — two answers to
+    one question, depending on how the caller reached the plane."""
+    monkeypatch.delenv("AGENTCO_HUMANS", raising=False)
+    monkeypatch.delenv("AGENTCO_ADJUDICATORS", raising=False)
+    queue.humans = frozenset()
+    queue.adjudicators = frozenset({"bob"})
+
+    # One judged step, executed by alice and verified by bob — so bob's
+    # attestation may legitimately carry a rider, and the only question left is
+    # whether the plane reads its own declaration or the environment's.
+    body = feature_dev_body(
+        inputs=[], constraints=[],
+        roles={"implementer": {"kind": "agent"}},
+        steps=[{"name": "implement", "role": "implementer", "purpose": "write it",
+                "gate": JUDGED_GATE}],
+    )
+    asop = library.create("one judged step", **body)
+    library.activate(asop.asop_id, 1)
+    run = library.run(asop.asop_id, queue, inputs={}, bindings={"implementer": "alice"})
+    judged = run["steps"][0]["itemId"]
+
+    queue.claim(judged, "alice")
+    item = queue.get(judged)
+    queue.report_result(judged, item.lease_attempt, WorkStatus.DONE, result="did it",
+                        submitted_by="alice")
+
+    attestation = {"check": item.verify["check"], "exit_status": 0,
+                   "environment": "test", "at": "2026-09-04T00:00:00+00:00"}
+    out = queue.attest(judged, attestation, submitted_by="bob", capabilities=["verify"],
+                       adjudication={"verdict": "good", "evidence": "the step was redundant"})
+    assert out is not None
+    assert queue.get(judged).metadata["adjudication"]["by"] == "bob"

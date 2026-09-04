@@ -324,10 +324,26 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 class SqlQueue(_SqlBacked, Queue):
     """The work queue on SQLite. Same protocol, different storage underneath."""
 
-    def __init__(self, path: Path | str = "agentco.sqlite3", verifiers: Optional[Sequence[str]] = None):
+    def __init__(self, path: Path | str = "agentco.sqlite3", verifiers: Optional[Sequence[str]] = None,
+                 humans: Optional[Sequence[str]] = None,
+                 adjudicators: Optional[Sequence[str]] = None):
         self._open(path)
+        # Every declaration `Queue.__init__` sets, set here too. This class
+        # does NOT call super().__init__ — it opens a database instead of a
+        # file — so a declaration added to the base and forgotten here does
+        # not fail loudly, it fails as `AttributeError: 'SqlQueue' object has
+        # no attribute 'humans'` from inside `adjudicate`, on one backend
+        # only, where a refusal was supposed to be. Which is exactly what
+        # happened to `humans`/`adjudicators` when they were added.
         self.verifiers: frozenset[str] = (
             frozenset(verifiers) if verifiers is not None else policy.verifiers_from_env()
+        )
+        self.humans: frozenset[str] = (
+            frozenset(humans) if humans is not None else policy.humans_from_env()
+        )
+        self.adjudicators: frozenset[str] = (
+            frozenset(adjudicators) if adjudicators is not None
+            else policy.adjudicators_from_env()
         )
         # Empty for the same reason it is empty on the JSONL side after a
         # read: a row this version cannot MODEL is not a quarantined line.

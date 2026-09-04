@@ -545,10 +545,8 @@ class SopLibrary:
                     f"through `revise`, which the revision policy can see."
                 )
             versions = [a for a in all_asops if a.asop_id == asop_id]
-            baseline = next(
-                (a for a in versions if a.status == SopStatus.ACTIVE),
-                max(versions, key=lambda a: a.version),
-            )
+            active = next((a for a in versions if a.status == SopStatus.ACTIVE), None)
+            baseline = active or max(versions, key=lambda a: a.version)
             policy.check_asop_revision(
                 history=versions,
                 baseline=baseline,
@@ -556,6 +554,12 @@ class SopLibrary:
                 reviser_kind=reviser_kind,
                 protected_tags=self.protected_tags,
                 action="activate",
+                # No version of this procedure has ever been active, so there
+                # is nothing to measure the change against — on the ordinary
+                # case (activating the only version) `baseline` IS `target`
+                # and every differential rule is vacuous. The policy switches
+                # to an absolute check instead; see `_refuse_first_activation`.
+                first_activation=active is None,
             )
             for asop in all_asops:
                 if asop.asop_id == asop_id and asop.status == SopStatus.ACTIVE:

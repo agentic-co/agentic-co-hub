@@ -217,14 +217,29 @@ finish under their pin, and the record is kept forever — a retired version tha
 stopped resolving would make every outcome counted against it unreadable.
 
 Revision and activation are policed when the reviser is an agent
-(`agentco/policy.py`), now per step. A step tagged `money` or `irreversible`
-is frozen against agents, and an agent may not *remove* one either — deleting
-a step is the one edit that leaves nothing behind for a rule to protect. A
-step's class ratchets toward human only, where "human" means its role's kind
-or its gate's kind is human, and removing a human step is the same demotion by
-deletion. No agent revision moves a field into a state a human moved it away
-from. Who is human is what the operator declared in `AGENTCO_HUMANS` — never
-inferred, and an undeclared registry polices everyone.
+(`agentco/policy.py`), now per step.
+
+The protected rule is **absolute**, not differential: if any step of the
+version being revised — or of the version that would result — carries `money`
+or `irreversible`, an agent may not revise or activate it at all. A
+differential reading (refuse only when that step's own body changed) let an
+agent rewrite everything *around* a `money` step and then put the result into
+service, on the reasoning that it had not touched the step. It had changed the
+procedure the step runs in, which is the thing a person was meant to look at.
+
+The ratchet is differential, because it is about a demotion and a demotion
+needs something to be demoted *from*: a step's class moves toward human only,
+where "human" means its role's kind or its gate's kind is human, and removing
+a human step is the same demotion by deletion. That leaves one hole, which a
+**first activation** closes: when no version has ever been active, the version
+being activated is also the baseline, so every differential check is vacuous
+and an agent could put a brand-new draft with a human step straight into
+service. On a first activation the ratchet is absolute too — agents may draft,
+only humans activate (§6.4).
+
+No agent revision moves a field into a state a human moved it away from. Who
+is human is what the operator declared in `AGENTCO_HUMANS` — never inferred,
+and an undeclared registry polices everyone.
 
 Two verbs are human-only outright, because there is no proposed version to
 compare and so no diff a rule could read: **`retire`**, and **`promote`**.
