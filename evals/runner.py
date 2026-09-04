@@ -36,7 +36,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from agentco.sop import SOP
+from agentco.sop import ASOP
 from evals import gate as gate_mod
 from evals.arms import ALL_ARMS, Arm, render
 from evals.ledger import Ledger, Trial
@@ -90,7 +90,7 @@ def run_trial(
     fleet: Fleet,
     run_id: str,
     root: Path,
-    sop: Optional[SOP] = None,
+    sop: Optional[ASOP] = None,
     placebo_mistakes: Optional[list] = None,
     lesson_source: Optional[dict] = None,
 ) -> Trial:
@@ -153,7 +153,14 @@ def lesson_source_for(library, queue, sop_id: str, version: int) -> dict:
     not the active one, or a run against a draft would be attributed to
     whatever happened to be live."""
     provenance = library.lesson_provenance(sop_id, queue, version)
-    return {"loop": len(provenance["loop"]), "hand": len(provenance["hand"])}
+    # Summed across steps: the arm renders one step, but the question this
+    # answers is whether the VERSION's lesson channel was fed by the loop or
+    # by a hand, and a per-step split would make the answer depend on which
+    # step the trial happened to draw.
+    return {
+        "loop": sum(len(s["loop"]) for s in provenance["steps"]),
+        "hand": sum(len(s["hand"]) for s in provenance["steps"]),
+    }
 
 
 def run(

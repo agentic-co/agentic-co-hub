@@ -35,7 +35,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
-from agentco.sop import TEXT_FIELDS, SOP
+from agentco.sop import ASOP, Step
+from asop.sop import STEP_TEXT_FIELDS
 
 
 class Arm(str, Enum):
@@ -54,7 +55,6 @@ ARMS_WITH_SOP = (Arm.PROSE, Arm.ASOP, Arm.ASOP_LESSON, Arm.PLACEBO)
 
 _LABEL = {
     "purpose": "Purpose",
-    "trigger": "Trigger",
     "entry_check": "Before you start, confirm",
     "inputs": "Inputs",
     "definition_of_done": "Definition of done",
@@ -67,12 +67,19 @@ class ArmContractError(ValueError):
     """The arm cannot be rendered as configured."""
 
 
-def _fields_block(sop: SOP, include_validation: bool) -> str:
+def _fields_block(step: Step, include_validation: bool) -> str:
+    """The STEP's prose, in reading order.
+
+    v3 moved the body onto the step and `trigger` up onto the ASOP — a
+    procedure is triggered, a step is reached — so an executor prompt renders
+    a step and never the sequence's trigger, which is about when to start the
+    whole thing rather than what to do now.
+    """
     lines = []
-    for name in TEXT_FIELDS:
+    for name in STEP_TEXT_FIELDS:
         if name == "validation" and not include_validation:
             continue
-        value = getattr(sop, name, None)
+        value = getattr(step, name, None)
         if value:
             lines.append(f"{_LABEL[name]}: {value}")
     return "\n".join(lines)
@@ -88,10 +95,16 @@ def _mistakes_block(mistakes: list) -> str:
 def render(
     arm: Arm,
     task_prompt: str,
-    sop: Optional[SOP] = None,
+    sop: Optional[ASOP] = None,
     placebo_mistakes: Optional[list] = None,
+    step: Optional[int] = None,
 ) -> str:
     """Build the executor prompt for one arm.
+
+    `sop` is an ASOP and `step` names which of its steps the executor is being
+    handed (default: the first). The arm measures what a procedure's SHAPE is
+    worth to whoever is doing the work, and what an executor is handed is one
+    step — the sequence's other steps are somebody else's prompt.
 
     The procedure text is byte-identical across `PROSE`, `ASOP`, `ASOP_LESSON`
     and `PLACEBO` except for the one thing each arm is meant to add. If the
@@ -107,18 +120,21 @@ def render(
     if arm is Arm.BARE:
         return task_prompt
 
+    unit = _step_of(sop, step)
+
     if arm is Arm.PROSE:
         # The competitor's shape: the procedure as advice, with no stated gate
         # and no version. Deliberately omits `validation` — a prose SOP that
         # announced its own check would already be half an ASOP, and the arm
         # would stop being a control.
         return (
-            f"Follow this procedure.\n\n{_fields_block(sop, include_validation=False)}\n\n"
+            f"Follow this procedure.\n\n{_fields_block(unit, include_validation=False)}\n\n"
             f"---\n\nTask: {task_prompt}"
         )
 
     header = (
-        f"You are working under procedure {sop.sop_id} v{sop.version}. It is "
+        f"You are working under procedure {sop.asop_id} v{sop.version} "
+        f"step {unit.step} ({unit.name}). It is "
         f"versioned; the version above is pinned to this task and will not change "
         f"under you. You will be checked against the verification below, by a "
         f"party that is not you."
@@ -126,11 +142,12 @@ def render(
 
     mistakes: list = []
     if arm is Arm.ASOP_LESSON:
-        mistakes = list(sop.common_mistakes or [])
+        mistakes = list(unit.common_mistakes or [])
         if not mistakes:
             raise ArmContractError(
                 f"arm {Arm.ASOP_LESSON.value!r} renders the lesson channel, but "
-                f"{sop.sop_id} v{sop.version} carries no common_mistakes. "
+                f"{sop.asop_id} v{sop.version} step {unit.step} carries no "
+                f"common_mistakes. "
                 f"Running it anyway would make it a duplicate of "
                 f"{Arm.ASOP.value!r} and report a null result as a tie."
             )
@@ -144,6 +161,29 @@ def render(
             )
 
     return (
-        f"{header}\n\n{_fields_block(sop, include_validation=True)}\n"
+        f"{header}\n\n{_fields_block(unit, include_validation=True)}\n"
         f"{_mistakes_block(mistakes)}\n---\n\nTask: {task_prompt}"
     )
+
+
+def _step_of(sop: ASOP, step: Optional[int]) -> Step:
+    """The step this prompt renders. Refuses rather than falling back.
+
+    A number naming no step would otherwise silently render step 1, and the
+    trial would be recorded against the step the caller asked for — which is
+    a measurement of one step attributed to another.
+    """
+    if not sop.steps:
+        raise ArmContractError(
+            f"{sop.asop_id} v{sop.version} has no steps, so there is nothing to "
+            f"hand an executor."
+        )
+    if step is None:
+        return sop.steps[0]
+    found = next((s for s in sop.steps if s.step == step), None)
+    if found is None:
+        raise ArmContractError(
+            f"{sop.asop_id} v{sop.version} has no step {step} "
+            f"(it has {[s.step for s in sop.steps]})."
+        )
+    return found

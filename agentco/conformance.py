@@ -54,6 +54,7 @@ STORE_ENV_VARS = (
     "AGENTCO_DB", "AGENTCO_REGISTRY_DB", "AGENTCO_WORK_STORE", "AGENTCO_SOP_STORE",
     "AGENTCO_REGISTRY_URL", "AGENTCO_SECRET", "AGENTCO_REGISTRY_KEYS", "AGENTCO_ACTOR",
     "AGENTCO_CAPABILITIES", "AGENTCO_HUMANS", "AGENTCO_VERIFIERS", "AGENTCO_PROTECTED_TAGS",
+    "AGENTCO_ADJUDICATORS",
     "AGENTCO_OUTBOX", "AGENTCO_AGENT_LABEL", "AGENTCO_REGISTRY_OPERATOR",
 )
 
@@ -62,13 +63,15 @@ STORE_ENV_VARS = (
 VERBS = (
     "claim_scope", "release_scope", "snapshot",
     "work_create", "work_pull", "work_report", "attest", "adjudicate",
-    "sop_create", "sop_revise", "sop_activate", "sop_instantiate", "sop_propose",
+    "sop_create", "sop_revise", "sop_activate", "sop_retire", "sop_run",
+    "sop_propose", "sop_outcomes", "run_get", "promote",
 )
 
 #: What each transport carries, as the ladder documents it. HTTP carries every
-#: verb; MCP the twelve-tool roster (adjudication rides on `attest`; creating
-#: and instantiating procedures are HTTP-only by design); the outbox the push
-#: set. A verb a transport does not carry is performed through the core in that
+#: verb; MCP the twelve-tool roster (adjudication rides on `attest`; authoring
+#: and RUNNING procedures are HTTP-only by design — and v3's seven new verbs
+#: are why the ceiling is now a decision rather than a fact, see
+#: `docs/decisions/`); the outbox the push set. A verb a transport does not carry is performed through the core in that
 #: transport's run — the question is not "can the outbox create work" (it
 #: cannot, by decision) but "does what it does carry mean the same thing".
 CARRIES: dict[str, frozenset[str]] = {
@@ -119,9 +122,60 @@ DETERMINISTIC = {"kind": "deterministic", "check": "pytest -q", "max_park_second
                  "on_timeout": "fail"}
 
 
+#: The step bodies the procedure scenarios share. Written once because the
+#: point of a scenario is the VERB's behaviour across transports, and four
+#: transports diverging on a hand-copied step body would be a finding about
+#: nothing.
+DEPLOY_ROLES = {"deployer": {"kind": "agent"}}
+DEPLOY_STEPS = [
+    {"name": "migrate", "role": "deployer", "purpose": "run the migration",
+     "gate": {"kind": "deterministic", "check": "migrate --check", "max_park_seconds": 900,
+              "on_timeout": "fail"}},
+    {"name": "cut over", "role": "deployer", "definition_of_done": "the service answers",
+     "gate": {"kind": "deterministic", "check": "curl -fsS /healthz", "max_park_seconds": 900,
+              "on_timeout": "fail"}},
+]
+#: A protected step. `money` freezes it against agents, and its role is human,
+#: so its gate must be human too — the record contract enforces that pairing.
+PAY_ROLES = {"payer": {"kind": "human"}}
+PAY_STEPS = [
+    {"name": "pay", "role": "payer", "purpose": "pay", "tags": ["money"],
+     "gate": {"kind": "human", "check": "the owner signs off", "verifier": "carol",
+              "max_park_seconds": 86400, "on_timeout": "escalate", "escalate_to": "carol"}},
+]
+DEV_ROLES = {"implementer": {"kind": "agent"}, "validator": {"kind": "agent"}}
+EXPORT_ROLES = {"exporter": {"kind": "agent"}}
+EXPORT_STEPS = [
+    {"name": "export", "role": "exporter", "purpose": "export the ledger",
+     "definition_of_done": "matches the fixture",
+     "gate": {"kind": "deterministic", "check": "pytest -q", "max_park_seconds": 900,
+              "on_timeout": "fail"}},
+]
+
+
+def _with_lesson(steps: list, index: int, lesson: str) -> list:
+    out = [dict(s) for s in steps]
+    out[index] = {**out[index], "common_mistakes": [lesson]}
+    return out
+
+
+def _repurposed(steps: list, purpose: str) -> list:
+    out = [dict(s) for s in steps]
+    out[0] = {**out[0], "purpose": purpose}
+    return out
+
+
 def _attestation(check: str, exit_status: int = 0) -> dict:
     return {"check": check, "exit_status": exit_status, "environment": "conformance",
             "at": "2026-09-02T15:00:00+00:00"}
+
+
+DEV_STEPS = [
+    {"name": "implement", "role": "implementer", "purpose": "write the code",
+     "gate": DETERMINISTIC},
+    {"name": "validate", "role": "validator", "purpose": "confirm it answers the requirement",
+     "gate": JUDGED},
+]
 
 
 SCENARIOS: dict[str, dict] = {
@@ -150,6 +204,12 @@ SCENARIOS: dict[str, dict] = {
         ],
     },
     "judged-gate": {
+        # `carol` reviews and adjudicates, so the operator declares her human,
+        # and `bob` — the verifying route that relays an adjudication with its
+        # attestation — is a declared adjudicator. Undeclared, ASOP v3 §6.1
+        # makes nobody one, which is the `adjudicator-binding` scenario below.
+        "humans": ["carol"],
+        "adjudicators": ["bob"],
         "steps": [
             step("operator", "work_create", save="g1", title="migrate the schema", verify=JUDGED),
             step("alice", "work_pull", save="pull1", capabilities=[]),
@@ -163,6 +223,7 @@ SCENARIOS: dict[str, dict] = {
         ],
     },
     "deterministic-gate": {
+        "humans": ["carol"],
         "steps": [
             step("operator", "work_create", save="d1", title="run the export", verify=DETERMINISTIC),
             step("alice", "work_pull", save="pull1"),
@@ -174,6 +235,7 @@ SCENARIOS: dict[str, dict] = {
         ],
     },
     "adjudication": {
+        "humans": ["carol"],
         "steps": [
             step("operator", "work_create", save="a1", title="fix the invoice"),
             step("alice", "work_pull", save="pull1"),
@@ -186,43 +248,148 @@ SCENARIOS: dict[str, dict] = {
     "procedure": {
         "humans": ["carol"],
         "steps": [
-            step("carol", "sop_create", save="deploy", title="deploy", purpose="ship it",
-                 definition_of_done="the service answers"),
+            step("carol", "sop_create", save="deploy", title="deploy", task_type="deploy",
+                 purpose="ship it", roles=DEPLOY_ROLES, steps=DEPLOY_STEPS),
             step("carol", "sop_activate", sop="@deploy", version=1),
-            step("alice", "sop_revise", sop="@deploy", changes={"common_mistakes": ["ran the migration last"]}),
+            step("alice", "sop_revise", sop="@deploy",
+                 changes={"steps": _with_lesson(DEPLOY_STEPS, 0, "ran the migration last")}),
             step("alice", "sop_activate", sop="@deploy", version=2),
-            step("carol", "sop_create", save="pay", title="pay the vendor", purpose="pay", tags=["money"],
-                 executor="human"),
+            step("carol", "sop_create", save="pay", title="pay the vendor", task_type="payment",
+                 purpose="pay", roles=PAY_ROLES, steps=PAY_STEPS),
             step("carol", "sop_activate", sop="@pay", version=1),
-            step("alice", "sop_revise", sop="@pay", changes={"purpose": "skip approval"}),
-            step("carol", "sop_revise", sop="@pay", changes={"purpose": "pay, with approval"}),
+            step("alice", "sop_revise", sop="@pay", changes={"steps": _repurposed(PAY_STEPS, "skip approval")}),
+            step("carol", "sop_revise", sop="@pay", changes={"steps": _repurposed(PAY_STEPS, "pay, with approval")}),
             step("alice", "sop_activate", sop="@pay", version=2),
             step("carol", "sop_activate", sop="@pay", version=0),
-            step("carol", "sop_activate", sop="sop-deadbeef", version=1),
-            step("operator", "sop_instantiate", save="i1", sop="@deploy", metadata={"epic": "release-week"}),
-            step("operator", "sop_instantiate", save="i2", sop="@pay"),
-            step("operator", "sop_instantiate", save="i3", sop="@pay", verify={
-                "kind": "human", "check": "the owner signs off", "verifier": "carol",
-                "max_park_seconds": 86400, "on_timeout": "escalate", "escalate_to": "carol"}),
+            step("carol", "sop_activate", sop="asop-deadbeef", version=1),
+            # Retirement: human-only, refuses new runs, keeps the record.
+            step("alice", "sop_retire", sop="@pay"),
+            step("carol", "sop_retire", sop="@pay"),
+            step("operator", "sop_run", save="r1", sop="@pay",
+                 inputs={"invoice": "INV-1"}, bindings={"payer": "carol"}),
+            step("carol", "sop_retire", sop="asop-deadbeef"),
+        ],
+    },
+    "run-tree": {
+        "humans": ["carol"],
+        "steps": [
+            step("carol", "sop_create", save="dev", title="develop", task_type="feature",
+                 purpose="requirement to verified code", inputs=[{"name": "requirement"}],
+                 roles=DEV_ROLES, constraints=[{"distinct": ["implementer", "validator"]}],
+                 steps=DEV_STEPS),
+            step("carol", "sop_activate", sop="@dev", version=1),
+            # The tree: three beads, `after` carried as blocked_by, per-step pins.
+            step("operator", "sop_run", save="run1", sop="@dev",
+                 inputs={"requirement": "REQ-1"},
+                 bindings={"implementer": "alice", "validator": "bob"}),
+            step("operator", "run_get", run="@run1"),
+            step("operator", "sop_outcomes", sop="@dev"),
+            # A run of a version that is not there at all.
+            step("operator", "sop_run", sop="asop-deadbeef", inputs={}, bindings={}),
+        ],
+    },
+    "run-refusals": {
+        "humans": ["carol"],
+        "steps": [
+            step("carol", "sop_create", save="dev", title="develop", task_type="feature",
+                 purpose="requirement to verified code", inputs=[{"name": "requirement"}],
+                 roles=DEV_ROLES, constraints=[{"distinct": ["implementer", "validator"]}],
+                 steps=DEV_STEPS),
+            # A DRAFT cannot be run.
+            step("operator", "sop_run", sop="@dev", inputs={"requirement": "REQ-1"},
+                 bindings={"implementer": "alice", "validator": "bob"}),
+            step("carol", "sop_activate", sop="@dev", version=1),
+            # inputs_missing.
+            step("operator", "sop_run", sop="@dev", inputs={},
+                 bindings={"implementer": "alice", "validator": "bob"}),
+            # role_unbound.
+            step("operator", "sop_run", sop="@dev", inputs={"requirement": "REQ-1"},
+                 bindings={"implementer": "alice"}),
+            # constraint_unsatisfiable — one agent cannot fill both sides of a
+            # separation of duties, and the plane will not quietly let it.
+            step("operator", "sop_run", sop="@dev", inputs={"requirement": "REQ-1"},
+                 bindings={"implementer": "alice", "validator": "alice"}),
+            # The filer may not author the gate. This is the whole of v3 §2.2.
+            step("operator", "sop_run", sop="@dev", inputs={"requirement": "REQ-1"},
+                 bindings={"implementer": "alice", "validator": "bob"}, verify=DETERMINISTIC),
+        ],
+    },
+    "nesting": {
+        "humans": ["carol"],
+        "steps": [
+            step("carol", "sop_create", save="dev", title="develop", task_type="feature",
+                 purpose="requirement to verified code", inputs=[{"name": "requirement"}],
+                 roles=DEV_ROLES, constraints=[{"distinct": ["implementer", "validator"]}],
+                 steps=DEV_STEPS),
+            step("carol", "sop_activate", sop="@dev", version=1),
+            step("carol", "sop_create", save="rel", title="release", task_type="release",
+                 purpose="ship a feature", roles={"owner": {"kind": "agent"}},
+                 steps=[
+                     {"name": "plan", "role": "owner", "purpose": "decide what ships",
+                      "gate": DETERMINISTIC},
+                     {"name": "develop", "uses": {"asop_id": "@dev", "version": 1}},
+                 ]),
+            step("carol", "sop_activate", sop="@rel", version=1),
+            step("operator", "sop_run", save="run1", sop="@rel",
+                 inputs={"requirement": "REQ-1"},
+                 bindings={"owner": "carol", "implementer": "alice", "validator": "bob"}),
+            step("operator", "run_get", run="@run1"),
+        ],
+    },
+    "promotion": {
+        "humans": ["carol"],
+        "steps": [
+            step("operator", "work_create", save="goal", title="ship the thing",
+                 metadata={"task_type": "adhoc"}),
+            step("operator", "work_create", save="c1", title="build it",
+                 metadata={"parent": "@goal"}, verify=DETERMINISTIC),
+            step("alice", "work_pull", save="pull1"),
+            step("alice", "work_report", item="@c1", attempt="@pull1.attempt", status="done",
+                 attestation=_attestation("pytest -q", 0)),
+            step("alice", "work_pull", save="pull2"),
+            step("alice", "work_report", item="@goal", attempt="@pull2.attempt", status="done",
+                 result="shipped"),
+            # Human-only, and refused for an agent whatever it would produce.
+            step("alice", "promote", run="@goal", task_type="adhoc"),
+            step("carol", "promote", save="drafted", run="@goal", task_type="adhoc"),
+            # A DRAFT does not block a second promotion — nobody is following it
+            # yet, so there is nothing for a variant to be a variant OF.
+            step("carol", "promote", save="drafted2", run="@goal", task_type="adhoc"),
+            step("carol", "sop_activate", sop="@drafted", version=1),
+            # Activated, it covers `adhoc`, and the path for a variant is a new
+            # VERSION rather than a second procedure counting the same work.
+            step("carol", "promote", run="@goal", task_type="adhoc"),
+            step("carol", "promote", run="w-deadbeef", task_type="adhoc"),
         ],
     },
     "lessons": {
         "humans": ["carol"],
         "steps": [
-            step("carol", "sop_create", save="export", title="export", purpose="export the ledger",
-                 definition_of_done="matches the fixture", common_mistakes=["typed by a person"]),
+            step("carol", "sop_create", save="export", title="export", task_type="export",
+                 purpose="export the ledger", roles=EXPORT_ROLES,
+                 steps=_with_lesson(EXPORT_STEPS, 0, "typed by a person")),
             step("carol", "sop_activate", sop="@export", version=1),
-            step("operator", "sop_instantiate", save="i1", sop="@export"),
+            step("operator", "sop_run", save="r1", sop="@export", inputs={}, bindings={"exporter": "alice"}),
             step("alice", "work_pull", save="pull1"),
-            step("alice", "work_report", item="@i1", attempt="@pull1.attempt", status="done", result="skipped the diff"),
-            step("carol", "adjudicate", item="@i1", verdict="bad", evidence="skipped the diff and reported done"),
-            step("operator", "sop_instantiate", save="i2", sop="@export"),
+            step("alice", "work_report", item="@r1.step1", attempt="@pull1.attempt", status="done",
+                 result="skipped the diff", attestation=_attestation("pytest -q", 0)),
+            step("carol", "adjudicate", item="@r1.step1", verdict="bad",
+                 evidence="skipped the diff and reported done"),
+            # Closing the run's parent, which its last step just unblocked.
+            step("alice", "work_pull", save="pullp1"),
+            step("alice", "work_report", item="@r1", attempt="@pullp1.attempt", status="done",
+                 result="run 1 closed"),
+            step("operator", "sop_run", save="r2", sop="@export", inputs={}, bindings={"exporter": "alice"}),
             step("alice", "work_pull", save="pull2"),
-            step("alice", "work_report", item="@i2", attempt="@pull2.attempt", status="done"),
-            step("carol", "adjudicate", item="@i2", verdict="good", evidence="the diff is redundant"),
+            step("alice", "work_report", item="@r2.step1", attempt="@pull2.attempt", status="done",
+                 attestation=_attestation("pytest -q", 0)),
+            step("carol", "adjudicate", item="@r2.step1", verdict="good", evidence="the diff is redundant"),
+            # An agent that is neither declared human nor a declared adjudicator
+            # may not judge at all — the v3 default (§6.1) fails closed.
+            step("bob", "adjudicate", item="@r2.step1", verdict="good", evidence="a second opinion"),
             step("alice", "sop_propose", sop="@export"),
             step("alice", "sop_propose", sop="@export"),
-            step("alice", "sop_propose", sop="sop-deadbeef"),
+            step("alice", "sop_propose", sop="asop-deadbeef"),
         ],
     },
     "decomposition": {
@@ -234,6 +401,20 @@ SCENARIOS: dict[str, dict] = {
             step("operator", "work_create", save="fix", title="fix unit 0",
                  metadata={"parent": "@goal", "repairs": "@c0"}),
             step("operator", "work_create", save="orphan", title="loose end", metadata={"parent": "w-deadbeef"}),
+        ],
+    },
+    "adjudicator-binding": {
+        # Nobody is declared human; `bob` is a declared ROUTE. That is the
+        # opt-in of ASOP v3 §6.1 — declared, never inferred — and `carol`,
+        # undeclared, is refused for the same reason the default exists.
+        "adjudicators": ["bob"],
+        "steps": [
+            step("operator", "work_create", save="a1", title="fix the invoice"),
+            step("alice", "work_pull", save="pull1"),
+            step("alice", "work_report", item="@a1", attempt="@pull1.attempt", status="done"),
+            step("carol", "adjudicate", item="@a1", verdict="bad", evidence="undeclared"),
+            step("alice", "adjudicate", item="@a1", verdict="good", evidence="my own shortcut"),
+            step("bob", "adjudicate", item="@a1", verdict="bad", evidence="skipped the reproduce step"),
         ],
     },
     "verifier-binding": {
@@ -315,15 +496,18 @@ class World:
 
     def __init__(
         self, root: Path, humans: list[str], verifiers: list[str], registry_db: Optional[str] = None,
+        adjudicators: Optional[list[str]] = None,
     ):
         self.root = root
         self.humans = frozenset(humans)
         self.verifiers = frozenset(verifiers)
+        self.adjudicators = frozenset(adjudicators or ())
         self.db_path = registry_db or str(root / "registry.sqlite3")
         self.work_path = str(root / "work.jsonl")
         self.sop_path = str(root / "sops.jsonl")
         self.conn = db.connect(self.db_path)
-        self.queue = Queue(self.work_path, verifiers=verifiers)
+        self.queue = Queue(self.work_path, verifiers=verifiers, humans=humans,
+                           adjudicators=sorted(self.adjudicators))
         self.library = SopLibrary(self.sop_path)
         self.labels: dict[str, str] = {}     # label -> identifier
         self.saved: dict[str, Any] = {}      # label -> whatever a step produced
@@ -343,6 +527,7 @@ class World:
                 db_path=self.db_path, keys=KEYS, operator="operator",
                 work_store=self.work_path, sop_store=self.sop_path,
                 humans=sorted(self.humans), verifiers=sorted(self.verifiers),
+                adjudicators=sorted(self.adjudicators),
             ))
         return self._client
 
@@ -371,6 +556,7 @@ class World:
         pinned: dict[str, Optional[str]] = {name: None for name in STORE_ENV_VARS}
         pinned["AGENTCO_HUMANS"] = ",".join(sorted(self.humans)) or None
         pinned["AGENTCO_VERIFIERS"] = ",".join(sorted(self.verifiers)) or None
+        pinned["AGENTCO_ADJUDICATORS"] = ",".join(sorted(self.adjudicators)) or None
         return pinned
 
     # -- labels ---------------------------------------------------------------
@@ -407,7 +593,11 @@ class World:
         for label, ident in self.labels.items():
             if ident == identifier:
                 return f"@{label}"
-        return "?" if isinstance(identifier, str) and identifier[:2] in ("w-", "so", "le", "sn") else identifier
+        # An unlabelled generated id is "?" rather than itself: printing the
+        # raw value would make every transport's photograph differ on nothing
+        # but uuid4. `as` is the ASOP prefix, added with v3.
+        return ("?" if isinstance(identifier, str) and identifier[:2] in ("w-", "so", "as", "le", "sn")
+                else identifier)
 
 
 # --------------------------------------------------------------------------- #
@@ -493,7 +683,7 @@ def _core(world: World, s: dict) -> dict:
         if verb == "sop_create":
             body = {k: v for k, v in a.items() if k != "title"}
             sop = world.library.create(a["title"], author=actor, author_kind=kind, **body)
-            return _ok(**_save(world, s, sop.sop_id, {"id": sop.sop_id}))
+            return _ok(**_save(world, s, sop.asop_id, {"id": sop.asop_id}))
         if verb == "sop_revise":
             sop = world.library.revise(a["sop"], title=a.get("title"), author=actor, author_kind=kind,
                                        **a.get("changes", {}))
@@ -501,10 +691,27 @@ def _core(world: World, s: dict) -> dict:
         if verb == "sop_activate":
             world.library.activate(a["sop"], int(a["version"]), author=actor, author_kind=kind)
             return _ok()
-        if verb == "sop_instantiate":
-            item = world.library.instantiate(a["sop"], world.queue, verify=a.get("verify"),
-                                             metadata=a.get("metadata"))
-            return _ok(**_save(world, s, item.id, {"id": item.id}))
+        if verb == "sop_retire":
+            world.library.retire(a["sop"], author=actor, author_kind=kind)
+            return _ok()
+        if verb == "sop_run":
+            extra = {"verify": a["verify"]} if "verify" in a else {}
+            run = world.library.run(
+                a["sop"], world.queue, inputs=a.get("inputs") or {},
+                bindings=a.get("bindings") or {}, metadata=a.get("metadata"), **extra,
+            )
+            return _ok(**_run_saved(world, s, run))
+        if verb == "run_get":
+            view = world.library.run_get(a["run"], world.queue)
+            return _ok(steps=[st["step"] for st in view["steps"]], status=view["status"])
+        if verb == "sop_outcomes":
+            rows = world.library.outcomes_by_version(a["sop"], world.queue)
+            return _ok(outcomes=[{"version": r["version"], "runs": r["runs"],
+                                  "steps": [st["step"] for st in r["steps"]]} for r in rows])
+        if verb == "promote":
+            draft = world.library.promote(a["run"], world.queue, task_type=a.get("task_type"),
+                                          author=actor, author_kind=kind)
+            return _ok(**_save(world, s, draft.asop_id, {"id": draft.asop_id}))
     except Exception as exc:  # noqa: BLE001 - classified below, never swallowed
         return _refused(classify(exc).code)
     raise ConformanceError(f"core does not perform {verb!r}")
@@ -547,7 +754,7 @@ def _http(world: World, s: dict) -> dict:
         if verb == "sop_create":
             body = {k: v for k, v in a.items() if k != "title"}
             out = reg.sop_create(a["title"], **body)
-            return _ok(**_save(world, s, out["sop"]["sop_id"], {"id": out["sop"]["sop_id"]}))
+            return _ok(**_save(world, s, out["sop"]["asop_id"], {"id": out["sop"]["asop_id"]}))
         if verb == "sop_revise":
             body = dict(a.get("changes", {}))
             if a.get("title") is not None:
@@ -557,10 +764,26 @@ def _http(world: World, s: dict) -> dict:
         if verb == "sop_activate":
             reg.sop_activate(a["sop"], int(a["version"]))
             return _ok()
-        if verb == "sop_instantiate":
-            fields = {k: v for k, v in a.items() if k != "sop"}
-            out = reg.sop_instantiate(a["sop"], **fields)
-            return _ok(**_save(world, s, out["item"]["id"], {"id": out["item"]["id"]}))
+        if verb == "sop_retire":
+            reg.sop_retire(a["sop"])
+            return _ok()
+        if verb == "sop_run":
+            extra = {"verify": a["verify"]} if "verify" in a else {}
+            if a.get("metadata"):
+                extra["metadata"] = a["metadata"]
+            out = reg.sop_run(a["sop"], inputs=a.get("inputs") or {},
+                              bindings=a.get("bindings") or {}, **extra)
+            return _ok(**_run_saved(world, s, out["run"]))
+        if verb == "run_get":
+            view = reg.run_get(a["run"])["run"]
+            return _ok(steps=[st["step"] for st in view["steps"]], status=view["status"])
+        if verb == "sop_outcomes":
+            rows = reg.sop_outcomes(a["sop"])["outcomes"]
+            return _ok(outcomes=[{"version": r["version"], "runs": r["runs"],
+                                  "steps": [st["step"] for st in r["steps"]]} for r in rows])
+        if verb == "promote":
+            out = reg.promote(a["run"], a.get("task_type"))
+            return _ok(**_save(world, s, out["sop"]["asop_id"], {"id": out["sop"]["asop_id"]}))
         if verb == "sop_propose":
             out = reg._call("POST", f"/sops/{a['sop']}/propose", {})
             return _ok(drafted=(out.get("sop") or {}).get("version"))
@@ -675,6 +898,30 @@ def _save(world: World, s: dict, identifier: Any, produced: Any) -> dict:
     return {}
 
 
+def _run_saved(world: World, s: dict, run: dict) -> dict:
+    """A filed run, labelled so later steps can name its BEADS.
+
+    `@r1` is the run's parent and `@r1.step1` its first step's bead. Both are
+    registered as labels, not only in `saved`, so `photograph()` renders the
+    tree with names rather than with the "?" it gives an unrecognised id —
+    which is what makes a transport that filed the tree in the wrong SHAPE
+    visible as a diff rather than as a wall of question marks.
+    """
+    produced: dict = {"id": run["runId"]}
+
+    def walk(steps: list, prefix: str) -> None:
+        for entry in steps:
+            key = f"{prefix}step{entry['step']}"
+            produced[key] = entry["itemId"]
+            if s.get("save"):
+                world.labels[f"{s['save']}.{key}"] = entry["itemId"]
+            walk(entry.get("children") or [], f"{key}.")
+
+    walk(run.get("steps") or [], "")
+    _save(world, s, run["runId"], produced)
+    return {}
+
+
 DRIVERS: dict[str, Callable[[World, dict], dict]] = {
     "core": _core, "http": _http, "mcp": _mcp, "mcp-remote": _mcp_remote, "outbox": _outbox,
 }
@@ -695,6 +942,18 @@ def _ttl_of(item) -> Optional[int]:
     expires = datetime.fromisoformat(item.lease_expires_at)
     updated = datetime.fromisoformat(item.updated_at)
     return int(round((expires - updated).total_seconds()))
+
+
+def _labelled_uses(world: World, uses: Any) -> Any:
+    """A nested step's `uses` pin, with the inner ASOP's generated id labelled.
+
+    Without this every transport's photograph differs on a uuid4 that the
+    script itself chose the label for — a difference about nothing, in the one
+    field that says which procedure a nested step actually runs.
+    """
+    if not isinstance(uses, dict):
+        return uses
+    return {**uses, "asop_id": world.label_of(uses.get("asop_id"))}
 
 
 def photograph(world: World) -> dict:
@@ -726,9 +985,15 @@ def photograph(world: World) -> dict:
             "verify_resolution": meta.get("verify_resolution"),
             "adjudication": {k: adjudication.get(k) for k in ("verdict", "by", "evidence", "executors", "proposed_in")}
             if adjudication else None,
-            "sop": world.label_of((meta.get("sop_ref") or {}).get("sop_id")) if meta.get("sop_ref") else None,
+            "sop": world.label_of((meta.get("sop_ref") or {}).get("asop_id")) if meta.get("sop_ref") else None,
             "sop_version": (meta.get("sop_ref") or {}).get("version"),
-            "sop_plan": meta.get("sop_plan"),
+            "sop_step": (meta.get("sop_ref") or {}).get("step"),
+            "sop_run": {
+                "inputs": meta["sop_run"].get("inputs"),
+                "bindings": meta["sop_run"].get("bindings"),
+            } if meta.get("sop_run") else None,
+            "sop_plan": ({**meta["sop_plan"], "uses": _labelled_uses(world, meta["sop_plan"]["uses"])}
+                         if (meta.get("sop_plan") or {}).get("uses") else meta.get("sop_plan")),
             "review": {k: review.get(k) for k in ("flags", "plan", "verdict")} | {
                 "actual": {k: v for k, v in (review.get("actual") or {}).items()
                            if k not in ("filed_at", "reported_at")}
@@ -736,26 +1001,46 @@ def photograph(world: World) -> dict:
             "parent": world.label_of(meta["parent"]) if meta.get("parent") else None,
             "repairs": world.label_of(meta["repairs"]) if meta.get("repairs") else None,
             "other_metadata": sorted(k for k in meta if k not in (
-                "lease_report", "claims", "adjudication", "sop_ref", "sop_plan", "plan_vs_actual",
-                "parent", "repairs", "verify_resolution", "verify_parked_at", "verify_retry",
+                "lease_report", "claims", "adjudication", "sop_ref", "sop_run", "sop_plan",
+                "plan_vs_actual", "parent", "repairs", "verify_resolution", "verify_parked_at",
+                "verify_retry",
             )),
         })
     sops = []
-    for sop_id in sorted({s.sop_id for s in world.library._read_all()}, key=lambda i: world.label_of(i)):
-        for version in world.library.history(sop_id):
+    for asop_id in sorted({a.asop_id for a in world.library._read_all()}, key=lambda i: world.label_of(i)):
+        for version in world.library.history(asop_id):
             sops.append({
-                "sop": world.label_of(sop_id),
+                "sop": world.label_of(asop_id),
                 "version": version.version,
                 "status": version.status.value,
                 "title": version.title,
-                **{field: getattr(version, field) for field in (
-                    "purpose", "trigger", "entry_check", "inputs", "definition_of_done",
-                    "validation", "write_back", "next_sop", "executor", "author", "author_kind",
-                    "superseded_by",
+                **{field: world.relabel(getattr(version, field)) for field in (
+                    "task_type", "purpose", "trigger", "author", "author_kind",
                 )},
-                "common_mistakes": [world.relabel(m) for m in version.common_mistakes],
+                **{field: getattr(version, field) for field in (
+                    "inputs", "roles", "constraints", "superseded_by",
+                )},
                 "proposals": [world.relabel(p) for p in version.proposals],
-                "tags": list(version.tags),
+                # Per STEP, which is where the body, the gate and the lesson
+                # channel live in v3. A transport that dropped a gate or wrote
+                # a lesson onto the wrong step shows up here as a diff.
+                "steps": [{
+                    "step": st.step,
+                    "name": st.name,
+                    "role": st.role,
+                    "after": list(st.after or []),
+                    "uses": _labelled_uses(world, st.uses),
+                    "gate": st.gate,
+                    # Relabelled: a promoted draft's prose names the run and the
+                    # beads it came from, and those ids differ per transport.
+                    **{f: world.relabel(getattr(st, f)) for f in (
+                        "purpose", "entry_check", "inputs", "definition_of_done",
+                        "validation", "write_back",
+                    )},
+                    "common_mistakes": [world.relabel(m) for m in st.common_mistakes],
+                    "proposals": [world.relabel(pr) for pr in st.proposals],
+                    "tags": list(st.tags),
+                } for st in version.steps],
             })
     feed = []
     for event in events.read(world.conn, limit=1000)["events"]:
@@ -856,7 +1141,7 @@ def run_scenario(name: str, transport: str, root: Optional[Path] = None) -> dict
                 _environment(**{k: None for k in STORE_ENV_VARS}):
             world = World(
                 Path(root or tmp), scenario.get("humans", []), scenario.get("verifiers", []),
-                registry_db=registry_db,
+                registry_db=registry_db, adjudicators=scenario.get("adjudicators", []),
             )
             outcomes = []
             with _environment(**world.env()):

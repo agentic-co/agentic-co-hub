@@ -514,28 +514,6 @@ def adjudication_record(
                 "would be revised on it."
             ),
         )
-    declared_humans = policy.humans_from_env() if humans is None else humans
-    declared_adjudicators = (
-        policy.adjudicators_from_env() if adjudicators is None else adjudicators
-    )
-    if not policy.may_adjudicate(adjudicator, humans=declared_humans,
-                                 adjudicators=declared_adjudicators):
-        named = sorted(frozenset(declared_adjudicators))
-        raise Refusal(
-            code=ADJUDICATION_INVALID,
-            message=(
-                f"{adjudicator!r} is neither a declared human nor a declared "
-                f"adjudicator, so it may not judge a divergence"
-            ),
-            remediation=(
-                f"Adjudication is what revises the procedures everyone follows, so "
-                f"who may do it is declared by the operator, never inferred. Declare "
-                f"this route in {policy.ADJUDICATORS_ENV_VAR} "
-                f"(currently: {named or 'nothing — only declared humans adjudicate'}), "
-                f"or route the divergence to a person."
-            ),
-            http_status=403,
-        )
     executors = executors_of(item)
     if not executors:
         raise Refusal(
@@ -562,6 +540,29 @@ def adjudication_record(
             ),
             http_status=403,
         )
+    declared_humans = policy.humans_from_env() if humans is None else humans
+    declared_adjudicators = (
+        policy.adjudicators_from_env() if adjudicators is None else adjudicators
+    )
+    if not policy.may_adjudicate(adjudicator, humans=declared_humans,
+                                 adjudicators=declared_adjudicators):
+        named = sorted(frozenset(declared_adjudicators))
+        raise Refusal(
+            code=ADJUDICATION_INVALID,
+            message=(
+                f"{adjudicator!r} is neither a declared human nor a declared "
+                f"adjudicator, so it may not judge a divergence"
+            ),
+            remediation=(
+                f"Adjudication is what revises the procedures everyone follows, so "
+                f"who may do it is declared by the operator, never inferred. Declare "
+                f"this route in {policy.ADJUDICATORS_ENV_VAR} "
+                f"(currently: {named or 'nothing — only declared humans adjudicate'}), "
+                f"or route the divergence to a person."
+            ),
+            http_status=403,
+        )
+
     if (item.metadata or {}).get(ADJUDICATION_KEY):
         prior = item.metadata[ADJUDICATION_KEY]
         raise Refusal(

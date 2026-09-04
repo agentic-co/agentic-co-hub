@@ -335,15 +335,40 @@ class Registry:
         """Every SOP with an active version."""
         return self._call("GET", "/sops")
 
-    def sop_chain(self, sop_id: str) -> dict:
-        """The whole process starting here, with any broken link named."""
-        return self._call("GET", f"/sops/{sop_id}/chain")
+    def sop_retire(self, sop_id: str) -> dict:
+        """Withdraw the active version with no successor. Human-only."""
+        return self._call("POST", f"/sops/{sop_id}/retire", {})
 
-    def sop_instantiate(self, sop_id: str, **fields: Any) -> dict:
-        """File work pinned to this SOP's active version.
+    def sop_run(self, sop_id: str, inputs: dict, bindings: dict, **fields: Any) -> dict:
+        """File a RUN of this ASOP's active version: one bead per step.
 
         Use this rather than `work_create` whenever the work has a procedure:
-        the item then carries which procedure it was run under, which is the
-        only thing that makes "did the revision help" answerable later.
+        every bead then carries which procedure and which STEP it was run
+        under, which is the only thing that makes "did the revision help"
+        answerable later.
+
+        No gate is sent. Each step bead gets its own step's gate from the
+        version — a filer who could supply one would be the executor's side
+        writing the check it is graded by (ASOP.md §2.2).
         """
-        return self._call("POST", f"/sops/{sop_id}/instantiate", fields)
+        return self._call(
+            "POST", f"/sops/{sop_id}/run", {"inputs": inputs, "bindings": bindings, **fields}
+        )
+
+    def sop_outcomes(self, sop_id: str) -> dict:
+        """Per version and per step: how many runs, and how they ended."""
+        return self._call("GET", f"/sops/{sop_id}/outcomes")
+
+    def run_get(self, run_id: str) -> dict:
+        """One run's tree, with statuses and pins."""
+        return self._call("GET", f"/runs/{run_id}")
+
+    def run_list(self, sop_id: Optional[str] = None) -> dict:
+        """Runs, newest first."""
+        return self._call("GET", "/runs", None, f"?asop={sop_id}" if sop_id else "")
+
+    def promote(self, run_id: str, task_type: Optional[str] = None) -> dict:
+        """Draft an ASOP from a completed run tree. Human-only."""
+        return self._call(
+            "POST", f"/runs/{run_id}/promote", {"taskType": task_type} if task_type else {}
+        )

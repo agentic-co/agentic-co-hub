@@ -69,6 +69,14 @@ class Routes:
     default: str = ""
     assign: Optional[str] = None
     requires: tuple[str, ...] = ()
+    #: Which actor fills each ROLE an ASOP declares, for the runs this file
+    #: files. Needed since ASOP v3: a procedure names roles and the plane
+    #: never invents a binding, so an org filing work from a procedure has to
+    #: say who its implementer and its validator are. Absent, every role falls
+    #: back to `assign` — which is correct for a single-role procedure and is
+    #: refused loudly (`constraint_unsatisfiable`) for one with a separation
+    #: of duties, which is the moment to write this map.
+    bindings: dict[str, str] = field(default_factory=dict)
 
     def sop_for(self, item: dict) -> tuple[str, bool]:
         """Return `(sop key, matched a rule)`. The flag is what makes a gap visible."""
@@ -157,6 +165,7 @@ def load(path: str | Path) -> Routes:
         default=default,
         assign=raw.get("assign"),
         requires=tuple(raw.get("requires") or ()),
+        bindings=dict(raw.get("bindings") or {}),
     )
 
 

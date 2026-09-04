@@ -591,12 +591,16 @@ def create_server(
 
     @mcp.tool(name="sop_get")
     def sop_get(sop_id: str, version: Optional[int] = None) -> Optional[dict]:
-        """Read one SOP version, or the active version when `version` is omitted.
+        """Read one ASOP version, or the active version when `version` is omitted.
+
+        Returns the whole procedure: its roles, its declared inputs, and its
+        ordered `steps` — each with the gate authored on it. That is what an
+        executor holding a bead pinned to `(asop_id, version, step)` renders.
 
         `None` is the normal answer for an unknown id, or one with no active
-        version yet — resolving a pin must never fail loudly, or an SOP that
-        has since been superseded would become unreadable to every instance
-        still pinned to the version it was created under.
+        version yet — resolving a pin must never fail loudly, or a procedure
+        that has since been superseded or retired would become unreadable to
+        every run still pinned to the version it started under.
         """
         try:
             return backend.sop_get(sop_id, version)
@@ -607,11 +611,13 @@ def create_server(
     def sop_revise(sop_id: str, changes: dict, title: Optional[str] = None) -> dict:
         """Write the next version of a procedure as a DRAFT; the old one stays readable.
 
-        `changes` holds SOP fields (purpose, definition_of_done, common_mistakes,
-        executor, tags, ...); unset fields carry forward, `null` clears one.
-        Nothing is promoted until `sop_activate`. The revision policy applies:
-        as an agent you cannot touch a `money`/`irreversible` step, demote a
-        human step, or undo a change a human made.
+        `changes` holds ASOP fields (purpose, trigger, task_type, roles,
+        constraints, inputs, and `steps` — the whole ordered sequence, each
+        step carrying its own gate). Unset fields carry forward, including the
+        steps, so changing `purpose` does not blank the procedure. Nothing is
+        promoted until `sop_activate`. The revision policy applies PER STEP: as
+        an agent you cannot touch a `money`/`irreversible` step, remove or
+        demote a human one, or undo a change a human made.
         """
         try:
             return backend.sop_revise(
