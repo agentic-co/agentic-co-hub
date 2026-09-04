@@ -353,6 +353,13 @@ MAX_DEPTH = 3
 
 ROLE_KINDS = ("agent", "human")
 
+#: The tags every registry protects (ASOP.md §6.4). A plane may ADD to this
+#: set; nothing may remove these two. The record enforces the default set
+#: here — a step carrying one of these must be gated by a person — and a
+#: plane enforces its extensions on its own side, because the record cannot
+#: know a set it was never told.
+DEFAULT_PROTECTED_TAGS = frozenset({"money", "irreversible"})
+
 #: A step's prose, in the order it is READ. `trigger` moved up to the ASOP:
 #: a procedure is triggered, a step is reached.
 STEP_TEXT_FIELDS = (
@@ -718,6 +725,15 @@ def validate_asop(payload: dict) -> dict:
                 raise SopContractError(
                     f"step {i}: role '{role}' is human, so its gate must be kind "
                     f"'human' — a human step an agent can close is not a human step."
+                )
+            protected_here = sorted(set(clean.get("tags", [])) & DEFAULT_PROTECTED_TAGS)
+            if protected_here and clean["gate"].get("kind") != "human":
+                raise SopContractError(
+                    f"step {i}: carries protected tag(s) {protected_here}, so its gate "
+                    f"must be kind 'human' — the tag means a person looks before this "
+                    f"step counts as done, and a deterministic or judged gate is "
+                    f"precisely nobody looking (ASOP.md §6.4). v2 enforced this at "
+                    f"filing; v3 enforces it where the gate is authored."
                 )
         cleaned_steps.append(clean)
     out["steps"] = cleaned_steps

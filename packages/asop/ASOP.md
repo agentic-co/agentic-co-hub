@@ -251,7 +251,10 @@ satisfy a constraint **refuses the run** (`role_unbound`, `constraint_unsatisfia
 it does not quietly bind the same agent twice.
 
 Roles have a `kind`: `agent` or `human`. A `human` role's steps carry `human` gates by
-construction; the revision policy (§6.4) protects the classification.
+construction, and so does a step carrying a **protected tag** (`money`, `irreversible`
+by default — §6.4): the tag means a person looks before the step counts as done, and
+the record refuses a gate that means nobody does. The revision policy protects both
+classifications.
 
 ---
 
