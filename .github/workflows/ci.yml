@@ -41,3 +41,9 @@ jobs:
       # the same shape as a test that only passes in one environment, which
       # this project has already been bitten by once.
       - run: uv run --extra dev --extra server --extra mcp --python ${{ matrix.python-version }} pytest -q
+      # The contract package has its own suite and `testpaths = ["tests"]`
+      # above scopes a bare `pytest` to the plane's. Without this line the 57
+      # tests closest to the shared schema ran only when somebody typed the
+      # command from the README — which is to say, not in CI (found by review,
+      # 2026-09-04).
+      - run: uv run --extra dev --extra server --extra mcp --python ${{ matrix.python-version }} pytest packages/asop/tests -q

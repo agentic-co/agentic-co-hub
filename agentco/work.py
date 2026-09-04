@@ -1375,8 +1375,17 @@ class Queue:
         attestation: Optional[dict],
         submitted_by: Optional[str],
         metadata: dict,
+        now: Optional[datetime] = None,
     ) -> tuple[WorkStatus, Optional[dict], int]:
         """Where a reported outcome meets the gate. Mutates `metadata` in place.
+
+        `now` is the clock every stamp here reads — the park clock a gate
+        starts, and the moment a retry decision was taken. Injectable for the
+        same reason `claim` and `sweep_park_clocks` take one: a test that
+        stamps the start from the wall clock and checks expiry against a
+        synthetic one is comparing two clocks and calling it a bug when they
+        drift (two cross-vendor reviews, 2026-09-04). Production passes
+        nothing and gets the wall clock.
 
         Returns the status the report actually lands as, the evidence to store,
         and the failure count. Called from inside `fence`, so every refusal here
@@ -1432,7 +1441,7 @@ class Queue:
                         "deterministic one."
                     ),
                 )
-            metadata["verify_parked_at"] = _iso(_now())
+            metadata["verify_parked_at"] = _iso(now or _now())
             return WorkStatus.AWAITING_VERIFY, item.attestation, failures
 
         if attestation is None:
@@ -1466,12 +1475,12 @@ class Queue:
             # a side effect of a report would create work nobody asked this call
             # to create; the caller reads the decision and does it.
             "decision": gates.retry_decision(failures),
-            "decided_at": _iso(_now()),
+            "decided_at": _iso(now or _now()),
         }
         # The clock starts here too. A failed gate's re-verify offer used to
         # have no clock at all, so an unclaimed vehicle sat open forever and
         # the digest never saw it (DECIDE-L3 #3).
-        metadata["verify_parked_at"] = _iso(_now())
+        metadata["verify_parked_at"] = _iso(now or _now())
         return WorkStatus.VERIFY_FAILED, record, failures
 
     def attest(
@@ -1481,6 +1490,7 @@ class Queue:
         submitted_by: str,
         capabilities: Optional[Sequence[str]] = None,
         adjudication: Optional[dict] = None,
+        now: Optional[datetime] = None,
     ) -> Optional[WorkItem]:
         """Answer a gate. The only transition out of a verify state.
 
@@ -1755,9 +1765,9 @@ class Queue:
             metadata["verify_retry"] = {
                 "failures": failures,
                 "decision": gates.retry_decision(failures),
-                "decided_at": _iso(_now()),
+                "decided_at": _iso(now or _now()),
             }
-            metadata["verify_parked_at"] = _iso(_now())  # the re-verify offer's clock starts now
+            metadata["verify_parked_at"] = _iso(now or _now())  # the re-verify offer's clock starts now
             return {
                 "status": WorkStatus.VERIFY_FAILED,
                 "attestation": record,
@@ -1829,6 +1839,7 @@ class Queue:
         idempotency_key: Optional[str] = None,
         attestation: Optional[dict] = None,
         submitted_by: Optional[str] = None,
+        now: Optional[datetime] = None,
     ) -> Optional[WorkItem]:
         """Apply a worker's outcome, fenced on `attempt`.
 
@@ -1994,6 +2005,7 @@ class Queue:
                 attestation=attestation,
                 submitted_by=submitted_by or item.leased_by,
                 metadata=metadata,
+                now=now,
             )
             if metadata.get("sop_ref"):
                 # The third property's second record: written at the moment of
