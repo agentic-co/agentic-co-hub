@@ -18,8 +18,8 @@ importing the other. This package is that agreement.
 ## Who imports this
 
 - The [AgentCo coordination plane](../..) (`agentco/gates.py`,
-  `agentco/errors.py`, `agentco/sop.py` are thin shims over this package,
-  keeping every existing caller and test unchanged).
+  `agentco/errors.py`, `agentco/sop.py` and `agentco/policy.py` are thin shims
+  over this package, keeping every existing caller and test unchanged).
 - The [AgentCo Harness](https://github.com/agentic-co/agentic-co-harness), the
   standalone execution runtime, from its P2 (adopting this schema in place
   of its own `VERIFY_KEYS`/`validate_verify`).
@@ -32,7 +32,8 @@ importing the other. This package is that agreement.
 |---|---|
 | `asop.errors` | `Refusal` — the one exception type: a stable machine `code`, a human `message`, and a `remediation` sentence. Every refusal in this package (and, by re-export, in the plane) is one of these. |
 | `asop.gates` | The unified gate schema. `validate_gate(payload, *, require=(), max_park_seconds_ceiling=None)` normalises a `deterministic` / `judged` / `human` gate — merging the plane's park-clock fields with the Harness's staged-check and runtime-hint fields into one shape — or refuses. `validate_attestation`, `attestation_passes`, `retry_decision` cover the evidence side. |
-| `asop.sop` | The SOP **record** contract: `SopStatus`, the `SOP` dataclass, `validate_fields`. Not the store — drafting, revising, activating, and instantiating work from a template is plane- or harness-side policy, layered on top of this record shape. |
+| `asop.sop` | The SOP **record** contract: `SopStatus`, the `SOP` and `ASOP` dataclasses, `validate_fields` / `validate_asop` / `validate_step`. Not the store — keeping versions, locking a file, and filing runs from a template is plane- or harness-side machinery, layered on top of this record shape. |
+| `asop.revision` | The **revision policy** of [`ASOP.md` §6.4](ASOP.md): the four rules an agent reviser is bound by — protected tags, the human ratchet (absolute on a first activation), no-undoing-a-human, and the `human_only` verbs — plus the operator declarations they read (`AGENTCO_HUMANS`, `AGENTCO_PROTECTED_TAGS`). Shared rather than plane-side because a rule that held on the plane and not in the runtime executing its work would be a rule with a door beside it. Which verb calls which rule stays each side's own wiring. |
 | `asop.refusals` | The refusal-code vocabulary — every machine-readable `code` a `Refusal` carries across the reference plane, named once with a one-line meaning, for a reader scanning codes rather than call sites. |
 
 ## The gate schema

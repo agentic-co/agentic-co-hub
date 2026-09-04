@@ -1,6 +1,7 @@
 """The identity every shim rests on, asserted from the plane side.
 
-`agentco/errors.py`, `agentco/gates.py` and `agentco/sop.py` are thin wrappers
+`agentco/errors.py`, `agentco/gates.py`, `agentco/sop.py` and `agentco/policy.py`
+are thin wrappers
 over `asop`. The one thing that makes that safe is that they re-export the
 SAME objects rather than redefining them: a `try/except Refusal` written
 against either side catches the other's. Three docstrings claimed this file
@@ -13,8 +14,9 @@ import pytest
 
 import asop.errors
 import asop.gates
+import asop.revision
 import asop.sop
-from agentco import errors, gates, sop
+from agentco import errors, gates, policy, sop
 
 
 def test_refusal_is_one_class_not_two():
@@ -44,3 +46,21 @@ def test_the_gate_vocabulary_is_shared_by_identity():
 def test_the_sop_record_is_shared_by_identity():
     assert sop.SOP is asop.sop.SOP
     assert sop.SopStatus is asop.sop.SopStatus
+
+
+def test_the_revision_policy_is_shared_by_identity():
+    """The rules a harness enforces are the rules this plane enforces.
+
+    Two implementations would be two policies the moment one of them was
+    edited, and the edit that mattered would be the one nobody made on the
+    other side.
+    """
+    assert policy.RevisionPolicyError is asop.revision.RevisionPolicyError
+    assert policy.check_asop_revision is asop.revision.check_asop_revision
+    assert policy.require_human is asop.revision.require_human
+    assert policy.RULE_PROTECTED is asop.revision.RULE_PROTECTED
+
+
+def test_a_policy_refusal_raised_by_the_contract_is_caught_as_the_plane_error():
+    with pytest.raises(policy.RevisionPolicyError):
+        raise asop.revision.RevisionPolicyError(asop.revision.RULE_RATCHET, "from the contract")
