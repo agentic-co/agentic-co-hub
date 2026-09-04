@@ -219,6 +219,15 @@ stopped resolving would make every outcome counted against it unreadable.
 Revision and activation are policed when the reviser is an agent
 (`agentco/policy.py`), now per step.
 
+A step carrying `money` or `irreversible` must be gated `human`, refused at
+authoring by the record itself — v2 enforced that at filing, and the tag half
+was lost when v3 tied the human-gate rule to a role's kind. The record knows
+those two names; a registry that ADDS to the set through
+`AGENTCO_PROTECTED_TAGS` enforces its own additions plane-side, because the
+contract cannot enforce a set it was never told. Without that half, an added
+tag would freeze a step against agent edits while still letting anyone author
+it closable by nobody, which is the half that matters.
+
 The protected rule is **absolute**, not differential: if any step of the
 version being revised — or of the version that would result — carries `money`
 or `irreversible`, an agent may not revise or activate it at all. A
@@ -235,7 +244,10 @@ a human step is the same demotion by deletion. That leaves one hole, which a
 being activated is also the baseline, so every differential check is vacuous
 and an agent could put a brand-new draft with a human step straight into
 service. On a first activation the ratchet is absolute too — agents may draft,
-only humans activate (§6.4).
+only humans activate (§6.4). It is checked after the protected rule, because
+every protected step is human-gated now, so both fire on the same step and
+only one of them names why: "this step is money" is the answer, "this step is
+human-gated" is a consequence of it.
 
 No agent revision moves a field into a state a human moved it away from. Who
 is human is what the operator declared in `AGENTCO_HUMANS` — never inferred,

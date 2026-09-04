@@ -394,7 +394,7 @@ class SopLibrary:
         `agent` — fail closed, the same reading the policy gives an actor the
         operator never declared human.
         """
-        validated = validate_asop({"title": title, **body})
+        validated = self._validated(validate_asop({"title": title, **body}))
         asop = self._compose(
             asop_id=f"asop-{uuid.uuid4().hex[:8]}",
             version=1,
@@ -407,6 +407,41 @@ class SopLibrary:
             existing.append(asop)
             self._write_all(existing, self.quarantined)
         return asop
+
+    def _validated(self, body: dict) -> dict:
+        """`validate_asop`, plus the half of §6.4 only this registry can enforce.
+
+        The record refuses a step carrying a DEFAULT protected tag (`money`,
+        `irreversible`) whose gate is not `human` — that is a rule the contract
+        can state, because it knows those two names. It cannot enforce a set it
+        was never told, and a registry may ADD to the set through
+        `AGENTCO_PROTECTED_TAGS`. So the extension is enforced here, on the
+        side that holds it.
+
+        Without this, `AGENTCO_PROTECTED_TAGS=payroll` would freeze a
+        `payroll` step against agent revision while still letting anyone author
+        it with a deterministic gate — protected against being changed, and
+        unprotected against being closed by nobody, which is the half that
+        matters.
+        """
+        from asop.sop import DEFAULT_PROTECTED_TAGS
+
+        extended = frozenset(self.protected_tags) - DEFAULT_PROTECTED_TAGS
+        if not extended:
+            return body
+        for step in body.get("steps") or []:
+            carried = sorted(frozenset(step.get("tags") or ()) & extended)
+            if carried and (step.get("gate") or {}).get("kind") != "human":
+                raise SopContractError(
+                    f"step {step['step']}: carries protected tag(s) {carried}, which "
+                    f"this registry declared protected ({policy.PROTECTED_TAGS_ENV_VAR}), "
+                    f"so its gate must be kind 'human'. The tag means a person looks "
+                    f"before this step counts as done, and a deterministic or judged "
+                    f"gate is precisely nobody looking. The record enforces this for "
+                    f"{sorted(DEFAULT_PROTECTED_TAGS)}; a set it was never told is this "
+                    f"registry's to enforce."
+                )
+        return body
 
     @staticmethod
     def _compose(*, asop_id: str, version: int, validated: dict,
@@ -477,7 +512,7 @@ class SopLibrary:
             if title is not None:
                 carried["title"] = title
             carried.update({k: v for k, v in body.items() if v is not None})
-            validated = validate_asop(carried)
+            validated = self._validated(validate_asop(carried))
 
             new = self._compose(
                 asop_id=asop_id,

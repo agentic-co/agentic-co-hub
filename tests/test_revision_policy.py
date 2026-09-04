@@ -66,11 +66,43 @@ DETERMINISTIC_GATE = {"kind": "deterministic", "check": "pytest -q",
                       "max_park_seconds": 900, "on_timeout": "fail"}
 HUMAN_GATE = {"kind": "human", "check": "the owner signs off in chat", "verifier": "dana",
               "max_park_seconds": 86400, "on_timeout": "escalate", "escalate_to": "dana"}
+JUDGED_GATE = {"kind": "judged", "check": "a reviewer reads the diff",
+               "max_park_seconds": 900, "on_timeout": "escalate", "escalate_to": "dana"}
+PROTECTED = frozenset({"money", "irreversible"})
 
 
 # --------------------------------------------------------------------------- #
 # fixtures
 # --------------------------------------------------------------------------- #
+
+
+def a_body(*, executor=AGENT, **over) -> dict:
+    """The BODY of a single-step ASOP, without filing it.
+
+    Split out of `a_step` so a test can hand a deliberately-wrong shape to
+    `create()` and watch it refuse — `a_step` files, which is exactly what
+    those tests are asserting cannot happen.
+    """
+    step_keys = {"name", "role", "purpose", "entry_check", "inputs", "definition_of_done",
+                 "validation", "write_back", "common_mistakes", "tags", "gate", "after"}
+    # The gate follows from what the step IS, in both directions the record
+    # now enforces: a human ROLE carries a human gate (§3.6), and so does a
+    # step carrying a protected TAG (§6.4) — `money` means a person looks
+    # before it counts as done, and a deterministic gate is nobody looking.
+    protected = frozenset(t.lower() for t in over.get("tags") or ()) & PROTECTED
+    step = {
+        "name": "reproduce",
+        "role": "implementer",
+        "purpose": "reproduce the defect before anyone touches a fix",
+        "definition_of_done": "the failure is observed on a copy of the data",
+        "gate": HUMAN_GATE if (executor == HUMAN or protected) else DETERMINISTIC_GATE,
+    }
+    for key in list(over):
+        if key in step_keys:
+            step[key] = over.pop(key)
+    body = {"roles": {"implementer": {"kind": executor}}, "steps": [step]}
+    body.update(over)
+    return body
 
 
 def a_step(library, *, executor=AGENT, **over):
@@ -79,21 +111,8 @@ def a_step(library, *, executor=AGENT, **over):
     carries a human gate by construction, the step's gate too. Every other
     v2 field (`purpose`, `tags`, `common_mistakes`, `inputs`, ...) targets
     the step directly, same as it targeted the whole record in v2."""
-    step_keys = {"name", "role", "purpose", "entry_check", "inputs", "definition_of_done",
-                "validation", "write_back", "common_mistakes", "tags", "gate", "after"}
-    step = {
-        "name": "reproduce",
-        "role": "implementer",
-        "purpose": "reproduce the defect before anyone touches a fix",
-        "definition_of_done": "the failure is observed on a copy of the data",
-        "gate": HUMAN_GATE if executor == HUMAN else DETERMINISTIC_GATE,
-    }
-    for key in list(over):
-        if key in step_keys:
-            step[key] = over.pop(key)
-    body = {"roles": {"implementer": {"kind": executor}}, "steps": [step]}
-    body.update(over)
-    return library.create("defect: reproduce", author="dana", author_kind=HUMAN, **body)
+    return library.create("defect: reproduce", author="dana", author_kind=HUMAN,
+                          **a_body(executor=executor, **over))
 
 
 def _two_step(library, *, second_kind=AGENT, **over):
@@ -182,8 +201,12 @@ def test_an_agent_cannot_add_or_remove_a_protected_tag(library):
     freeze it against every other agent, and only a human decides what is
     protected."""
     plain = a_step(library)
+    # The proposal carries a human gate alongside the tag, so it is a WELL-FORMED
+    # record — the record's own rule (a protected step is human-gated) would
+    # otherwise refuse it first, and this test would be asserting the contract
+    # rather than the policy. What is refused here is who asked.
     with pytest.raises(RevisionPolicyError) as caught:
-        by_agent(library, plain.asop_id, tags=["irreversible"])
+        by_agent(library, plain.asop_id, tags=["irreversible"], gate=HUMAN_GATE)
     refused(caught, RULE_PROTECTED)
     assert "add or remove" in str(caught.value)
 
@@ -213,7 +236,9 @@ def test_a_registry_adds_protected_tags_and_cannot_remove_the_defaults(library):
     assert policy.protected_tags_from_env("") == DEFAULT_PROTECTED_TAGS
 
     library.protected_tags = library.protected_tags | {"pii"}
-    sop = a_step(library, tags=["pii"])
+    # Human-gated for the same reason `money` is, and refused by the PLANE
+    # rather than the record: `pii` is a name the contract was never told.
+    sop = a_step(library, tags=["pii"], gate=HUMAN_GATE)
     with pytest.raises(RevisionPolicyError) as caught:
         by_agent(library, sop.asop_id, purpose="x")
     refused(caught, RULE_PROTECTED)
@@ -508,17 +533,46 @@ def test_a_human_roles_step_must_carry_a_human_gate(library):
     assert sop.steps[0].gate["kind"] == "human"
 
 
-# v2 had two more tests here:
+def test_a_protected_step_must_be_gated_by_a_person(library):
+    """v2's filing rule, restored where the gate is authored.
+
+    v2 refused to INSTANTIATE a `money`/`irreversible` step without a human
+    gate. The first v3 port lost that half — the human-gate requirement was
+    tied to a step's ROLE kind only — so a `money` step with a deterministic
+    gate was accepted, and the only thing between it and an unattended close
+    was who activated the version. The record refuses it now, at authoring,
+    which is where the gate is written.
+    """
+    body = a_body(tags=["money"], gate=DETERMINISTIC_GATE)
+    with pytest.raises(SopContractError) as caught:
+        library.create("defect", **body)
+    assert "money" in str(caught.value)
+    assert "human" in str(caught.value)
+
+    # Judged is not a substitute: a route is not a person.
+    with pytest.raises(SopContractError):
+        library.create("defect", **a_body(tags=["irreversible"], gate=JUDGED_GATE))
+
+    # And the honest shape is accepted.
+    sop = library.create("defect", **a_body(tags=["money"], gate=HUMAN_GATE))
+    assert sop.steps[0].gate["kind"] == "human"
+
+
+def test_a_registry_enforces_the_protected_tags_it_added_itself(library):
+    """The record enforces the DEFAULT set, because those are the two names it
+    knows. A registry may add its own through `AGENTCO_PROTECTED_TAGS`, and a
+    set the contract was never told is this registry's to enforce — otherwise
+    an added tag freezes a step against agent edits while still letting anyone
+    author it closable by nobody, which is the half that matters."""
+    library.protected_tags = frozenset({"money", "irreversible", "payroll"})
+    with pytest.raises(SopContractError) as caught:
+        library.create("payroll run", **a_body(tags=["payroll"], gate=DETERMINISTIC_GATE))
+    assert "payroll" in str(caught.value)
+    assert library.create("payroll run", **a_body(tags=["payroll"], gate=HUMAN_GATE))
+
+
+# v2 had one more test here:
 #
-#   * a step tagged `irreversible`/`money` had to be INSTANTIATED with a
-#     human gate. There is no v3 equivalent — `agentco.policy` and
-#     `validate_asop` tie the human-gate requirement to a step's ROLE kind
-#     only (ASOP.md §3.6), never to its tags. A protected tag now freezes a
-#     step against agent EDITS (rule 1, above) but does not by itself force
-#     a human gate; a `money`-tagged step with a deterministic gate is
-#     accepted. This looked like a real gap under this port and is worth a
-#     second look, not something this file should silently encode as
-#     correct.
 #   * an "unclassified" step (no `executor` set) could be instantiated with
 #     `verify=None`. v3 has no such state: `gate` is a required field on
 #     every step from the moment it is authored
@@ -579,7 +633,7 @@ def test_over_http_the_declared_human_passes_and_the_agent_is_refused(tmp_path):
     client = _client(tmp_path, humans=["dana"])
     step = {"name": "apply", "role": "implementer", "purpose": "apply the fix to the copy first",
             "definition_of_done": "the copy reflects the fix", "tags": ["money"],
-            "gate": DETERMINISTIC_GATE}
+            "gate": HUMAN_GATE}
     created = _post(client, "/sops", "dana", {
         "title": "datafix: apply",
         "roles": {"implementer": {"kind": "agent"}},
@@ -611,7 +665,7 @@ def test_over_http_an_undeclared_registry_polices_everyone(tmp_path):
     """Fail closed: no `humans` means no humans, and dana is an agent too."""
     client = _client(tmp_path)
     step = {"name": "apply", "role": "implementer", "purpose": "p", "definition_of_done": "done",
-            "tags": ["irreversible"], "gate": DETERMINISTIC_GATE}
+            "tags": ["irreversible"], "gate": HUMAN_GATE}
     sop = _post(client, "/sops", "dana", {
         "title": "t", "roles": {"implementer": {"kind": "agent"}}, "steps": [step],
     }).json()["sop"]

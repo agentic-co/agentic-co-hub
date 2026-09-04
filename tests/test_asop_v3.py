@@ -495,16 +495,10 @@ def test_an_agent_may_not_demote_a_human_step_to_an_agent_one(library):
 
 
 def test_an_agent_may_not_touch_a_protected_step(library):
-    body = feature_dev_body(
-        roles={"implementer": {"kind": "agent"}},
-        constraints=[],
-        steps=[{"name": "pay", "role": "implementer", "purpose": "pay the vendor",
-                "tags": ["money"], "gate": DETERMINISTIC_GATE}],
-    )
-    asop = library.create("pay", **body)
+    asop = library.create("pay", **_pay_body())
     library.activate(asop.asop_id, 1, author="carol", author_kind="human")
-    steps = [{"name": "pay", "role": "implementer", "purpose": "skip the approval",
-              "tags": ["money"], "gate": DETERMINISTIC_GATE}]
+    steps = [{"name": "pay", "role": "payer", "purpose": "skip the approval",
+              "tags": ["money"], "gate": HUMAN_GATE}]
     with pytest.raises(RevisionPolicyError) as exc:
         library.revise(asop.asop_id, steps=steps, author="alice", author_kind="agent")
     assert exc.value.rule == "protected"
@@ -627,8 +621,11 @@ def _pay_body(**over) -> dict:
         inputs=[],
         roles={"payer": {"kind": "agent"}},
         constraints=[],
+        # Human-gated because it is tagged `money`: the record requires it
+        # (ASOP.md §6.4), and so does the intent — a person looks before a
+        # payment counts as done.
         steps=[{"name": "pay", "role": "payer", "purpose": "pay the vendor",
-                "tags": ["money"], "gate": DETERMINISTIC_GATE}],
+                "tags": ["money"], "gate": HUMAN_GATE}],
     )
     body.update(over)
     return body

@@ -472,11 +472,6 @@ def check_asop_revision(
     """
     if reviser_kind == HUMAN:
         return
-    if first_activation:
-        # Absolute, then fall through: activating an OLDER version while none
-        # is active also lands here with a real diff to check, so the
-        # differential rules below still have work to do.
-        _refuse_first_activation(proposed, protected_tags)
     if reviser_kind != AGENT:
         raise ValueError(f"reviser_kind must be one of {KINDS}, got {reviser_kind!r}")
 
@@ -519,6 +514,16 @@ def check_asop_revision(
                     f"what runs around a `money` step changes what that step does.",
                 )
 
+    if first_activation:
+        # AFTER the protected checks, deliberately. The record now requires
+        # every protected step to be gated `human`, so both rules fire on the
+        # same step and only one of them names WHY — "this step is money" is
+        # the answer; "this step is human-gated" is a consequence of it.
+        #
+        # It runs before the differential ratchet rather than instead of it:
+        # activating an OLDER version while none is active also lands here,
+        # with a real diff for the rules below to check.
+        _refuse_first_activation(proposed, protected_tags)
     for key in sorted(before, key=str):
         old = before[key]
         was_human = _step_class(old) == HUMAN or _role_class(baseline, old) == HUMAN
