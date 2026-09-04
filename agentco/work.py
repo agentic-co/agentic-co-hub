@@ -1069,18 +1069,44 @@ class Queue:
                  adjudicators: Optional[Sequence[str]] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # The operator's declared verifiers (`AGENTCO_VERIFIERS`). Declared,
-        # the `verify` capability is bound to these identities on every claim
-        # and every verdict; undeclared, it stays self-asserted and the status
-        # report says so. Injectable for tests.
+        self.declare(verifiers=verifiers, humans=humans, adjudicators=adjudicators)
+        # Raw BYTES, not str — a line that failed to decode has no faithful
+        # string form. Read by a health check, and carried through every
+        # write so a quarantined line is preserved rather than deleted.
+        self.quarantined: list[bytes] = []
+
+    def declare(self, *, verifiers: Optional[Sequence[str]] = None,
+                humans: Optional[Sequence[str]] = None,
+                adjudicators: Optional[Sequence[str]] = None) -> None:
+        """Every operator declaration this queue reads, set in ONE place.
+
+        `SqlQueue` opens a database instead of a file and so does not call
+        `__init__` above. A declaration added there and forgotten here is
+        absent on one backend only, and surfaces as an `AttributeError` from
+        inside the code that was supposed to enforce it — not as a refusal,
+        and not on the backend most tests run first. That happened twice
+        (`humans`/`adjudicators` here, `actors` on the library) before the
+        declarations moved into a method both constructors call.
+
+        Every parameter is keyword-only, and `tests/test_asop_v3.py` reads
+        this signature to assert each one is present on every backend — so
+        adding a declaration here extends that test without anybody
+        remembering to.
+
+        `verifiers` (`AGENTCO_VERIFIERS`): declared, the `verify` capability
+        is bound to these identities on every claim and every verdict;
+        undeclared, it stays self-asserted and the status report says so.
+
+        `humans` (`AGENTCO_HUMANS`): the same declaration the revision policy
+        reads, and half of who may adjudicate.
+
+        `adjudicators` (`AGENTCO_ADJUDICATORS`): the opt-in that lets a ROUTE
+        judge a divergence. See `policy` for why this one fails closed and
+        the other two do not.
+        """
         self.verifiers: frozenset[str] = (
             frozenset(verifiers) if verifiers is not None else policy.verifiers_from_env()
         )
-        # Who may judge a divergence (ASOP v3 §6.1). `humans` is the same
-        # declaration the revision policy reads; `adjudicators` is the opt-in
-        # that lets a ROUTE do it. Undeclared adjudicators means humans only —
-        # unlike verifiers, this one fails closed, because what degrades when
-        # it fails open is the evidence the procedures are revised from.
         self.humans: frozenset[str] = (
             frozenset(humans) if humans is not None else policy.humans_from_env()
         )
@@ -1088,10 +1114,6 @@ class Queue:
             frozenset(adjudicators) if adjudicators is not None
             else policy.adjudicators_from_env()
         )
-        # Raw BYTES, not str — a line that failed to decode has no faithful
-        # string form. Read by a health check, and carried through every
-        # write so a quarantined line is preserved rather than deleted.
-        self.quarantined: list[bytes] = []
 
     # -- storage ---------------------------------------------------------
 

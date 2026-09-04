@@ -35,6 +35,27 @@ default fails closed — an undeclared registry treats every reviser as an agent
 and polices all of them — because the alternative, an agent that becomes
 human by asserting it, would make the whole policy a suggestion.
 
+**What each UNDECLARED set means, in one place, because they differ and the
+difference is deliberate.** Read all three before "fixing" any one of them to
+match another:
+
+- `AGENTCO_HUMANS` — undeclared polices EVERYONE. An agent that could become
+  human by asserting it makes the policy a suggestion.
+- `AGENTCO_VERIFIERS` — undeclared checks NOTHING, and `verify` stays
+  self-asserted. The alternative is a registry where nobody may verify, which
+  does not become safer: every judged gate then resolves on its clock, which
+  is work approved by a timer.
+- `AGENTCO_ADJUDICATORS` — undeclared allows only declared humans. This one
+  fails closed where verifiers fail open, because what degrades when an agent
+  grades the loop that revises its own procedures is the evidence base rather
+  than throughput, and nobody notices.
+- the registry's ACTORS, from the key file (`SopLibrary.declare`) — undeclared
+  checks NOTHING. An empty key file is what an in-process caller, a
+  JSONL-only install and every library test have, so refusing every run on
+  its absence would be refusing on missing configuration rather than on a
+  fact — and it would break the standalone and in-process cases the contract
+  requires to work.
+
 Every refusal names the rule and the field so the caller learns what to change
 rather than that something was wrong. A refused revision writes nothing.
 """

@@ -19,6 +19,8 @@ is defended:
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from agentco.errors import Refusal
@@ -977,11 +979,30 @@ def test_the_check_reaches_a_nested_asops_roles_too(library, queue):
     assert queue.list() == []
 
 
-def test_every_backend_carries_the_actor_declaration(library):
-    """`SqlSopLibrary` opens a database instead of a file and does not call
-    the base `__init__`, so a declaration added there and forgotten here is
-    absent on one backend only — an AttributeError from inside the code meant
-    to enforce it. That has happened twice; `declare()` is why it should not
-    happen again, and this is what says so."""
-    assert isinstance(library.actors, frozenset)
-    assert isinstance(library.protected_tags, frozenset)
+def test_every_declaration_is_present_on_every_backend(library, queue):
+    """The class of bug this closes, after three occurrences.
+
+    `SqlQueue` and `SqlSopLibrary` open a database instead of a file and do
+    not call their bases' `__init__`. A declaration added to a base and
+    forgotten in the subclass is therefore absent on ONE backend only, and
+    surfaces as an `AttributeError` from inside the code that was supposed to
+    enforce it — not as a refusal, and not on the backend most tests run
+    first. It happened to `humans`, to `adjudicators`, and to `actors`.
+
+    So this does not list the declarations. It READS them off `declare()`'s
+    keyword-only signature, which is the one place they are now set, and
+    checks each is a populated attribute on both stores. Adding a declaration
+    extends this test without anybody remembering to — which is the only
+    version of this test worth having, since remembering is the thing that
+    failed three times.
+    """
+    for store in (queue, library):
+        params = inspect.signature(store.declare).parameters
+        declared = [name for name, p in params.items() if p.kind is p.KEYWORD_ONLY]
+        assert declared, f"{type(store).__name__}.declare takes no declarations"
+        for name in declared:
+            assert hasattr(store, name), (
+                f"{type(store).__name__} has no {name!r}: it is set by `declare()` and "
+                f"this backend's __init__ did not call it"
+            )
+            assert isinstance(getattr(store, name), frozenset)

@@ -335,8 +335,12 @@ class SopLibrary:
         # An empty key file is what an in-process caller, a JSONL-only
         # install and every library test have, and refusing every run on the
         # absence of a registry would be refusing on missing configuration
-        # rather than on a fact. Where a registry IS declared, an unknown
-        # binding is a fact.
+        # rather than on a fact — it would break the standalone and
+        # in-process cases the contract requires to work. Where a registry IS
+        # declared, an unknown binding is a fact. The four declaration
+        # postures are stated side by side in `agentco/policy.py`'s module
+        # docstring; they differ deliberately, so read all four before
+        # changing this one to match another.
         self.actors: frozenset[str] = (
             frozenset(actors) if actors is not None else frozenset(_declared_actors())
         )
