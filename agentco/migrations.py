@@ -30,15 +30,26 @@ be one query, not an inference from which tables happen to be present.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import NamedTuple, Optional, Sequence
+from typing import Any, Callable, NamedTuple, Optional, Sequence
 
 
 class Migration(NamedTuple):
     version: int
     name: str
     statements: tuple[str, ...]
+    # A data move that SQL cannot express honestly. `backfill` runs inside the
+    # same transaction as `statements`, immediately after them, and receives
+    # the connection. It exists for exactly one shape: a migration whose new
+    # rows are a FUNCTION of the old ones rather than a copy of them — the v2
+    # SOP → v3 ASOP upgrade has to synthesise a gate the old record never
+    # carried, and expressing that decision as nested `json_object()` calls in
+    # two SQL dialects would put the reasoning where nobody reads it and the
+    # bug where nobody finds it. Still one transaction, so the file is either
+    # at version N or at N-1.
+    backfill: Optional[Callable[[Any], None]] = None
     # A Postgres-dialect rewrite of `statements`, for the migrations where the
     # SQLite DDL is not portable — `AUTOINCREMENT` (Postgres: `GENERATED
     # ALWAYS AS IDENTITY`) and `INSERT OR IGNORE` (Postgres: `ON CONFLICT ...
@@ -455,6 +466,128 @@ _0008 = ("ALTER TABLE work_items ADD COLUMN ordinal INTEGER",)
 _0008_pg = ("ALTER TABLE work_items ADD COLUMN ordinal BIGINT GENERATED ALWAYS AS IDENTITY",)
 
 
+# --------------------------------------------------------------------------- #
+# 0009 — the ASOP v3 record: a sequence of steps, each with its own gate.
+#
+# A NEW table rather than columns on `sops`, for two reasons that both come
+# down to the grain changing. `sops.inputs` is prose ("what you need in hand")
+# and `asops.inputs` is a list of declared input NAMES a run must supply —
+# same word, different question, and one column cannot hold both without a
+# reader having to know which generation wrote the row. And half of `sops`'
+# columns (entry_check, definition_of_done, validation, write_back,
+# common_mistakes, executor, tags) moved ONTO the step, so they would have had
+# to be nulled out in place, destroying the legacy record this migration is
+# obliged to keep readable.
+#
+# `sops` is therefore left exactly as it is — every row still there, still
+# byte-identical — and `_backfill_legacy_sops` COPIES each row forward as a
+# one-step ASOP. What the plane reads afterwards is `asops`; `sops` is the
+# provenance, and the thing a rollback would still have.
+#
+# `steps` is NOT NULL DEFAULT '[]' for the reason `tags` was in 0006: the JSON
+# columns are decoded unconditionally on read and a NULL would quarantine the
+# row rather than fail loudly.
+# --------------------------------------------------------------------------- #
+
+_0009 = (
+    """
+    CREATE TABLE IF NOT EXISTS asops (
+        asop_id       TEXT    NOT NULL,
+        version       INTEGER NOT NULL,
+        title         TEXT    NOT NULL,
+        status        TEXT    NOT NULL,
+        task_type     TEXT,
+        purpose       TEXT,
+        "trigger"     TEXT,
+        inputs        TEXT    NOT NULL DEFAULT '[]',
+        roles         TEXT    NOT NULL DEFAULT '{}',
+        "constraints" TEXT    NOT NULL DEFAULT '[]',
+        steps         TEXT    NOT NULL DEFAULT '[]',
+        author        TEXT,
+        author_kind   TEXT,
+        proposals     TEXT    NOT NULL DEFAULT '[]',
+        superseded_by INTEGER,
+        created_at    TEXT    NOT NULL,
+        unknown       TEXT    NOT NULL DEFAULT '{}',
+        PRIMARY KEY (asop_id, version)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS asops_status ON asops (status)",
+)
+
+
+def _backfill_legacy_sops(conn) -> None:
+    """Copy every v2 `sops` row forward as a one-step ASOP.
+
+    Runs inside migration 9's transaction. `upgrade_legacy` owns the one
+    decision this cannot avoid making — a v2 record carried no gate, and a v3
+    step must have one — and its docstring says why it fails closed to a human
+    gate rather than inventing a check nobody wrote.
+
+    A row this build cannot model is SKIPPED, not fatal: it stays in `sops`,
+    where it already was, and the migration does not take the whole registry
+    down over one row a newer writer left behind.
+    """
+    from agentco.sop import upgrade_legacy
+    from asop.sop import SOP, SopStatus
+
+    existing = {(r[0], r[1]) for r in conn.execute("SELECT asop_id, version FROM asops")}
+    rows = conn.execute("SELECT * FROM sops").fetchall()
+    for row in rows:
+        data = dict(row)
+        if (data.get("sop_id"), data.get("version")) in existing:
+            continue
+        try:
+            legacy = SOP(
+                sop_id=data["sop_id"],
+                version=data["version"],
+                title=data["title"],
+                status=SopStatus(data["status"]),
+                purpose=data.get("purpose"),
+                trigger=data.get("trigger"),
+                entry_check=data.get("entry_check"),
+                inputs=data.get("inputs"),
+                definition_of_done=data.get("definition_of_done"),
+                validation=data.get("validation"),
+                write_back=data.get("write_back"),
+                common_mistakes=json.loads(data.get("common_mistakes") or "[]"),
+                next_sop=data.get("next_sop"),
+                executor=data.get("executor"),
+                tags=json.loads(data.get("tags") or "[]"),
+                author=data.get("author"),
+                author_kind=data.get("author_kind"),
+                proposals=json.loads(data.get("proposals") or "[]"),
+                superseded_by=data.get("superseded_by"),
+                created_at=data["created_at"],
+            )
+            asop = upgrade_legacy(legacy)
+        except (KeyError, TypeError, ValueError):
+            continue
+        conn.execute(
+            'INSERT INTO asops (asop_id, version, title, status, task_type, purpose, '
+            '"trigger", inputs, roles, "constraints", steps, author, author_kind, '
+            'proposals, superseded_by, created_at, unknown) '
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                asop.asop_id, asop.version, asop.title, asop.status.value, asop.task_type,
+                asop.purpose, asop.trigger,
+                json.dumps([dict(r) for r in asop.inputs]),
+                json.dumps(asop.roles),
+                json.dumps(asop.constraints),
+                json.dumps([_asdict(s) for s in asop.steps]),
+                asop.author, asop.author_kind,
+                json.dumps(asop.proposals), asop.superseded_by, asop.created_at,
+                data.get("unknown") or "{}",
+            ),
+        )
+
+
+def _asdict(step) -> dict:
+    from dataclasses import asdict as _dc_asdict
+
+    return _dc_asdict(step)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -464,6 +597,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(6, "sop-class-tags-authorship", _0006),
     Migration(7, "sop-proposals", _0007),
     Migration(8, "work-items-insertion-order", _0008, pg_statements=_0008_pg),
+    Migration(9, "asop-v3-records", _0009, backfill=_backfill_legacy_sops),
 )
 
 
@@ -536,6 +670,11 @@ def apply(conn, pending: Sequence[Migration] = MIGRATIONS) -> list[int]:
                 if not already:
                     for statement in statements:
                         conn.execute(statement)
+                    if migration.backfill is not None:
+                        # Inside the same BEGIN IMMEDIATE as the DDL above, so
+                        # the schema and the data it derives arrive together or
+                        # neither does.
+                        migration.backfill(conn)
                     conn.execute(
                         "INSERT INTO schema_migrations(version, name, applied_at) "
                         "VALUES (?, ?, ?)",
