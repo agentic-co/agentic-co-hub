@@ -32,9 +32,18 @@ WORKDIR /app
 
 # Dependency layer first — the manifest changes far less often than the code,
 # so an ordinary source edit does not reinstall FastAPI.
+#
+# `agentco-asop` is a workspace member, not a release on an index. `pip` reads
+# `[project] dependencies` and nothing else: `[tool.uv.sources]` is uv's, so
+# pip resolves the name against PyPI, finds nothing, and the build dies on this
+# layer. Installing the contract package from the tree first satisfies the
+# requirement by the only route pip has. It is copied whole because hatchling
+# builds it from its own pyproject and README.
 COPY pyproject.toml README.md ./
 COPY agentco/__init__.py agentco/__init__.py
-RUN pip install --no-cache-dir ".[server,mcp]"
+COPY packages ./packages
+RUN pip install --no-cache-dir ./packages/asop \
+ && pip install --no-cache-dir ".[server,mcp]"
 
 COPY agentco ./agentco
 COPY tools ./tools
