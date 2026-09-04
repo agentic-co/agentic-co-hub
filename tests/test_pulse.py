@@ -21,6 +21,30 @@ from agentco.work import WorkStatus
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
+@pytest.fixture(autouse=True)
+def _anchor_now():
+    """Re-anchor `NOW` to real time before every test in this module.
+
+    `NOW` is read once at import — that is, at COLLECTION, before a single
+    test in the suite has run. The park clock a gate starts is stamped by
+    `verifiers.route_open_gates` from the real wall clock, but the sweep that
+    is supposed to notice it expiring is handed a synthetic `at(120)`. Those
+    two agree only while the suite is younger than the window: once more than
+    `max_park_seconds` of real time separates collection from this module,
+    `at(120)` lands BEFORE the park it is meant to be 120 seconds after, the
+    clock reads as unexpired, and `escalated` comes back empty.
+
+    It passed alone and failed in the full run for exactly that reason, which
+    is the signature that reads as flake and is not one — the assertion was
+    always true, the clock was wrong. Re-anchoring per test keeps `NOW` fixed
+    WITHIN a test (several of them insert `NOW` and then compare against it)
+    while keeping it next to the wall clock the production path stamps from.
+    """
+    global NOW
+    NOW = datetime.now(timezone.utc).replace(microsecond=0)
+    yield
+
+
 def at(seconds: float = 0) -> datetime:
     return NOW + timedelta(seconds=seconds)
 
