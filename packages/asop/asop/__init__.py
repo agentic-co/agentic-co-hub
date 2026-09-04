@@ -32,6 +32,7 @@ from asop.gates import (
 from asop.sop import (
     ASOP,
     ASOP_VERSION,
+    DEFAULT_PROTECTED_TAGS,
     MAX_DEPTH,
     MAX_STEPS,
     ROLE_KINDS,
@@ -64,6 +65,7 @@ __all__ = [
     "retry_decision",
     "ASOP",
     "ASOP_VERSION",
+    "DEFAULT_PROTECTED_TAGS",
     "Step",
     "MAX_STEPS",
     "MAX_DEPTH",

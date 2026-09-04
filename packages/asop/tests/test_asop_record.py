@@ -187,3 +187,27 @@ def test_an_asop_round_trips_through_json_with_its_steps():
     assert [s.name for s in back.steps] == [s.name for s in rec.steps]
     assert back.steps[4].gate["kind"] == "judged"
     assert back.status is SopStatus.ACTIVE
+
+
+# ------------------------------------------------------------------ protected tags (§6.4)
+
+def test_a_protected_tag_forces_a_human_gate_at_authoring():
+    """v2 enforced "money steps get a person's eyes" at filing. v3 tied the
+    human-gate rule to role kind and lost it: `tags: [money]` with a
+    deterministic gate was accepted, so the only thing standing between a
+    money step and an unattended close was who activated the version. The
+    record enforces it now, where the gate is authored (found by the plane
+    migration, 2026-09-04)."""
+    body = feature_dev()
+    body["steps"][2]["tags"] = ["money"]
+    with pytest.raises(SopContractError, match="protected tag.*must be kind 'human'"):
+        validate_asop(body)
+    body["steps"][2]["gate"] = HUMAN
+    assert validate_asop(body)["steps"][2]["tags"] == ["money"]
+
+
+def test_the_protected_check_folds_case():
+    body = feature_dev()
+    body["steps"][2]["tags"] = ["Irreversible"]
+    with pytest.raises(SopContractError, match="protected tag"):
+        validate_asop(body)
