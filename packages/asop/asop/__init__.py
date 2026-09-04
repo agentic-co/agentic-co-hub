@@ -29,7 +29,21 @@ from asop.gates import (
     validate_attestation,
     validate_gate,
 )
-from asop.sop import SOP, SopContractError, SopError, SopStatus, validate_fields
+from asop.sop import (
+    ASOP,
+    ASOP_VERSION,
+    MAX_DEPTH,
+    MAX_STEPS,
+    ROLE_KINDS,
+    SOP,
+    SopContractError,
+    SopError,
+    SopStatus,
+    Step,
+    validate_asop,
+    validate_fields,
+    validate_step,
+)
 
 SCHEMA_VERSION = 1
 
@@ -48,6 +62,14 @@ __all__ = [
     "validate_attestation",
     "attestation_passes",
     "retry_decision",
+    "ASOP",
+    "ASOP_VERSION",
+    "Step",
+    "MAX_STEPS",
+    "MAX_DEPTH",
+    "ROLE_KINDS",
+    "validate_asop",
+    "validate_step",
     "SOP",
     "SopStatus",
     "SopError",
