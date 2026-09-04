@@ -119,10 +119,14 @@ _SOP_JSON_COLUMNS = frozenset({"common_mistakes", "tags", "proposals"})
 
 # The v3 record. Every `ASOP` field is a column of the same name, asserted at
 # import for the same reason `WORK_COLUMNS` is: a field with no column does not
-# fail, it silently does not persist. `SOP_COLUMNS` stays above because the
-# `sops` table stays — migration 0009 copies its rows forward as one-step
-# ASOPs rather than rewriting them in place, so the legacy record is still
-# there if a rollback ever needs it.
+# fail, it silently does not persist.
+#
+# `SOP_COLUMNS` stays above even though nothing reads or writes the `sops`
+# table any more. The table stays — migration 0009 copies its rows forward as
+# one-step ASOPs rather than rewriting them in place, so the legacy record is
+# still there if a rollback ever needs it — and the assertion below is what
+# keeps this file's description of that table true while it sits there. The
+# row codecs that used it are gone with their callers.
 ASOP_COLUMNS: tuple[str, ...] = (
     "asop_id",
     "version",
@@ -605,28 +609,6 @@ class SqlQueue(_SqlBacked, Queue):
 # --------------------------------------------------------------------------- #
 # SOPs
 # --------------------------------------------------------------------------- #
-
-
-def _sop_to_row(sop: SOP) -> tuple:
-    values = []
-    for column in SOP_COLUMNS:
-        value = getattr(sop, column)
-        if column == "status":
-            value = sop.status.value
-        elif column in _SOP_JSON_COLUMNS:
-            value = json.dumps(value or [])
-        values.append(value)
-    return tuple(values)
-
-
-def _row_to_sop(row: sqlite3.Row) -> SOP:
-    data = dict(json.loads(row["unknown"] or "{}"))
-    for column in SOP_COLUMNS:
-        value = row[column]
-        data[column] = json.loads(value) if column in _SOP_JSON_COLUMNS else value
-    data["status"] = SopStatus(data["status"])
-    known = {f.name for f in fields(SOP)}
-    return SOP(**{k: v for k, v in data.items() if k in known})
 
 
 def _asop_to_row(asop: ASOP) -> tuple:
