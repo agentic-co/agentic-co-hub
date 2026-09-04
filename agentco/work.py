@@ -412,6 +412,12 @@ RESERVED_METADATA_KEYS = frozenset({
 })
 PLAN_KEY = "sop_plan"
 PLAN_VS_ACTUAL_KEY = "plan_vs_actual"
+#: The pin, and the run record. Defined HERE rather than in `agentco/sop.py`
+#: because the queue itself has to recognise a run container to close one
+#: (§5.5) and `sop.py` already imports from this module; the reverse would be
+#: a cycle. `sop.py` re-exports both under the same names.
+REF_KEY = "sop_ref"
+RUN_KEY = "sop_run"
 # And the natural-key namespace the routing pass uses for vehicles.
 RESERVED_KEY_PREFIX = "verify:"
 
@@ -768,6 +774,174 @@ def reject_reserved(metadata: Optional[dict], natural_key: Optional[str] = None)
                 f"the one a verifier could actually claim."
             ),
         )
+
+
+def pin_of(item_or_metadata) -> dict:
+    """The ASOP pin on an item, with v2's `sop_id` spelling normalised.
+
+    Items filed before v3 pin `{sop_id, version}`; §2.1 requires those pins to
+    stay resolvable forever, and a reader that knew one spelling would count
+    every pre-v3 outcome as belonging to no procedure at all.
+    """
+    # Three shapes reach here and all of them are legitimate: a `WorkItem`, a
+    # RAW ROW (the dict `_read_raw` hands around, whose metadata is nested
+    # under a key), and a bare metadata dict. Reading a raw row as if it were
+    # the metadata is the quiet failure — every pin comes back empty and every
+    # step number reads as None, which looks like an unpinned item rather than
+    # a caller passing the wrong shape.
+    metadata = getattr(item_or_metadata, "metadata", None)
+    if metadata is None and isinstance(item_or_metadata, dict):
+        metadata = (item_or_metadata.get("metadata")
+                    if "metadata" in item_or_metadata else item_or_metadata)
+    ref = dict((metadata or {}).get(REF_KEY) or {})
+    if not ref:
+        return {}
+    if "asop_id" not in ref and "sop_id" in ref:
+        ref["asop_id"] = ref.pop("sop_id")
+    return ref
+
+
+def is_run_container(row: dict) -> bool:
+    """Whether closing this row is the plane's business or a person's.
+
+    A run's parent bead and a nested step's bead are containers: they hold
+    steps and finish when those steps do (§5.5). An ordinary goal filed by a
+    planner is NOT — nobody said its children are the whole of it, and closing
+    it because they happened to finish would be the plane deciding somebody's
+    goal was met. The pin is what distinguishes them, and only the plane
+    writes a pin.
+    """
+    return bool((row.get("metadata") or {}).get(REF_KEY))
+
+
+def run_review(container: dict, children: Sequence[dict], at: str) -> dict:
+    """The run-level plan-vs-actual, assembled from the per-step reviews (§6.2).
+
+    Written at the moment the container closes, while every step's own review
+    still says what happened in it. Nothing is judged here either: the plane
+    records, the adjudicator concludes. `flags` is the union of the steps' —
+    a run in which one step's gate disagreed is a run worth reading, and a
+    reader should not have to open five children to learn that.
+    """
+    steps = []
+    flags: set[str] = set()
+    for child in sorted(children, key=lambda c: (pin_of(c).get("step") or 0, c.get("created_at") or "")):
+        meta = child.get("metadata") or {}
+        review = meta.get(PLAN_VS_ACTUAL_KEY) or {}
+        actual = review.get("actual") or {}
+        step_flags = list(review.get("flags") or [])
+        flags.update(step_flags)
+        steps.append({
+            "step": pin_of(child).get("step"),
+            "itemId": child.get("id"),
+            "name": child.get("title"),
+            "landed": child.get("status"),
+            "executor": actual.get("executor"),
+            "result": child.get("result"),
+            "flags": step_flags,
+            # Said out loud rather than inferred from an absent key: a step
+            # that closed before reviews were written has no review, and
+            # "no review" must not read as "nothing to report".
+            "reviewed": bool(review),
+        })
+    meta = container.get("metadata") or {}
+    return {
+        "generated_at": at,
+        "sop_ref": meta.get(REF_KEY),
+        "plan": meta.get(PLAN_KEY),
+        "run": meta.get(RUN_KEY),
+        "steps": steps,
+        "flags": sorted(flags),
+    }
+
+
+def finished_containers(rows: Sequence[dict], *, at: str,
+                        landed: Optional[dict] = None) -> dict[str, dict]:
+    """Every run container in `rows` whose steps are all done. §5.5.
+
+    Returns `{item_id: updates}` — the same shape `_mutate`'s `change` returns,
+    so one caller can apply them all inside the write it is already doing.
+
+    **Only DONE closes a container.** `verify_failed` and `awaiting_verify`
+    release nothing downstream (§5.2), and a container that closed over a
+    parked gate would be a run reported finished while somebody is still
+    being asked to look at it. `pending`, `in_progress` and `failed` block it
+    for the obvious reason.
+
+    **Containers close bottom-up.** A nested step is a container of the inner
+    ASOP's steps and, once closed, counts as done for the container above it
+    — so this iterates to a fixed point rather than walking one parent. The
+    depth bound makes that terminate in at most three passes; the loop counts
+    them anyway, because a cycle in `metadata.parent` is a corrupt store and
+    spinning forever inside a write lock is the worst way to find out.
+
+    `landed` carries updates already decided in this same write (the report
+    that triggered the check), so the row that just became `done` is seen as
+    done rather than as its stored value.
+    """
+    status_of: dict[str, str] = {}
+    by_id: dict[str, dict] = {}
+    children: dict[str, list[dict]] = {}
+    for row in rows:
+        item_id = row.get("id")
+        if not item_id:
+            continue
+        by_id[item_id] = row
+        status_of[item_id] = row.get("status")
+        parent = (row.get("metadata") or {}).get(PARENT_KEY)
+        if parent and not (row.get("metadata") or {}).get(REPAIRS_KEY):
+            children.setdefault(parent, []).append(row)
+    for item_id, update in (landed or {}).items():
+        if "status" in update:
+            status_of[item_id] = getattr(update["status"], "value", update["status"])
+
+    closed: dict[str, dict] = {}
+    for _ in range(MAX_DEPTH + 1):
+        progressed = False
+        for item_id, row in by_id.items():
+            if item_id in closed or not is_run_container(row):
+                continue
+            # A container somebody is holding is not the plane's to close.
+            # `ready()` never offers one — it is blocked by its own steps —
+            # so a lease here means a caller reached past the queue, and
+            # closing under them would take the work away mid-flight.
+            if status_of.get(item_id) not in (WorkStatus.PENDING.value, WorkStatus.BLOCKED.value):
+                continue
+            kids = children.get(item_id) or []
+            if not kids:
+                continue
+            if any(status_of.get(k["id"]) != WorkStatus.DONE.value for k in kids):
+                continue
+            # The child that landed in THIS write has its review in `landed`,
+            # not yet on the stored row — the run-level review is assembled
+            # from the per-step ones, so reading the stale row would omit the
+            # step whose completion is the reason this is closing at all.
+            resolved = []
+            for kid in kids:
+                update = (landed or {}).get(kid["id"]) or {}
+                resolved.append({
+                    **kid,
+                    "status": status_of.get(kid["id"]),
+                    "result": update.get("result", kid.get("result")),
+                    "metadata": update.get("metadata", kid.get("metadata")),
+                })
+            closed[item_id] = {
+                "status": WorkStatus.DONE,
+                "result": f"every step of this run is done ({len(kids)} step(s))",
+                "metadata": {
+                    **(row.get("metadata") or {}),
+                    PLAN_VS_ACTUAL_KEY: run_review(row, resolved, at),
+                },
+            }
+            status_of[item_id] = WorkStatus.DONE.value
+            progressed = True
+        if not progressed:
+            return closed
+    raise WorkError(
+        "the parent chain loops: closing finished runs did not reach a fixed "
+        f"point within {MAX_DEPTH + 1} passes. Refusing to spin inside a write "
+        "lock — repair metadata.parent first."
+    )
 
 
 def plan_vs_actual(item: "WorkItem", *, reported: "WorkStatus", landed: "WorkStatus",
@@ -1214,11 +1388,31 @@ class Queue:
 
     # -- the lease protocol ----------------------------------------------
 
-    def _mutate(self, item_id: str, change: Callable[[WorkItem], dict]) -> Optional[WorkItem]:
+    def _run_cascade(self, rows: list[dict], landed: dict) -> dict:
+        """The §5.5 close, as a `_mutate` cascade.
+
+        Three write paths can be the one that lands a step's last `done`: a
+        report with no gate or a passing one (`report_result`), a verifier's
+        verdict (`verify_approve`/`attest`), and a park clock resolving `pass`
+        (`resolve_by_default`). All three go through here, because a run that
+        closed on one route and not the others would make "is this run
+        finished" depend on which way its last step was answered.
+        """
+        return finished_containers(rows, at=_iso(_now()), landed=landed)
+
+    def _mutate(self, item_id: str, change: Callable[[WorkItem], dict],
+                cascade: Optional[Callable[[list[dict], dict], dict]] = None) -> Optional[WorkItem]:
         """Read-modify-write under one lock. `change` may raise to abort.
 
         A raising `change` leaves the store byte-identical, which is what makes
         the CAS and the fence safe to express as ordinary exceptions.
+
+        `cascade` is how a mutation reaches items OTHER than its target inside
+        the same write: it receives every raw row plus the target's own
+        updates, and returns `{item_id: updates}` for the rest. It exists for
+        exactly one caller — closing a run's container when its last step
+        lands (§5.5) — and it is a parameter rather than a second method
+        because the fenced CAS above it has to stay the single copy it is.
         """
         with self._locked():
             raw_rows, quarantined = self._read_raw()
@@ -1248,7 +1442,15 @@ class Queue:
             for key, value in updates.items():
                 setattr(target, key, value)
             target.updated_at = _iso(_now())
-            self._write_all(self._merge(raw_rows, target), quarantined)
+            rows = self._merge(raw_rows, target)
+            for other_id, other_updates in (cascade(rows, {item_id: updates}) if cascade else {}).items():
+                for row in rows:
+                    if row.get("id") != other_id:
+                        continue
+                    for key, value in other_updates.items():
+                        row[key] = getattr(value, "value", value)
+                    row["updated_at"] = _iso(_now())
+            self._write_all(rows, quarantined)
             return target
 
     def claim(
@@ -1835,7 +2037,7 @@ class Queue:
                 "metadata": metadata,
             }
 
-        attested = self._mutate(item_id, verdict)
+        attested = self._mutate(item_id, verdict, cascade=self._run_cascade)
         if attested is not None and adjudication is not None:
             return self.adjudicate(
                 item_id, adjudication.get("verdict"), adjudication.get("evidence"),
@@ -2095,7 +2297,7 @@ class Queue:
             }
 
         try:
-            return self._mutate(item_id, fence)
+            return self._mutate(item_id, fence, cascade=self._run_cascade)
         except _AlreadyRecorded as recorded:
             return recorded.item
 
@@ -2205,7 +2407,35 @@ class Queue:
                 metadata["verify_parked_at"] = resolution.get("resolved_at") or _iso(_now())
             return updates
 
-        return self._mutate(item_id, resolve)
+        return self._mutate(item_id, resolve, cascade=self._run_cascade)
+
+    def close_finished_runs(self, *, dry_run: bool = False) -> list[str]:
+        """REPAIR ONLY: close run containers stranded with every step done.
+
+        There is no closing logic here — it calls `finished_containers`, the
+        same function the report path cascades through, and applies what that
+        returns. A second implementation would be a second answer to "is this
+        run finished", and the two would drift on the day somebody fixed one.
+
+        It exists for the runs that finished BEFORE the cascade shipped, and
+        as a backstop for the one crash window the cascade cannot cover: the
+        child's write commits, the process dies, and the container never hears
+        about it. Both are the same state and both are repaired the same way.
+
+        Each close is its own transaction rather than one big one. A repair
+        sweep that half-succeeded should leave the containers it did close
+        closed — there is nothing to roll back to that is better than partial
+        progress here, and the operation is idempotent.
+        """
+        rows, _ = self._read_raw()
+        closes = finished_containers(rows, at=_iso(_now()))
+        if dry_run:
+            return sorted(closes)
+        closed: list[str] = []
+        for item_id, updates in closes.items():
+            if self._mutate(item_id, lambda _item, u=updates: dict(u)) is not None:
+                closed.append(item_id)
+        return sorted(closed)
 
     def reap_expired_leases(self, now: Optional[datetime] = None) -> list[WorkItem]:
         """Return in-progress items whose lease has expired to the ready set.

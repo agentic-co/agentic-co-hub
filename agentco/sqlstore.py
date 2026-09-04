@@ -532,8 +532,14 @@ class SqlQueue(_SqlBacked, Queue):
 
     # -- the one mutation primitive --------------------------------------
 
-    def _mutate(self, item_id: str, change: Callable[[WorkItem], dict]) -> Optional[WorkItem]:
+    def _mutate(self, item_id: str, change: Callable[[WorkItem], dict],
+                cascade: Optional[Callable[[list[dict], dict], dict]] = None) -> Optional[WorkItem]:
         """Read-modify-write as ONE transaction. `change` may raise to abort.
+
+        `cascade` reaches items other than the target inside the SAME
+        transaction — see `Queue._mutate` for why it exists and why it is a
+        parameter. The extra rows are read only when a cascade is supplied, so
+        the ordinary claim/report path still touches exactly one row.
 
         Every lease operation inherited from `Queue` — claim, report, reap —
         is expressed in terms of this, so this is the single place the fenced
@@ -619,6 +625,31 @@ class SqlQueue(_SqlBacked, Queue):
                     f"and the write inside a transaction that should have made "
                     f"that impossible. Nothing was written."
                 )
+            if cascade is not None:
+                # Read the tree only now: a run container is identified by a
+                # pin in its metadata JSON, which has no column and therefore
+                # no index, and paying a scan on every lease report to catch
+                # the one report that closes a run would be the wrong trade.
+                rows = [_row_to_dict(r) for r in
+                        conn.execute("SELECT * FROM work_items").fetchall()]
+                for row in rows:
+                    if row.get("id") == item_id:
+                        row.update(json.loads(target.to_json()))
+                for other_id, other_updates in cascade(rows, {item_id: updates}).items():
+                    other = conn.execute(
+                        "SELECT * FROM work_items WHERE id = ?", (other_id,)
+                    ).fetchone()
+                    if other is None:  # pragma: no cover - it was just read
+                        continue
+                    closing = WorkItem.from_json(json.dumps(_row_to_dict(other)))
+                    for key, value in other_updates.items():
+                        setattr(closing, key, value)
+                    closing.updated_at = _iso(_now())
+                    closing_row = _item_to_row(closing)
+                    conn.execute(
+                        f"UPDATE work_items SET {assignments} WHERE id = ?",
+                        (*(closing_row[c] for c in _WORK_MUTABLE), other_id),
+                    )
             return target
 
 

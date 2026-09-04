@@ -200,6 +200,25 @@ question applies: `drifted()` reports in-flight runs whose procedure has moved.
 It reports and never migrates — re-pointing running work at a newer procedure
 changes the job under whoever is doing it.
 
+**A run closes itself.** When a step's report lands `done` — by its own
+attestation, by a verifier's verdict, or by a park clock resolving `pass` —
+the write that lands it also checks the container that step belongs to, in
+the same transaction. If every step of that container is `done`, the
+container closes and a run-level plan-vs-actual is written from the per-step
+reviews (§5.5, §6.2). Only `done` counts: `verify_failed` and
+`awaiting_verify` release nothing downstream (§5.2), and a run that closed
+over a parked gate would be reported finished while somebody is still being
+asked to look at it. A nested step is itself a container, so the close walks
+bottom-up, bounded by the same three levels the tree is.
+
+It matters because `outcomes_by_version` reads a run parent's status as the
+RUN's outcome. Left to a person to close, every finished run counted as
+in-flight — the per-version measurement is the whole reason the grain moved,
+and it was quietly not working. An ordinary goal filed by a planner is never
+closed this way: nobody said its children are the whole of it, and the pin is
+what tells the two apart. `agentco pulse --apply` repairs containers stranded
+before this shipped by calling the same function, never a second copy of it.
+
 **A step may be another ASOP.** `uses: {asop_id, version}` files the inner
 procedure's tree as that step's children, pinned to the inner version. Depth
 counts against the three-deep bound, checked while the run is planned rather

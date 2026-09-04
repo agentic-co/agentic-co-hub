@@ -342,6 +342,12 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
     routing = verifiers.route_open_gates(queue, conn=conn, dry_run=not apply)
     park = verifiers.sweep_park_clocks(queue, now=now, conn=conn, dry_run=not apply)
     quarantine = verifiers.sweep_quarantine(queue, now=now, dry_run=not apply)
+    # Runs whose every step is done but whose container never heard about it.
+    # The report path closes these as the last step lands (§5.5); this is the
+    # repair for the ones that finished before that shipped, and for the crash
+    # window where a child's write commits and the process dies before the
+    # container's does. Not new logic — the same function, applied late.
+    stranded = queue.close_finished_runs(dry_run=not apply)
     stuck = verifiers.quarantine_digest(queue, now=now)
     status = verifiers.verifier_status(queue, now=now)
 
@@ -373,6 +379,7 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
             "escalated": len(park.get("escalated", [])),
         },
         "quarantine": {"quarantined": len(quarantine.get("quarantined", []))},
+        "strandedRuns": {("closed" if apply else "wouldClose"): len(stranded)},
         "stuck": stuck["count"],
         "verifier": {"configured": status.get("configured"), "warning": status.get("warning")},
     }

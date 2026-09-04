@@ -59,9 +59,12 @@ from agentco.filelock import lock_exclusive, unlock
 from agentco.work import (
     PARENT_KEY,
     PLAN_KEY,
+    REF_KEY,
+    RUN_KEY,
     Queue,
     WorkItem,
     WorkStatus,
+    pin_of,
     reject_reserved,
 )
 from asop.gates import GATE_FIELDS
@@ -114,17 +117,16 @@ __all__ = [
 SOP_STORE_ENV_VAR = "AGENTCO_SOP_STORE"
 DEFAULT_SOP_STORE = "sops.jsonl"
 
-#: `metadata.sop_ref` — the pin. `{asop_id, version}` on a run's parent bead,
-#: `{asop_id, version, step}` on each step bead. The key name is unchanged
-#: from v2 on purpose: it is a reserved metadata key that half the plane reads
-#: back as fact, and renaming it would have been a migration of every reader
-#: for a word. `pin_of` normalises the v2 spelling of its CONTENT.
-REF_KEY = "sop_ref"
-
-#: `metadata.sop_run` — what a run was given: its inputs, and the bindings the
-#: caller chose for each role. Plane-written and read back as fact by
-#: `run_get`, so it is reserved like the pin.
-RUN_KEY = "sop_run"
+#: The pin and the run record, re-exported from `agentco/work.py` where they
+#: are defined. They live there because the QUEUE has to recognise a run
+#: container to close one when its last step lands (§5.5), and this module
+#: already imports from that one — the reverse would be a cycle.
+#:
+#: `sop_ref` is `{asop_id, version}` on a run's parent bead and
+#: `{asop_id, version, step}` on each step bead; the key name is unchanged
+#: from v2 on purpose, because half the plane reads it back as fact and
+#: renaming it would have been a migration of every reader for a word.
+#: `sop_run` is what a run was given — its inputs and the caller's bindings.
 
 #: What a v2 record could not carry and a v3 step must: a gate. The upgrade
 #: fails CLOSED to a human gate — see `upgrade_legacy`.
@@ -144,23 +146,6 @@ def _refuse(code: str, message: str, remediation: str, status: int = 422) -> Ref
 # --------------------------------------------------------------------------- #
 # pins, payloads, and the v2 upgrade
 # --------------------------------------------------------------------------- #
-
-
-def pin_of(item_or_metadata) -> dict:
-    """The pin on a work item, with v2's `sop_id` spelling normalised to `asop_id`.
-
-    Read through this rather than off `metadata['sop_ref']` directly. Items
-    filed before v3 pin `{sop_id, version}`; §2.1 requires those pins to stay
-    resolvable forever, and a reader that only knew one spelling would count
-    every pre-v3 outcome as belonging to no procedure at all.
-    """
-    metadata = getattr(item_or_metadata, "metadata", item_or_metadata) or {}
-    ref = dict(metadata.get(REF_KEY) or {})
-    if not ref:
-        return {}
-    if "asop_id" not in ref and "sop_id" in ref:
-        ref["asop_id"] = ref.pop("sop_id")
-    return ref
 
 
 def gate_payload(gate: Optional[dict]) -> Optional[dict]:
