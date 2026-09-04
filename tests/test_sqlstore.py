@@ -475,10 +475,14 @@ def test_two_threads_sharing_one_store_do_not_collide_on_its_connection(tmp_path
 
 
 def _forge_unreadable_sop_row(library: SqlSopLibrary, sop_id: str, version: int) -> None:
-    """A row a NEWER writer could produce: a status this version has no name for."""
+    """A row a NEWER writer could produce: a status this version has no name for.
+
+    Was 'retired' until ASOP v3 named that state (decision 3, 2026-09-04) —
+    at which point the fixture stopped being unreadable and this test
+    started asserting the wrong thing. 'archived' is nobody's status."""
     library._conn.execute(
         "INSERT INTO sops (sop_id, version, title, status, created_at, "
-        "common_mistakes, unknown) VALUES (?, ?, ?, 'retired', 't', '[]', '{}')",
+        "common_mistakes, unknown) VALUES (?, ?, ?, 'archived', 't', '[]', '{}')",
         (sop_id, version, "written by a newer version"),
     )
 
@@ -551,7 +555,7 @@ def test_one_unreadable_sop_row_does_not_brick_the_library(tmp_path):
                     "sop_id": "sop-newer",
                     "version": 1,
                     "title": "written by a newer version",
-                    "status": "retired",
+                    "status": "archived",   # a status no version names; was 'retired' until v3 did
                     "created_at": "t",
                 }
             )

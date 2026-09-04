@@ -108,4 +108,8 @@ CODES: dict[str, str] = {
     "invalid_request": "an exception the plane's classifier did not recognise as any of the above — the fallback of last resort",
     "registry_<status>": "a Refusal that already crossed the wire once (a remote registry call proxied through MCP) is passed through with its own status; the actual code is 'registry_' followed by the HTTP status, or 'registry_error' if none was given",
     "natural_key_invalid": "a natural_key value failed its own shape check",
+    # -- ASOP v3: filing a run (ASOP.md §5.1) ------------------------------
+    "inputs_missing": "a run was filed without an input the ASOP declares by name",
+    "role_unbound": "a run was filed with no binding for a role the ASOP declares",
+    "constraint_unsatisfiable": "every binding offered for a run violates a `distinct` constraint — the same binding would fill both roles",
 }

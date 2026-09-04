@@ -485,7 +485,7 @@ def test_a_pinned_sop_version_never_resolves_to_different_text(library, tmp_path
     for line in library.path.read_text(encoding="utf-8").splitlines():
         row = json.loads(line)
         if row["version"] == pinned:
-            row["status"] = "retired"
+            row["status"] = "archived"   # unknown to every version; 'retired' became real in v3
         rewritten.append(json.dumps(row, sort_keys=True))
     library.path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
 

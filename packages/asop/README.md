@@ -1,5 +1,14 @@
 # agentco-asop
 
+> **v3 (2026-09-04).** The record contract now carries `ASOP` — a versioned,
+> ordered sequence of `Step`s for one type of task, with the gate on the step
+> — alongside the legacy single-record `SOP`, which stays importable only until
+> the plane's store migrates and is then deleted. `validate_asop` /
+> `validate_step` are the v3 entry points; `validate_fields` is v2's. The
+> definition, verbs and the seven decisions behind v3 are in
+> [`ASOP.md`](ASOP.md).
+
+
 **The ASOP contract, as code.** A procedure that is versioned, verified, and
 self-revising is only useful if two independently-owned pieces of software —
 a coordination plane and the harness actually running the work — agree on
