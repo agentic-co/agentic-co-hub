@@ -358,3 +358,5 @@ young that claims none would be lying.
 
 [Apache License 2.0](LICENSE). Apache rather than MIT for the explicit patent grant,
 which matters when the thing being adopted is infrastructure inside a company.
+
+Copyright 2026 The AgentCo Authors.

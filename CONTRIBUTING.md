@@ -99,3 +99,32 @@ happy path. Two examples from the existing suite, both of which caught real defe
 Load-bearing decisions live in `docs/decisions/` with their alternatives, the reasoning,
 and — required — a **revisit condition**. A decision with no revisit condition is
 doctrine, and doctrine is how a small system becomes an unarguable one.
+
+## Licensing and sign-off
+
+This project is [Apache License 2.0](LICENSE), and so is the ASOP contract package in
+`packages/asop/`. Apache rather than MIT for the explicit patent grant in §3 — a contract
+adopted across organisations needs the grant stated in the file, not implied.
+
+Contributions are accepted under the same licence, and every commit must carry a
+Developer Certificate of Origin sign-off:
+
+```sh
+git commit -s -m "your message"      # appends: Signed-off-by: Your Name <you@example.com>
+```
+
+The sign-off is the line that says you wrote the contribution, or otherwise have the
+right to submit it under Apache-2.0. Read what you are certifying at
+<https://developercertificate.org/>.
+
+Two consequences worth stating plainly, because they are the reason this section exists
+rather than being assumed:
+
+- **Use an address you can sign for.** If you contribute from a work address, the
+  contribution may belong to your employer rather than to you, and the sign-off is your
+  assertion that submitting it is within your rights. When in doubt, ask your employer
+  before you push, not after.
+- **There is no CLA and no copyright assignment.** You keep the copyright in what you
+  wrote. The consequence is that this project cannot be relicensed without the agreement
+  of everyone who has contributed — which is the intended constraint, not an oversight.
+

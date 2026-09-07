@@ -54,3 +54,14 @@ evals-out/
 # hostname alone names an employer, which is exactly the class of thing that
 # keeps this repo publishable when it stays out of the tree.
 evals/.env.eval
+
+# Machine-local files the leakguard flags: real hostnames, real home paths, secrets.
+# These were protected only by .git/info/exclude, which is neither versioned nor
+# synced — so a fresh clone on another machine had no protection at all, and
+# `git add -A` would have staged them into a public repository.
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+tools/two_machine_suite.sh
+

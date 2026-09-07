@@ -86,3 +86,11 @@ the ordinary way once published: `pip install agentco-asop` /
 Standard library only — see `../../CONTRIBUTING.md`'s dependency rule. This
 package is imported by both sides of the contract, so a dependency here is
 forced on both.
+
+## Licence
+
+[Apache License 2.0](LICENSE). The patent grant is the point: this package is the
+contract other people's harnesses are asked to depend on, and a contract adopted
+across organisations needs the grant stated in the file rather than implied.
+
+Copyright 2026 The AgentCo Authors.
