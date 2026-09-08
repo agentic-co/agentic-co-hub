@@ -6,7 +6,7 @@
 ## Context
 
 The contract this plane implements was rewritten as **v3**
-([`packages/asop/ASOP.md`](../../packages/asop/ASOP.md), ratified 2026-09-04)
+([`ASOP.md`](https://github.com/mabidoli/asop/blob/main/ASOP.md), ratified 2026-09-04)
 after a review found that two things were true of the shipped implementation
 that the v2 text did not say.
 

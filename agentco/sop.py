@@ -3,7 +3,7 @@
 The record contract — `ASOP`, `Step`, `SopStatus`, `validate_asop`,
 `validate_step` — lives in `asop.sop`, the package shared with any harness
 that pins the same `(asop_id, version, step)` off a work item (see
-`packages/asop/ASOP.md`). This module re-exports that contract and adds
+`ASOP.md`, https://github.com/mabidoli/asop). This module re-exports that contract and adds
 everything about KEEPING a procedure that a bare record shape does not
 answer: the versioned store (`SopLibrary` below), file locking, the revision
 policy it enforces, and the filing of runs.

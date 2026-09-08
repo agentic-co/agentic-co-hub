@@ -8,18 +8,12 @@ resolution-markers = [
     "python_full_version < '3.14' and sys_platform != 'win32'",
 ]
 
-[manifest]
-members = [
-    "agentco",
-    "agentco-asop",
-]
-
 [[package]]
 name = "agentco"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "agentco-asop" },
+    { name = "asop-spec" },
 ]
 
 [package.optional-dependencies]
@@ -42,7 +36,7 @@ server = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentco-asop", editable = "packages/asop" },
+    { name = "asop-spec", specifier = ">=0.1.0" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.110" },
     { name = "litellm", marker = "extra == 'eval'", specifier = ">=1.70" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = "<2" },
@@ -51,20 +45,6 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'server'", specifier = ">=0.29" },
 ]
 provides-extras = ["server", "mcp", "postgres", "dev", "eval"]
-
-[[package]]
-name = "agentco-asop"
-version = "0.1.0"
-source = { editable = "packages/asop" }
-
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" }]
-provides-extras = ["dev"]
 
 [[package]]
 name = "aiohappyeyeballs"
@@ -235,6 +215,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/61/cc/a381afa6efea9f496eff839d4a6a1aed3bfafc7b3ab4b0d1b243a12573dd/anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f", size = 260176, upload-time = "2026-07-12T20:29:07.082Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl", hash = "sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494", size = 125813, upload-time = "2026-07-12T20:29:05.763Z" },
+]
+
+[[package]]
+name = "asop-spec"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cd/8a/13cacdd542c20a37ca7f1cf4f5edd1716226a6559007f2691db285fef39e/asop_spec-0.1.0.tar.gz", hash = "sha256:222ee17b91371d225d194deb27d5aab790d13aaf418479188614732f2b11c1e8", size = 79857, upload-time = "2026-09-08T01:42:33.463Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/4d/dae39ce9a629d2a1559c15862a6270a6df14e42a744089dc97e83f49483c/asop_spec-0.1.0-py3-none-any.whl", hash = "sha256:68e9054d3e6d4f1ef3ae1b3c40b0135cc4905bac9f7bb4986a0358160a0f911e", size = 76565, upload-time = "2026-09-08T01:42:32.039Z" },
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 # ASOP — Agentic Standard Operating Procedure
 
-**The canonical definition moved to [`packages/asop/ASOP.md`](../packages/asop/ASOP.md)**
+**The canonical definition moved to [`ASOP.md`](https://github.com/mabidoli/asop/blob/main/ASOP.md)**
 — the contract package both the Hub and the Harness import, which is where a
 contract belongs.
 

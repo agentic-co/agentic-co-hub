@@ -7,7 +7,7 @@ harness that only depends on `asop`. This module re-exports it rather than
 redefining it: `agentco.errors.Refusal is asop.errors.Refusal` holds, and
 that identity is the point — two `Refusal` classes would mean a `try/except
 Refusal` written against one side silently missing refusals raised by the
-other. See `packages/asop/asop/errors.py` for the type itself.
+other. See `asop/errors.py` in https://github.com/mabidoli/asop for the type itself.
 
 What stays here are the refusal shapes that are NOT part of the shared
 contract because nothing outside this plane has an opinion on them:

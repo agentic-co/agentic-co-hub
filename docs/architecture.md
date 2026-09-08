@@ -143,7 +143,7 @@ migration carries a Postgres-dialect rewrite (`GENERATED ALWAYS AS IDENTITY`, `O
 
 A standard operating procedure is an object, not a block of text pasted into
 every item that follows it. Since **ASOP v3** (ratified 2026-09-04,
-[`packages/asop/ASOP.md`](../packages/asop/ASOP.md)) the object is a versioned,
+[`ASOP.md`](https://github.com/mabidoli/asop/blob/main/ASOP.md)) the object is a versioned,
 ordered sequence of **steps**, and a step is what earlier versions called the
 procedure.
 
@@ -384,7 +384,7 @@ organisation's instance is configuration and does not belong in this repository.
 The gate schema (`deterministic` / `judged` / `human`, with attestation) and
 the record shape (`SopStatus`, the `ASOP` and `Step` dataclasses,
 `validate_asop`, `validate_step`, and the legacy `SOP`/`validate_fields` kept
-readable for the upgrade) live in `packages/asop/` — a separate distribution, `agentco-asop` (import
+readable for the upgrade) live in `asop-spec` — a separate distribution, `asop-spec` (import
 name `asop`), inside this repo but published independently of it. `Refusal`,
 the one exception type the contract speaks in, moved with them.
 
@@ -402,7 +402,7 @@ the park-clock group is mandatory — exposed as an argument (`require`)
 rather than hidden as an assumption.
 
 This plane imports `asop` as an ordinary dependency (`[tool.uv.sources]` in
-the root `pyproject.toml` resolves it from `packages/asop/`, editable, via a
+the root `pyproject.toml` resolves it from `asop-spec`, editable, via a
 `uv` workspace). `agentco/gates.py`, `agentco/errors.py` and `agentco/sop.py`
 are now thin shims: they call into `asop.gates` / `asop.errors` / `asop.sop`
 with this plane's own calling convention (`require=("clock",)`, its own

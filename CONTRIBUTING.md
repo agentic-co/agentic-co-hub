@@ -103,7 +103,7 @@ doctrine, and doctrine is how a small system becomes an unarguable one.
 ## Licensing and sign-off
 
 This project is [Apache License 2.0](LICENSE), and so is the ASOP contract package in
-`packages/asop/`. Apache rather than MIT for the explicit patent grant in §3 — a contract
+`asop-spec`. Apache rather than MIT for the explicit patent grant in §3 — a contract
 adopted across organisations needs the grant stated in the file, not implied.
 
 Contributions are accepted under the same licence, and every commit must carry a

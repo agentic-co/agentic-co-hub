@@ -28,8 +28,8 @@ versions them, records their outcomes, and routes their human gates — whatever
 work-unit your harness uses to execute them (ours is called a bead).
 
 The gate schema and the SOP record shape that make "verified" and
-"versioned" checkable are their own package, `agentco-asop`
-([`packages/asop/`](packages/asop/)) — the one piece any harness executing
+"versioned" checkable are their own package, `asop-spec`
+([`asop-spec`](https://github.com/mabidoli/asop)) — the one piece any harness executing
 ASOP work needs, without needing the rest of this coordination plane. This
 repo depends on it like any other consumer; see
 [`docs/architecture.md`](docs/architecture.md#the-asop-contract-package).
@@ -179,9 +179,9 @@ git clone https://github.com/agentic-co/agentic-co-hub && cd agentic-co-hub
 uv run --extra dev --extra server --extra mcp pytest -q
 ```
 
-That pulls in `agentco-asop` (the ASOP contract package, `packages/asop/`)
+That pulls in `asop-spec` (the ASOP contract package, `asop-spec`)
 as a `uv` workspace member automatically — nothing extra to install. Its own
-suite runs on its own: `uv run pytest packages/asop/tests -q`.
+contract's own suite runs in its own repository (https://github.com/mabidoli/asop).
 
 ### Run it
 
@@ -303,7 +303,7 @@ The revision calls are policed when the caller is an agent — that is, any acto
 not named in `AGENTCO_HUMANS`. A step tagged `money` or `irreversible` is frozen
 against agents, a step's class only ratchets toward `human`, and no agent
 revision undoes a change a human made. `retire` and `promote` are human-only
-outright. [`packages/asop/ASOP.md`](packages/asop/ASOP.md) § 6.4 has the rules;
+outright. [`ASOP.md`](https://github.com/mabidoli/asop/blob/main/ASOP.md) § 6.4 has the rules;
 `agentco/policy.py` enforces them, and a refusal comes back as HTTP 403
 `revision_policy:<rule>`.
 

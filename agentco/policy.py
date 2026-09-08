@@ -5,7 +5,7 @@ bound by — protected tags, the ratchet, no-undo, and the `human_only` verbs �
 are contract, not plane: a harness executing ASOP work polices the same writes
 against the same records, and a rule that held here and not there would be a
 rule with a door beside it. They now live in `asop.revision`, the package
-shared with any harness speaking the ASOP contract (`packages/asop/ASOP.md`
+shared with any harness speaking the ASOP contract (`ASOP.md` (https://github.com/mabidoli/asop)
 §6.4), and this module re-exports them so every existing caller and test in
 this repo is unchanged. `agentco.policy.RevisionPolicyError is
 asop.revision.RevisionPolicyError` holds, and that identity is the point: two
