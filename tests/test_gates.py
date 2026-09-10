@@ -556,3 +556,56 @@ def _loopback(client, actor: str, keys: dict):
             return self._call(method, path, body)
 
     return _Loopback(actor, keys[actor], "http://registry.test")
+
+
+# --------------------------------------------------------------------------- #
+# A ladder is answered when every rung is climbed, not when one is
+# (ASOP.md §2.2)
+# --------------------------------------------------------------------------- #
+
+STAGED = {
+    "kind": "deterministic",
+    "checks": ["ruff check .", "pytest -q"],
+    "max_park_seconds": 900,
+    "on_timeout": "fail",
+}
+
+
+def staged_attestation(stage: int, check: str, exit_status: int = 0) -> dict:
+    return {**attestation(check=check, exit_status=exit_status), "stage": stage}
+
+
+def test_one_passing_rung_does_not_answer_the_ladder(queue):
+    """The cheap rung must not stand in for the expensive one.
+
+    `validate_attestation` already refuses evidence that cannot say WHICH rung
+    it climbed. It cannot say whether the ladder was climbed — that was decided
+    from one record's exit status, so attesting the linter completed an item
+    whose test suite was never run.
+    """
+    item = queue.create("ship it", verify=STAGED)
+    out = claim_and_finish(
+        queue, item, attestation=staged_attestation(0, "ruff check .")
+    )
+    assert out.status is not WorkStatus.DONE
+    assert out.status == WorkStatus.AWAITING_VERIFY
+    # And the rung that was climbed is recorded as such, by index.
+    assert set(queue.get(item.id).metadata["verify_stages"]) == {"0"}
+
+
+def test_the_ladder_completes_when_every_rung_passes(queue):
+    item = queue.create("ship it", verify=STAGED)
+    claim_and_finish(queue, item, attestation=staged_attestation(0, "ruff check ."))
+    done = queue.attest(
+        item.id, staged_attestation(1, "pytest -q"), submitted_by="worker-b"
+    )
+    assert done.status == WorkStatus.DONE
+    assert set(done.metadata["verify_stages"]) == {"0", "1"}
+
+
+def test_a_failing_rung_still_fails_the_ladder(queue):
+    item = queue.create("ship it", verify=STAGED)
+    out = claim_and_finish(
+        queue, item, attestation=staged_attestation(1, "pytest -q", exit_status=1)
+    )
+    assert out.status == WorkStatus.VERIFY_FAILED

@@ -389,6 +389,12 @@ RESERVED_METADATA_KEYS = frozenset({
     "verifies", "claims", "lease_report", "verify_parked_at", "verify_resolution",
     "verify_history", "verify_escalated", "verify_quarantined", "verify_retry",
     "verify_verdict", "natural_key_conflict",
+    # One evidence record per rung of a staged gate, keyed by stage index.
+    # Written only where a gate is answered, and read back as the record of
+    # WHICH rungs were actually climbed. A caller who could set it could
+    # declare the expensive rungs already passed and answer the ladder with
+    # the cheap one.
+    "verify_stages",
     # Written only by `Queue.adjudicate`, which is where the adjudicator ≠
     # executor rule lives. A caller who could set it on create would be an
     # executor grading its own divergence, with the plane's name on the tag.
@@ -412,6 +418,32 @@ RESERVED_METADATA_KEYS = frozenset({
 })
 PLAN_KEY = "sop_plan"
 PLAN_VS_ACTUAL_KEY = "plan_vs_actual"
+STAGES_KEY = "verify_stages"
+
+
+def _ladder_outstanding(gate: dict, metadata: dict, record: dict) -> tuple[dict, list[int]]:
+    """Fold one rung's evidence into the ladder; report which rungs are still open.
+
+    `asop.gates.validate_attestation` already refuses evidence that cannot say
+    which rung it climbed. What it cannot do is say whether the LADDER was
+    climbed — `attestation_passes` is `exit_status == 0` about one record. So a
+    staged gate answered from a single record completes on whichever rung the
+    executor chose to run, and the expensive one at the top is never required.
+    ASOP.md §2.2: a ladder takes one attestation per rung, each pinned to its
+    index, and is answered only when every rung is present and passing.
+
+    Returns the updated stage map and the sorted indices still outstanding
+    (empty when the ladder is complete). A failing rung is stored like any
+    other — a red rung is evidence, and dropping it would leave the failure
+    unrecordable.
+    """
+    stages = dict(metadata.get(STAGES_KEY) or {})
+    stages[str(record.get("stage"))] = record
+    outstanding = [
+        i for i in range(len(gate.get("checks") or ()))
+        if not gates.attestation_passes(stages.get(str(i)) or {})
+    ]
+    return stages, outstanding
 #: The pin, and the run record. Defined HERE rather than in `agentco/sop.py`
 #: because the queue itself has to recognise a run container to close one
 #: (§5.5) and `sop.py` already imports from this module; the reverse would be
@@ -1642,6 +1674,25 @@ class Queue:
 
     # -- gates -----------------------------------------------------------
 
+    @staticmethod
+    def _answered_status(
+        gate: dict, metadata: dict, record: dict
+    ) -> Optional[WorkStatus]:
+        """The status this evidence answers the gate with, or None if it fails it.
+
+        A single-check gate is answered by its one record. A staged gate is
+        answered only when every rung is present and passing (ASOP.md §2.2);
+        until then a passing rung parks rather than completes. Mutates
+        `metadata` to fold the rung in, the way the rest of this path does.
+        """
+        if gate.get("checks"):
+            stages, outstanding = _ladder_outstanding(gate, metadata, record)
+            metadata[STAGES_KEY] = stages
+            if not outstanding:
+                return WorkStatus.DONE
+            return WorkStatus.AWAITING_VERIFY if gates.attestation_passes(record) else None
+        return WorkStatus.DONE if gates.attestation_passes(record) else None
+
     def _gate_outcome(
         self,
         item: WorkItem,
@@ -1740,8 +1791,14 @@ class Queue:
             gate=gate,
             submitted_by=submitted_by or "unknown",
         )
-        if gates.attestation_passes(record):
-            return WorkStatus.DONE, record, failures
+        answered = self._answered_status(gate, metadata, record)
+        if answered is WorkStatus.AWAITING_VERIFY:
+            # A rung passed and others have not been climbed. Not done, and it
+            # must not release anything downstream; it waits for the rest.
+            metadata["verify_parked_at"] = _iso(now or _now())
+            return answered, record, failures
+        if answered is not None:
+            return answered, record, failures
 
         failures += 1
         metadata["verify_retry"] = {
@@ -2037,10 +2094,11 @@ class Queue:
                     "at": record.get("at"), "passed": gates.attestation_passes(record),
                 }}
                 metadata[PLAN_VS_ACTUAL_KEY] = review
-            if gates.attestation_passes(record):
+            answered = self._answered_status(gate, metadata, record)
+            if answered is not None:
                 metadata.pop("verify_retry", None)
                 return {
-                    "status": WorkStatus.DONE,
+                    "status": answered,
                     "attestation": record,
                     "metadata": metadata,
                 }
