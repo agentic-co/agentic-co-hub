@@ -421,7 +421,9 @@ PLAN_VS_ACTUAL_KEY = "plan_vs_actual"
 STAGES_KEY = "verify_stages"
 
 
-def _ladder_outstanding(gate: dict, metadata: dict, record: dict) -> tuple[dict, list[int]]:
+def _ladder_outstanding(
+    gate: dict, metadata: dict, record: dict, generation: int
+) -> tuple[dict, list[int]]:
     """Fold one rung's evidence into the ladder; report which rungs are still open.
 
     `asop.gates.validate_attestation` already refuses evidence that cannot say
@@ -436,9 +438,23 @@ def _ladder_outstanding(gate: dict, metadata: dict, record: dict) -> tuple[dict,
     (empty when the ladder is complete). A failing rung is stored like any
     other — a red rung is evidence, and dropping it would leave the failure
     unrecordable.
+
+    **Evidence is pinned to a generation, and a failed answer starts a new
+    one.** Without that, a ladder re-verified after a red rung answers using
+    the green rungs from BEFORE the fix: stage 0 passes, stage 1 fails, the
+    code is edited to repair stage 1, stage 1 is re-attested — and the ladder
+    completes citing a stage 0 that never ran against the edited code. The
+    rung that was already green is precisely the one nobody thinks to re-run,
+    which is what makes it worth pinning. `verify_failures` is the counter:
+    it already increments on each failed answer, so evidence from an earlier
+    generation is stale by construction and has to be climbed again.
     """
-    stages = dict(metadata.get(STAGES_KEY) or {})
-    stages[str(record.get("stage"))] = record
+    stages = {
+        index: stored
+        for index, stored in (metadata.get(STAGES_KEY) or {}).items()
+        if (stored or {}).get("generation") == generation
+    }
+    stages[str(record.get("stage"))] = {**record, "generation": generation}
     outstanding = [
         i for i in range(len(gate.get("checks") or ()))
         if not gates.attestation_passes(stages.get(str(i)) or {})
@@ -1676,7 +1692,7 @@ class Queue:
 
     @staticmethod
     def _answered_status(
-        gate: dict, metadata: dict, record: dict
+        gate: dict, metadata: dict, record: dict, generation: int = 0
     ) -> Optional[WorkStatus]:
         """The status this evidence answers the gate with, or None if it fails it.
 
@@ -1686,7 +1702,7 @@ class Queue:
         `metadata` to fold the rung in, the way the rest of this path does.
         """
         if gate.get("checks"):
-            stages, outstanding = _ladder_outstanding(gate, metadata, record)
+            stages, outstanding = _ladder_outstanding(gate, metadata, record, generation)
             metadata[STAGES_KEY] = stages
             if not outstanding:
                 return WorkStatus.DONE
@@ -1791,7 +1807,7 @@ class Queue:
             gate=gate,
             submitted_by=submitted_by or "unknown",
         )
-        answered = self._answered_status(gate, metadata, record)
+        answered = self._answered_status(gate, metadata, record, failures)
         if answered is WorkStatus.AWAITING_VERIFY:
             # A rung passed and others have not been climbed. Not done, and it
             # must not release anything downstream; it waits for the rest.
@@ -2094,7 +2110,7 @@ class Queue:
                     "at": record.get("at"), "passed": gates.attestation_passes(record),
                 }}
                 metadata[PLAN_VS_ACTUAL_KEY] = review
-            answered = self._answered_status(gate, metadata, record)
+            answered = self._answered_status(gate, metadata, record, item.verify_failures)
             if answered is not None:
                 metadata.pop("verify_retry", None)
                 return {

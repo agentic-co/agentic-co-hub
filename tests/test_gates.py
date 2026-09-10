@@ -609,3 +609,30 @@ def test_a_failing_rung_still_fails_the_ladder(queue):
         queue, item, attestation=staged_attestation(1, "pytest -q", exit_status=1)
     )
     assert out.status == WorkStatus.VERIFY_FAILED
+
+
+def test_a_repaired_ladder_does_not_reuse_pre_repair_evidence(queue):
+    """agy's catch: the rung that was already green is the one nobody re-runs.
+
+    Stage 0 passes, stage 1 fails, the code is repaired, stage 1 is re-attested
+    — and the ladder used to complete citing a stage 0 that never ran against
+    the repaired code.
+    """
+    item = queue.create("ship it", verify=STAGED)
+    claim_and_finish(queue, item, attestation=staged_attestation(0, "ruff check ."))
+    queue.attest(
+        item.id,
+        staged_attestation(1, "pytest -q", exit_status=1),
+        submitted_by="worker-b",
+    )
+    assert queue.get(item.id).status == WorkStatus.VERIFY_FAILED
+
+    # The repair: stage 1 now passes. Stage 0's old green must not answer for
+    # the new generation.
+    after = queue.attest(
+        item.id, staged_attestation(1, "pytest -q"), submitted_by="worker-b"
+    )
+    assert after.status is not WorkStatus.DONE, (
+        "completed on a stage 0 recorded before the repair"
+    )
+    assert after.status == WorkStatus.AWAITING_VERIFY
