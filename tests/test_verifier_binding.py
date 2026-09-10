@@ -69,7 +69,7 @@ def test_a_declared_registry_refuses_the_vehicle_to_an_undeclared_node(queue):
     vehicle = queue.create("verify w-1", requires=["verify"])
     with pytest.raises(CapabilityError) as caught:
         queue.claim(vehicle.id, "kofi", capabilities=["verify"])
-    assert "bound that capability" in str(caught.value) and "AGENTCO_VERIFIERS" in str(caught.value)
+    assert "bound that capability" in str(caught.value) and "ASOP_VERIFIERS" in str(caught.value)
     assert queue.get(vehicle.id).status == WorkStatus.PENDING
     assert queue.claim(vehicle.id, "dana", capabilities=["verify"]) is not None
 
@@ -212,3 +212,46 @@ def test_over_mcp_the_binding_comes_from_the_operators_environment(tmp_path, mon
 
     monkeypatch.delenv("AGENTCO_VERIFIERS")
     assert tool(server("eve"), "whoami")()["verifiers"].startswith("undeclared")
+
+
+# --------------------------------------------------------------------------- #
+# The rename, and the door left open for deployments already on the old name
+# --------------------------------------------------------------------------- #
+
+
+def test_the_standards_name_is_read(monkeypatch):
+    monkeypatch.delenv("AGENTCO_VERIFIERS", raising=False)
+    monkeypatch.setenv("ASOP_VERIFIERS", "dana")
+    assert policy.verifiers_from_env() == {"dana"}
+
+
+def test_the_legacy_name_still_works(monkeypatch):
+    """A deployment already setting AGENTCO_VERIFIERS keeps working; nothing
+    new is written against it."""
+    monkeypatch.delenv("ASOP_VERIFIERS", raising=False)
+    monkeypatch.setenv("AGENTCO_VERIFIERS", "dana")
+    assert policy.verifiers_from_env() == {"dana"}
+
+
+def test_the_standards_name_wins_when_both_are_set(monkeypatch):
+    monkeypatch.setenv("ASOP_VERIFIERS", "dana")
+    monkeypatch.setenv("AGENTCO_VERIFIERS", "kofi")
+    assert policy.verifiers_from_env() == {"dana"}
+
+
+def test_a_deliberately_empty_declaration_is_not_overridden_by_the_legacy_name(monkeypatch):
+    """Presence, not truthiness. An operator who declares an EMPTY set means
+    something by it, and falling through to the old name would silently undo
+    it — which for verifiers means quietly re-opening the capability."""
+    monkeypatch.setenv("ASOP_VERIFIERS", "")
+    monkeypatch.setenv("AGENTCO_VERIFIERS", "kofi")
+    assert policy.verifiers_from_env() == frozenset()
+
+
+def test_adjudicators_follow_the_same_rename(monkeypatch):
+    monkeypatch.delenv("AGENTCO_ADJUDICATORS", raising=False)
+    monkeypatch.setenv("ASOP_ADJUDICATORS", "owner")
+    assert policy.adjudicators_from_env() == {"owner"}
+    monkeypatch.delenv("ASOP_ADJUDICATORS", raising=False)
+    monkeypatch.setenv("AGENTCO_ADJUDICATORS", "owner")
+    assert policy.adjudicators_from_env() == {"owner"}

@@ -74,8 +74,27 @@ from asop.revision import (  # noqa: F401 - re-exported; see the module docstrin
     steps_by_key,
 )
 
-VERIFIERS_ENV_VAR = "AGENTCO_VERIFIERS"
+#: The standard's name, with the pre-split one read as a deprecated fallback —
+#: the same courtesy `asop.revision` extends to ASOP_HUMANS / ASOP_PROTECTED_TAGS,
+#: and for the same reason: a standard should not ask an adopter to set a
+#: variable named after somebody's company (ASOP.md §9 names all four).
+VERIFIERS_ENV_VAR = "ASOP_VERIFIERS"
+LEGACY_VERIFIERS_ENV_VAR = "AGENTCO_VERIFIERS"
 VERIFY_CAPABILITY = "verify"
+
+
+def _declared(name: str, legacy: str) -> Optional[str]:
+    """The standard's variable, falling back to the pre-split name.
+
+    A deprecation with a door, mirroring `asop.revision._from_env`: a
+    deployment that already sets the AGENTCO_* name keeps working unchanged,
+    and nothing new is written against it. Checked for presence rather than
+    truthiness — an operator who deliberately declares an EMPTY set means
+    something by it, and falling through to the legacy name would silently
+    override that.
+    """
+    found = os.environ.get(name)
+    return found if found is not None else os.environ.get(legacy)
 
 # --------------------------------------------------------------------------- #
 # verifier binding — who may hold the `verify` capability
@@ -93,7 +112,8 @@ def verifiers_from_env(value: Optional[str] = None) -> frozenset[str]:
     turns the capability into a rail, and `verifier_status` says out loud
     whether the set is declared.
     """
-    return _split(value if value is not None else os.environ.get(VERIFIERS_ENV_VAR))
+    return _split(value if value is not None else _declared(
+        VERIFIERS_ENV_VAR, LEGACY_VERIFIERS_ENV_VAR))
 
 
 def bind_capabilities(
@@ -126,7 +146,8 @@ def _hashable(value):
 # adjudicator binding — who may judge a divergence (ASOP.md §6.1, decision 6)
 # --------------------------------------------------------------------------- #
 
-ADJUDICATORS_ENV_VAR = "AGENTCO_ADJUDICATORS"
+ADJUDICATORS_ENV_VAR = "ASOP_ADJUDICATORS"
+LEGACY_ADJUDICATORS_ENV_VAR = "AGENTCO_ADJUDICATORS"
 
 
 def adjudicators_from_env(value: Optional[str] = None) -> frozenset[str]:
@@ -141,7 +162,8 @@ def adjudicators_from_env(value: Optional[str] = None) -> frozenset[str]:
     thing that would degrade is not throughput but the evidence base. The
     human-only posture is the default; a declared route is the opt-in.
     """
-    return _split(value if value is not None else os.environ.get(ADJUDICATORS_ENV_VAR))
+    return _split(value if value is not None else _declared(
+        ADJUDICATORS_ENV_VAR, LEGACY_ADJUDICATORS_ENV_VAR))
 
 
 def may_adjudicate(actor: Optional[str], *, humans: Iterable[str],
