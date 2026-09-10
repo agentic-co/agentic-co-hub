@@ -2468,3 +2468,42 @@ def test_a_quarantined_row_is_preserved_as_the_bytes_that_were_read(queue):
     assert queue.quarantined == [raw_line], (
         "the quarantined row was re-encoded rather than preserved verbatim"
     )
+
+
+def test_retirement_cannot_close_an_item_whose_gate_never_answered(queue):
+    """`retire` writes DONE directly, so it must consult the gate.
+
+    Neighbouring test: `test_a_vehicle_is_never_itself_gated` in
+    `test_verifiers.py`, which pins the half that holds — the routing pass does
+    not create gated vehicles, so the vehicles it retires carry no gate. It
+    says nothing about what `retire` does when handed one, and the answer was:
+    closes it, `status=done`, `attestation=None`. The honest path on the same
+    gate — claim, `report_result(DONE)` — lands `awaiting_verify`.
+
+    This is finding 15's shape on the other side of the wire. There the
+    harness's `_on_step_closed` set a parent DONE past its gate and was
+    unexploited only because ASOP-filed parents carry no gate; here `retire`
+    does it and is unexploited only because its one caller writes its own
+    vehicles under a comment reading "NO `verify=` here, ever". Both are the
+    single-choke-point invariant resting on what callers happen to do.
+
+    It stops being latent as soon as a caller with gated items reaches for
+    retirement, which is what narrowing this runtime onto the protocol does:
+    cancel and skip are exactly the paths that want this verb.
+    """
+    gate = {
+        "kind": "judged",
+        "check": "a reviewer confirms the migration is reversible",
+        "max_park_seconds": 3600,
+        "on_timeout": "escalate",
+        "escalate_to": "release-owner",
+    }
+    item = queue.create("moot, but gated", verify=gate)
+
+    with pytest.raises(Refusal) as caught:
+        queue.retire(item.id, "superseded by a later plan")
+
+    assert caught.value.code == "gate_pinned"
+    assert queue.get(item.id).status is WorkStatus.PENDING, (
+        "retirement closed an item whose gate never answered"
+    )

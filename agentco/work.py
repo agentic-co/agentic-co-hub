@@ -2433,12 +2433,43 @@ class Queue:
         somebody working it, and the routing pass does not get to take work out
         of a verifier's hands because its own view of the queue went stale
         between the read and the write.
+
+        **Refuses a gated item.** This writes DONE directly, so without that
+        check it is a second way to reach DONE — the same shape as the harness's
+        `_on_step_closed`, which set a parent DONE past whatever gate it carried.
+        Measured before the check existed: an unclaimed item with a valid
+        `judged` gate retired straight to `done` with `attestation=None`, while
+        claim + `report_result(DONE)` on that same gate correctly landed
+        `awaiting_verify`.
+
+        Nothing exploited it, because the only caller creates the vehicles it
+        retires and does so under a comment reading "NO `verify=` here, ever"
+        (`agentco/verifiers.py`). That is an invariant held by a comment at one
+        call site rather than by this verb, and it stops holding the moment a
+        caller with gated items reaches for retirement — which is exactly what
+        narrowing a runtime onto this protocol does. A moot item that carries a
+        gate is not retirable: answer the gate, or fail it.
         """
 
         def close(item: WorkItem) -> dict:
             if item.status in SETTLED:
                 raise LeaseError(
                     f"refusing to retire {item_id}: it is already {item.status.value}."
+                )
+            if item.is_gated:
+                raise Refusal(
+                    code="gate_pinned",
+                    message=(
+                        f"refusing to retire {item_id}: it carries a "
+                        f"{item.verify.get('kind')!r} gate."
+                    ),
+                    remediation=(
+                        "Retirement writes DONE directly and would step past the "
+                        "gate. Answer it (`attest`) or fail the item "
+                        "(`report_result`) — an item whose check never ran must "
+                        "not read as done."
+                    ),
+                    http_status=409,
                 )
             if item.lease_active_at(_now()):
                 raise LeaseError(
