@@ -1029,13 +1029,48 @@ class SopLibrary:
         return filed
 
     def run_get(self, run_id: str, queue: Queue) -> dict:
-        """The tree with statuses and pins (ASOP.md §8.2)."""
-        parent = queue.get(run_id)
-        if parent is None:
+        """The tree with statuses and pins (ASOP.md §8.2).
+
+        A bead ANYWHERE in the tree answers with the run it belongs to, not
+        with a run view of itself. A nested step's children are parented to the
+        STEP bead rather than to the run, so a harness asking "what was this
+        run filed with?" from the id its bead carries used to get a view with
+        `inputs: {}` — and every nested step then refused its own entry check
+        for inputs that had been supplied at filing. Measured 2026-09-10 on
+        `asop-a4fb98de` v7 step 1 -> `asop-6ee962fc` v4 step 1.
+
+        Walking up answers the question that was actually asked. A bead that is
+        in no run tree still answers for itself, which is the old behaviour and
+        the only thing the old behaviour was right about.
+        """
+        item = queue.get(run_id)
+        if item is None:
             from agentco.work import unknown_item
 
             raise unknown_item(run_id, "read as a run")
-        return self._run_view(parent, queue, self._children_index(queue))
+        return self._run_view(self._root_run(item, queue), queue, self._children_index(queue))
+
+    @staticmethod
+    def _root_run(item: WorkItem, queue: Queue) -> WorkItem:
+        """The run this bead belongs to — the nearest ancestor carrying a run record.
+
+        Answers `item` itself when there is no such ancestor: a broken chain, a
+        loop, or an ordinary bead that is simply not part of a run. None of
+        those is an error to a reader, and refusing to render a tree because
+        its ancestry is odd would hide the tree as well as the oddity.
+        """
+        seen = {item.id}
+        cursor = item
+        while RUN_KEY not in (cursor.metadata or {}):
+            above = (cursor.metadata or {}).get(PARENT_KEY)
+            if above is None or above in seen:
+                return item
+            seen.add(above)
+            parent = queue.get(above)
+            if parent is None:
+                return item
+            cursor = parent
+        return cursor
 
     def run_list(self, queue: Queue, asop_id: Optional[str] = None,
                  status: Optional[WorkStatus] = None) -> list[dict]:

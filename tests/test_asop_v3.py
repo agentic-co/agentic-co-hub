@@ -335,6 +335,41 @@ def test_a_nested_step_files_the_inner_tree_as_its_children(library, queue):
     assert child.metadata[PARENT_KEY] == nested["itemId"]
 
 
+def test_a_nested_steps_bead_resolves_to_the_runs_own_inputs(library, queue):
+    """A nested step's children are parented to the STEP bead, not to the run.
+
+    A harness holding one of those beads asks `GET /runs/{parentId}` for what
+    the run was filed with; before this it got a view of the step bead — no
+    inputs, no bindings — and every nested step then refused its own entry
+    check for inputs that HAD been supplied. Measured live 2026-09-10.
+    """
+    inner = an_active_asop(library)
+    outer = library.create(
+        "release",
+        task_type="release",
+        roles={"owner": {"kind": "agent"}},
+        steps=[{"name": "develop", "uses": {"asop_id": inner.asop_id, "version": 1}}],
+    )
+    library.activate(outer.asop_id, 1)
+    bindings = {"owner": "alice", "implementer": "alice", "validator": "bob"}
+    run = library.run(outer.asop_id, queue, inputs=RUN_INPUTS, bindings=bindings)
+
+    grandchild = run["steps"][0]["children"][0]["itemId"]
+    view = library.run_get(grandchild, queue)
+
+    assert view["inputs"] == RUN_INPUTS
+    assert view["bindings"] == bindings
+    # And it names the RUN, not the bead that was asked about — the answer to
+    # "which run is this part of?" is a run id.
+    assert view["runId"] == run["runId"]
+
+
+def test_a_bead_in_no_run_tree_still_answers_for_itself(library, queue):
+    """The old behaviour, kept: walking up is a resolution, not a requirement."""
+    loose = queue.create("a bead with no run above it")
+    assert library.run_get(loose.id, queue)["runId"] == loose.id
+
+
 def _wrapper(library, title, inner_id):
     asop = library.create(
         title,
