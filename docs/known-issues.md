@@ -53,3 +53,33 @@ Small, cheap, and recorded here so they exist somewhere other than a chat log.
   is deliberate — the file exists to be copy-pasted by someone who never
   installs the package. It carries a `vendored-from` hash marker that goes
   stale, and fails a test, the moment `auth.sign` changes.
+
+## Attestations are not signed, so cross-organisation attestation is not yet real
+
+**Status: accepted for now, deliberately.** Recorded here so the capability is
+not claimed by implication.
+
+What exists is HMAC *request* signing (`agentco/auth.py`): a shared secret
+covering method, path, timestamp and a body digest. It authenticates a request
+in transit, and it is the right tool for that.
+
+It is the wrong tool for attestation across a trust boundary, and the reason is
+structural rather than a matter of key length. HMAC is symmetric. Both parties
+hold the same secret, so neither can demonstrate to a **third** party who wrote
+a given attestation — and either could have written one the other did not. The
+stored attestation carries no signature field at all; it is a plain record of
+check, exit status, environment, timestamp and verdict.
+
+Within one operator's estate this is fine, and that is the deployment shape
+today: the parties already trust each other, and the transport establishes who
+is calling.
+
+It stops being fine the moment the pitch is *multi-organisation* attestation —
+which is the one position where this contract has ground nobody else is
+standing on. Unsigned attestation across an organisational boundary is a shared
+database with extra steps. Making it real needs per-participant asymmetric keys
+and a signature over the attestation itself, so a verdict is checkable by
+someone who trusts neither party.
+
+**So do not describe cross-org attestation as supported.** The gap is the claim,
+not the code: the code is honest about being an in-estate coordination plane.
