@@ -83,3 +83,45 @@ someone who trusts neither party.
 
 **So do not describe cross-org attestation as supported.** The gap is the claim,
 not the code: the code is honest about being an in-estate coordination plane.
+
+## Finding 4: the plane fails open on an undeclared verifier registry
+
+**Status: open, measured, and the standing argument for it does not hold.**
+
+ASOP §5.3 and §9 both say an unset registry authenticates nobody. This plane
+fails open: `policy.verifiers_from_env` treats an empty declaration as
+UNDECLARED, `Queue.attest` never resolves `submitted_by` against the registry
+at all, and authority rests on the transport (who is calling) plus capability
+binding at claim. The runtime now fails closed, so the two disagree.
+
+**The argument for failing open was checked and does not survive.** It reads:
+a registry nobody is in "resolves every judged gate on the clock, which is work
+approved on a timer". That conflates two independent mechanisms. The clock path
+is `sweep_park_clocks` -> `resolve_by_default`, which never calls `attest`.
+Refusing an unauthenticated attester cannot make the timer fire more often. The
+timer hazard is real, and it is separately handled: `resolve_by_default` never
+grants evidence, leaves `attestation` untouched, writes a "no check was run"
+record, and `verifier_status` reports it in aggregate — which is what
+`test_a_queue_approving_itself_on_a_timer_says_so_loudly` pins.
+
+So failing closed is safe here. It is still a CONTRACT CHANGE rather than a
+patch, which is why it has not simply been done.
+
+**Measured cost**, from actually making the change and reverting it:
+
+* authenticating `submitted_by` at `attest` fails 102 tests as-is;
+* declaring a verifier set in the shared `queue`/`jsonl_queue` fixtures brings
+  that to 23 distinct tests across 6 files;
+* the remainder are not one shape — `test_verifier_binding` (6) is mostly
+  fixture collision, since those tests assert on an UNDECLARED registry and
+  must build their own queue; `test_adjudication` (6), `test_asop_v3` (5),
+  `test_outbox` (2) and `test_conformance` (2) are genuine expectation changes
+  reaching all three transports and the conformance harness itself.
+
+**One thing NOT to do, learned by doing it.** Refusing to FILE a judged or human
+gate with `on_timeout: pass` while no registry is declared looks like the tidy
+companion fix. It is not: it deletes a configuration this plane supports
+deliberately and tests on purpose (`test_a_clock_only_queue_never_reads_as_
+configured`, `test_a_queue_approving_itself_on_a_timer_says_so_loudly`). The
+design here is detect-and-report-in-aggregate, not prevent. Changing that is a
+separate product decision and should be argued on its own terms.
