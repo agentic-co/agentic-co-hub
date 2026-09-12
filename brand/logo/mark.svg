@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Agentic Co mark">
+  <title>Agentic Co — three steps, each with its gate</title>
+  <!-- The spine: the turnstile stem. Everything is asserted from somewhere. -->
+  <rect x="8" y="8" width="7" height="48" rx="1" fill="#10131A"/>
+  <!-- Three ordered steps, each terminating in a gate it must pass. -->
+  <rect x="19" y="10" width="26" height="8" rx="1" fill="#10131A"/>
+  <rect x="48" y="10" width="8"  height="8" rx="1" fill="#1B9E77"/>
+  <rect x="19" y="28" width="26" height="8" rx="1" fill="#10131A"/>
+  <rect x="48" y="28" width="8"  height="8" rx="1" fill="#1B9E77"/>
+  <rect x="19" y="46" width="26" height="8" rx="1" fill="#10131A"/>
+  <rect x="48" y="46" width="8"  height="8" rx="1" fill="#1B9E77"/>
+</svg>

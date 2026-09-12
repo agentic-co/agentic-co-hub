@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 286 64" width="286" height="64" role="img" aria-label="Agentic Co">
+  <title>Agentic Co — horizontal lockup</title>
+  <g>
+    <rect x="8" y="8" width="7" height="48" rx="1" fill="#10131A"/>
+    <rect x="19" y="10" width="26" height="8" rx="1" fill="#10131A"/>
+    <rect x="48" y="10" width="8"  height="8" rx="1" fill="#1B9E77"/>
+    <rect x="19" y="28" width="26" height="8" rx="1" fill="#10131A"/>
+    <rect x="48" y="28" width="8"  height="8" rx="1" fill="#1B9E77"/>
+    <rect x="19" y="46" width="26" height="8" rx="1" fill="#10131A"/>
+    <rect x="48" y="46" width="8"  height="8" rx="1" fill="#1B9E77"/>
+  </g>
+  <text x="80" y="42" fill="#10131A"
+        font-family="ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace"
+        font-size="30" font-weight="600" letter-spacing="-1">agentic</text>
+  <!-- The separator is a gate, borrowed from the mark. -->
+  <rect x="215" y="26" width="9" height="9" rx="1" fill="#1B9E77"/>
+  <text x="232" y="42" fill="#10131A"
+        font-family="ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace"
+        font-size="30" font-weight="600" letter-spacing="-1">co</text>
+</svg>
