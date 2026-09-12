@@ -181,6 +181,11 @@ def _observed_label(request: Request, body: bytes) -> Optional[str]:
         return None
 
 
+#: Largest request body this process will parse. Generous for the shapes this
+#: API takes — a run filing, an attestation, a snapshot pointer are all small —
+#: and far below anything that threatens the host.
+MAX_BODY_BYTES = 1_000_000
+
 def create_app(
     db_path: Optional[str] = None,
     keys: Optional[dict[str, str]] = None,
@@ -264,6 +269,24 @@ def create_app(
         """
         started = time.perf_counter()
         body = await request.body()
+        if len(body) > MAX_BODY_BYTES:
+            # Before json.loads, which is where an oversized body actually
+            # costs. A reverse proxy usually caps this, and "usually" is the
+            # problem: the zero-config floor this plane advertises has no proxy
+            # in front of it, so the process that parses the body is the only
+            # thing that can refuse it.
+            raise Refusal(
+                code="body_too_large",
+                message=(
+                    f"request body is {len(body)} bytes; the limit is "
+                    f"{MAX_BODY_BYTES}"
+                ),
+                remediation=(
+                    "Send a pointer rather than a payload — snapshots take an "
+                    "artifactUri precisely so bodies stay small."
+                ),
+                http_status=413,
+            )
         actor = "-"
         # Read BEFORE the try, so a refused call is recorded with the same
         # transport and label as an accepted one. A refusal is the most

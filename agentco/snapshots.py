@@ -73,7 +73,12 @@ def resolve_git(uri: str) -> tuple[str, str]:
     target = parsed.path or parsed.netloc
     rev = parsed.fragment or "HEAD"
     result = subprocess.run(
-        ["git", "-C", target, "rev-parse", rev],
+        # `--end-of-options` before the revision. `rev` is the URI fragment and
+        # reaches argv unescaped; there is no shell, so this is not RCE, but git
+        # reads a leading `-` as an option and a caller could steer the command
+        # rather than name a revision. The separator says "everything after this
+        # is an operand" and costs nothing when the input is honest.
+        ["git", "-C", target, "rev-parse", "--end-of-options", rev],
         capture_output=True,
         text=True,
         timeout=15,
@@ -89,7 +94,13 @@ def resolve_git(uri: str) -> tuple[str, str]:
             f"revision may have moved or the repo may not be there. Format is "
             f"'git:/abs/path/to/repo#branch-or-sha'."
         )
-    return "git-sha", result.stdout.strip()
+    # LAST line, not the whole output. `git rev-parse --end-of-options HEAD`
+    # echoes the separator on its own line before the sha, so stripping the
+    # whole stdout returned "--end-of-options\n<sha>" as the version token —
+    # which every later comparison would have treated as a changed artifact.
+    # Found by testing the honest path after hardening the hostile one.
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    return "git-sha", (lines[-1].strip() if lines else "")
 
 
 def resolve_file(uri: str) -> tuple[str, str]:

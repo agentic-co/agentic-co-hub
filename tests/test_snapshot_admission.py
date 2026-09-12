@@ -127,3 +127,33 @@ def test_a_refusal_is_recorded_not_raised():
     kind, value, reason = snapshots.resolve("file:/etc/hosts")
     assert (kind, value) == (None, None)
     assert reason
+
+
+def test_a_revision_shaped_like_an_option_cannot_steer_git(monkeypatch, tmp_path):
+    """`rev` is the URI fragment and reaches argv unescaped.
+
+    No shell, so not RCE — but git reads a leading `-` as an option, so a caller
+    could steer the command rather than name a revision. `--end-of-options`
+    says everything after it is an operand.
+    """
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "f").write_text("x")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "-c", "user.email=a@b.c", "-c", "user.name=t",
+         "commit", "-qm", "x"], check=True,
+    )
+    monkeypatch.setenv(snapshots.SCHEMES_ENV_VAR, "git")
+    monkeypatch.setenv(snapshots.FILE_ROOTS_ENV_VAR, str(tmp_path))
+
+    kind, value, reason = snapshots.resolve(f"git:{tmp_path}#HEAD")
+    assert (kind, reason) == ("git-sha", None)
+    # 40 hex characters and nothing else. The separator echoes on its own line,
+    # so taking the whole stdout returned "--end-of-options\n<sha>" — a version
+    # token every later comparison would have read as a changed artifact.
+    assert len(value) == 40 and all(c in "0123456789abcdef" for c in value)
+
+    _, _, refused = snapshots.resolve(f"git:{tmp_path}#--version")
+    assert refused
