@@ -38,6 +38,9 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import ipaddress
+import os
+import socket
 import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -162,6 +165,150 @@ def resolve_https(uri: str) -> tuple[str, str]:
 # Only resolvers that need no credentials and work on any machine ship here.
 # Anything requiring an API token, a tenant, or an admin's approval belongs in
 # a connector, which registers itself via `register_resolver`.
+# --------------------------------------------------------------------------- #
+# admission — what a participant may point at
+# --------------------------------------------------------------------------- #
+
+#: Schemes a participant may name. Declared by the operator, same env shape as
+#: `ASOP_VERIFIERS`, and deliberately NOT defaulting to everything registered.
+#:
+#: Registering a resolver says "this plane knows how to read that"; it does not
+#: say "any participant may ask it to". Those were the same decision until an
+#: assessment pointed out what it buys an untrusted caller: `file:` returns a
+#: digest for any path and a distinct reason when the path is absent, which is a
+#: file-existence and integrity oracle over the whole host — the registry key
+#: file and `.env` included. `git:` runs `git rev-parse` against any directory,
+#: enumerating private repositories. `http(s)` HEADs any address the caller
+#: names, and reachable, refused and timed-out are distinguishable, which is a
+#: port scanner with an authenticated front door.
+#:
+#: And it is not one request: `check_all` re-resolves every live snapshot on a
+#: cadence for the TTL — 90 days by default — so one accepted write keeps firing.
+SCHEMES_ENV_VAR = "ASOP_SNAPSHOT_SCHEMES"
+FILE_ROOTS_ENV_VAR = "ASOP_SNAPSHOT_FILE_ROOTS"
+
+#: Hosts an operator has deliberately named as reachable, exempt from the
+#: internal-address check. An operator whose artifact server sits on a private
+#: network needs this; a PARTICIPANT naming the same address does not get it,
+#: which is the whole distinction — the check is about who chose the address,
+#: and an allowlist is how the operator does the choosing.
+HTTP_HOSTS_ENV_VAR = "ASOP_SNAPSHOT_HTTP_HOSTS"
+
+#: Fails CLOSED, and the default is the safe half rather than none. `https` and
+#: `http` still need the network check below, but they cannot name a path on
+#: this host. `file:` and `git:` read the plane's own filesystem and are off
+#: unless an operator turns them on AND says where.
+DEFAULT_SCHEMES = ("https", "http")
+
+#: The schemes this module ships, and the only ones admission gates.
+#:
+#: A scheme a CONNECTOR registered is admitted by the act of installing the
+#: connector — that is an operator decision already, and gating it again would
+#: mean an installed connector silently does nothing until a second, separate
+#: declaration is made. These four are different: they are always present, and
+#: they read the plane's own filesystem and network. Nobody chose them.
+BUILTIN_SCHEMES = frozenset({"file", "git", "http", "https"})
+
+_PRIVATE_V4 = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("0.0.0.0/8"),
+)
+
+
+def _declared(name: str, default: tuple[str, ...]) -> frozenset[str]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return frozenset(default)
+    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+
+def _host_is_internal(host: str) -> bool:
+    """True if this name resolves anywhere a participant should not reach.
+
+    Resolved rather than pattern-matched: `localhost`, `127.1`, `0x7f.1`,
+    `2130706433` and a hostname whose A record is 169.254.169.254 are all the
+    same request wearing different spellings, and only resolution sees that.
+    Unresolvable counts as internal — a name we cannot check is not a name we
+    can clear.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return True
+    for info in infos:
+        addr = info[4][0].split("%")[0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return True
+        if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved:
+            return True
+        if ip.version == 4 and any(ip in net for net in _PRIVATE_V4):
+            return True
+    return False
+
+
+def admission_reason(uri: str) -> Optional[str]:
+    """Why this URI may not be resolved, or None if it may.
+
+    A REASON, not an exception, because this module already models "recorded but
+    unresolvable" as a first-class outcome — so a refused scheme lands in a path
+    the docs already describe, and the snapshot is still recorded. The caller
+    learns the pointer was kept and not followed, which is the truth.
+    """
+    parsed = urlparse(uri)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in BUILTIN_SCHEMES:
+        return None  # a connector's scheme; installing it was the decision
+    allowed = _declared(SCHEMES_ENV_VAR, DEFAULT_SCHEMES)
+    if scheme not in allowed:
+        return (
+            f"scheme {scheme!r} is not in the operator's declared set "
+            f"({', '.join(sorted(allowed)) or 'none'}). Recorded, not followed — "
+            f"declare {SCHEMES_ENV_VAR} to allow it."
+        )
+    if scheme in ("file", "git"):
+        roots = _declared(FILE_ROOTS_ENV_VAR, ())
+        if not roots:
+            return (
+                f"{scheme}: reads this host's filesystem and no roots are "
+                f"declared. Recorded, not followed — set {FILE_ROOTS_ENV_VAR} to "
+                f"the directories a participant may point at."
+            )
+        target = Path(parsed.path or parsed.netloc)
+        try:
+            resolved = target.resolve()
+        except OSError:
+            return f"{target} could not be resolved to a real path"
+        if not any(
+            resolved == Path(r).resolve() or Path(r).resolve() in resolved.parents
+            for r in roots
+        ):
+            return (
+                f"{resolved} is outside every declared root. Recorded, not "
+                f"followed — symlinks are resolved before this comparison."
+            )
+        return None
+    if scheme in ("http", "https"):
+        host = parsed.hostname
+        if not host:
+            return f"{uri!r} names no host"
+        if host in _declared(HTTP_HOSTS_ENV_VAR, ()):
+            return None
+        if _host_is_internal(host):
+            return (
+                f"{host} resolves to a loopback, link-local, private or reserved "
+                f"address. Recorded, not followed — the plane does not reach "
+                f"into its own network on a participant's behalf. An operator "
+                f"who means to allow it names it in {HTTP_HOSTS_ENV_VAR}."
+            )
+    return None
+
+
 RESOLVERS: dict[str, Callable[[str], tuple[str, str]]] = {
     "git": resolve_git,
     "file": resolve_file,
@@ -208,6 +355,9 @@ def resolve(uri: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
                 "recorded, but cannot report divergence until its connector is installed."
             ),
         )
+    refused = admission_reason(uri)
+    if refused is not None:
+        return None, None, refused
     resolver = RESOLVERS.get(scheme)
     if resolver is None:
         return None, None, (

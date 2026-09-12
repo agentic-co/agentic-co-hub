@@ -53,6 +53,30 @@ from agentco.sop import SopLibrary
 from agentco.sqlstore import SqlQueue, SqlSopLibrary
 from agentco.work import Queue
 
+
+@pytest.fixture(autouse=True)
+def _snapshot_admission(monkeypatch, tmp_path):
+    """Declare snapshot schemes and file roots for the suite.
+
+    Snapshot resolution fails CLOSED by default: `file:` and `git:` read the
+    plane's own filesystem, so they are off until an operator says which
+    directories a participant may point at. Registry tests are about recording
+    and divergence, not admission, so they declare a permissive set over
+    `tmp_path` and run through the real check rather than around it.
+
+    Admission itself is tested in `test_snapshot_admission.py`, which builds its
+    own environment — including the cases this fixture deliberately allows.
+    """
+    monkeypatch.setenv("ASOP_SNAPSHOT_SCHEMES", "https,http,file,git,s3")
+    monkeypatch.setenv(
+        "ASOP_SNAPSHOT_FILE_ROOTS", f"{tmp_path},/tmp,/private/tmp,/var/folders"
+    )
+    # Several tests stand up a real local HTTP server and resolve against it.
+    # Loopback is refused for a participant-supplied host, so the operator has
+    # to name it — which is exactly the distinction the check draws.
+    monkeypatch.setenv("ASOP_SNAPSHOT_HTTP_HOSTS", "127.0.0.1,localhost,::1")
+
+
 PG_ENV_VAR = "AGENTCO_TEST_PG"
 
 BACKENDS = ("jsonl", "sqlite")
