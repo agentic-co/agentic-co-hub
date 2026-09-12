@@ -1,0 +1,56 @@
+<!-- @dsCard group="Foundations" -->
+<!doctype html>
+<meta charset="utf-8">
+<title>Type</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../components.css">
+<link rel="stylesheet" href="../preview.css">
+
+<h1>Type</h1>
+<p class="lede">Two voices, and the split is the point. Prose argues; monospace
+is the machine speaking. Anything a system would emit &mdash; a gate kind, a
+command, an identifier, a verdict &mdash; is mono.</p>
+
+<dl class="spec">
+  <dt>Display &mdash; Inter 700, tracking &minus;0.025em</dt>
+  <dd style="font-size:var(--ac-text-2xl);line-height:var(--ac-leading-tight);
+             letter-spacing:var(--ac-tracking-display);font-weight:var(--ac-weight-bold)">
+    An identity is not a verdict.</dd>
+
+  <dt>Heading &mdash; Inter 600</dt>
+  <dd style="font-size:var(--ac-text-xl);letter-spacing:var(--ac-tracking-tight);
+             font-weight:var(--ac-weight-semi)">
+    The gate is the load-bearing part</dd>
+
+  <dt>Body &mdash; Inter 400, 1.65</dt>
+  <dd style="max-width:var(--ac-measure)">Each step states what must be done,
+    what must be true before it starts, how the result is proven, where the
+    result is written, and which role does it.</dd>
+
+  <dt>System voice &mdash; IBM Plex Mono 600</dt>
+  <dd style="font-family:var(--ac-font-mono);font-size:var(--ac-text-lg);
+             font-weight:var(--ac-weight-semi);letter-spacing:var(--ac-tracking-tight)">
+    gate: deterministic &mdash; re-run pytest -q</dd>
+
+  <dt>Detail &mdash; IBM Plex Mono 400</dt>
+  <dd style="font-family:var(--ac-font-mono);font-size:var(--ac-text-sm);color:var(--ac-fg-muted)">
+    step 4 of 6 &middot; executor &#8800; verifier</dd>
+
+  <dt>Label &mdash; mono, uppercase, tracked out</dt>
+  <dd><span class="ac-label">precondition</span></dd>
+</dl>
+
+<h2>Scale</h2>
+<div class="row row--top" style="gap:var(--ac-space-6)">
+  <figure><span style="font-size:var(--ac-text-3xl);font-weight:700">Aa</span><figcaption>3xl 2.6rem</figcaption></figure>
+  <figure><span style="font-size:var(--ac-text-2xl);font-weight:700">Aa</span><figcaption>2xl 1.9rem</figcaption></figure>
+  <figure><span style="font-size:var(--ac-text-xl)">Aa</span><figcaption>xl 1.5rem</figcaption></figure>
+  <figure><span style="font-size:var(--ac-text-lg)">Aa</span><figcaption>lg 1.15rem</figcaption></figure>
+  <figure><span style="font-size:var(--ac-text-base)">Aa</span><figcaption>base 1.0625rem</figcaption></figure>
+  <figure><span style="font-size:var(--ac-text-sm)">Aa</span><figcaption>sm 0.9rem</figcaption></figure>
+  <figure><span style="font-size:var(--ac-text-xs)">Aa</span><figcaption>xs 0.8125rem</figcaption></figure>
+</div>
+
+<p class="rule">Neither face is installed on every machine. The token stacks name
+real fallbacks (system sans, SF&nbsp;Mono/Menlo) and the pages are designed to
+hold up in them &mdash; a blocked font request degrades, it does not break.</p>

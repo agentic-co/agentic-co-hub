@@ -1,0 +1,47 @@
+<!-- @dsCard group="ASOP" -->
+<!doctype html>
+<meta charset="utf-8">
+<title>Verdict &amp; gate</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../components.css">
+<link rel="stylesheet" href="../preview.css">
+
+<h1>Verdict &amp; gate</h1>
+<p class="lede">The two components that carry spec invariants rather than
+styling. They exist so no page can invent a state the spec does not have.</p>
+
+<h2>Verdict &mdash; three states, and there is no fourth</h2>
+<div class="row">
+  <span class="ac-verdict ac-verdict--pass">attested</span>
+  <span class="ac-verdict ac-verdict--fail">refused</span>
+  <span class="ac-verdict ac-verdict--pending">awaiting human</span>
+</div>
+<p class="rule">Each state carries a glyph as well as a colour, so the
+distinction survives greyscale and colour-blindness. <strong>"Awaiting" is
+styled neutral, never as a soft pass</strong> &mdash; an unfinished check must
+not read as a finished one.</p>
+<pre style="font-family:var(--ac-font-mono);font-size:var(--ac-text-xs);background:var(--ac-surface);padding:var(--ac-space-4);border-radius:var(--ac-radius-md);overflow-x:auto">&lt;span class="ac-verdict ac-verdict--pass"&gt;attested&lt;/span&gt;</pre>
+
+<h2>Gate &mdash; the three kinds</h2>
+<div class="row">
+  <span class="ac-gate ac-gate--deterministic">deterministic</span>
+  <span class="ac-gate ac-gate--judged">judged</span>
+  <span class="ac-gate ac-gate--human">human</span>
+</div>
+<p class="rule"><strong>Kind is always a word, never colour alone.</strong>
+Colour says whether something passed; it does not say what kind of check it
+was. A gate badge is therefore neutral until a verdict attaches to it.</p>
+
+<h2>Together, as they actually appear</h2>
+<div class="row">
+  <span class="ac-gate ac-gate--deterministic">deterministic</span>
+  <span class="ac-verdict ac-verdict--pass">attested</span>
+  <span style="color:var(--ac-fg-muted);font-family:var(--ac-font-mono);font-size:var(--ac-text-xs)">
+    re-run <code>pytest -q</code> &middot; exit 0</span>
+</div>
+<div class="row">
+  <span class="ac-gate ac-gate--human">human</span>
+  <span class="ac-verdict ac-verdict--pending">awaiting human</span>
+  <span style="color:var(--ac-fg-muted);font-family:var(--ac-font-mono);font-size:var(--ac-text-xs)">
+    assigned 14m ago</span>
+</div>

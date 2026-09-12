@@ -1,0 +1,111 @@
+/* Chrome for the design-system preview pages only. Nothing here ships —
+ * it exists so each card renders as a legible page in the gallery.
+ * Every value still comes from tokens.css; this file adds no colours. */
+
+body {
+  margin: 0;
+  padding: var(--ac-space-6);
+  background: var(--ac-bg);
+  color: var(--ac-fg);
+  font: var(--ac-text-base)/var(--ac-leading-body) var(--ac-font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1 {
+  font-size: var(--ac-text-xl);
+  letter-spacing: var(--ac-tracking-display);
+  font-weight: var(--ac-weight-bold);
+  margin: 0 0 var(--ac-space-3);
+}
+h2 {
+  font-size: var(--ac-text-sm);
+  font-family: var(--ac-font-mono);
+  letter-spacing: var(--ac-tracking-label);
+  text-transform: uppercase;
+  color: var(--ac-fg-muted);
+  font-weight: var(--ac-weight-medium);
+  margin: var(--ac-space-6) 0 var(--ac-space-3);
+}
+
+.lede {
+  color: var(--ac-fg-muted);
+  font-size: var(--ac-text-sm);
+  max-width: 62ch;
+  margin: 0 0 var(--ac-space-5);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--ac-space-5);
+  margin: var(--ac-space-4) 0;
+}
+.row--top { align-items: flex-start; }
+
+figure { margin: 0; }
+figcaption {
+  font-family: var(--ac-font-mono);
+  font-size: var(--ac-text-xs);
+  color: var(--ac-fg-muted);
+  margin-top: var(--ac-space-2);
+}
+
+.lockup {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ac-space-3);
+  font-family: var(--ac-font-mono);
+  font-weight: var(--ac-weight-semi);
+  font-size: var(--ac-text-2xl);
+  letter-spacing: var(--ac-tracking-display);
+}
+.lockup .sep {
+  width: 11px; height: 11px; border-radius: 2px;
+  background: var(--ac-verdict-pass); display: block;
+}
+
+.rule {
+  font-size: var(--ac-text-sm);
+  color: var(--ac-fg-muted);
+  max-width: 62ch;
+  border-left: 2px solid var(--ac-rule);
+  padding-left: var(--ac-space-4);
+  margin: var(--ac-space-4) 0;
+}
+.rule strong { color: var(--ac-fg); }
+
+code {
+  font-family: var(--ac-font-mono);
+  background: var(--ac-surface);
+  padding: 0.1em 0.35em;
+  border-radius: var(--ac-radius-sm);
+  font-size: 0.88em;
+}
+
+/* swatches */
+.sw { flex: 1 1 140px; min-width: 140px; }
+.sw .chip {
+  height: 72px;
+  border-radius: var(--ac-radius-md);
+  border: 1px solid var(--ac-rule);
+}
+.sw .nm { font-size: var(--ac-text-sm); font-weight: var(--ac-weight-semi); margin-top: var(--ac-space-2); }
+.sw .hex, .sw .use {
+  font-family: var(--ac-font-mono);
+  font-size: var(--ac-text-xs);
+  color: var(--ac-fg-muted);
+}
+.sw .use { font-family: var(--ac-font-sans); margin-top: 2px; line-height: 1.4; }
+
+/* type specimens */
+dl.spec { margin: 0; }
+dl.spec dt {
+  font-family: var(--ac-font-mono);
+  font-size: var(--ac-text-xs);
+  letter-spacing: var(--ac-tracking-label);
+  text-transform: uppercase;
+  color: var(--ac-fg-muted);
+  margin-top: var(--ac-space-5);
+}
+dl.spec dd { margin: var(--ac-space-2) 0 0; }

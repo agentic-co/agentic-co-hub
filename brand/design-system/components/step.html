@@ -1,0 +1,54 @@
+<!-- @dsCard group="ASOP" -->
+<!doctype html>
+<meta charset="utf-8">
+<title>Step &amp; attestation</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../components.css">
+<link rel="stylesheet" href="../preview.css">
+
+<h1>Step &amp; attestation</h1>
+<p class="lede">One step of an ASOP, and the record that closes it. Between them
+they render the whole contract: what must be true, what was done, how it was
+proven, who was allowed to say so.</p>
+
+<h2>Step</h2>
+<div class="ac-step" style="max-width:54rem">
+  <div class="ac-step__head">
+    <span class="ac-label">step 4 of 6</span>
+    <h3>Run the test suite</h3>
+    <span class="ac-verdict ac-verdict--pass">attested</span>
+  </div>
+  <dl class="ac-step__fields">
+    <div class="ac-field"><dt>precondition</dt>
+      <dd>implementation complete &middot; tree clean</dd></div>
+    <div class="ac-field"><dt>action</dt>
+      <dd>run the suite named in the procedure</dd></div>
+    <div class="ac-field ac-field--gate"><dt>gate</dt>
+      <dd><span class="ac-gate ac-gate--deterministic">deterministic</span>
+        re-run <code>pytest -q</code></dd></div>
+    <div class="ac-field"><dt>artifact</dt>
+      <dd>run log &middot; exit code &middot; duration</dd></div>
+    <div class="ac-field"><dt>role</dt>
+      <dd>executor <span class="ac-ne">&#8800;</span> verifier</dd></div>
+  </dl>
+</div>
+<p class="rule"><strong>The gate row is the only coloured row</strong>, because
+it is the only row carrying a verdict. The <span class="ac-ne">&#8800;</span> in
+the role row is Refuse-coloured because it states a prohibition, not because a
+separator wanted an accent.</p>
+
+<h2>Attestation</h2>
+<div class="ac-attestation" style="max-width:54rem">
+  <div class="ac-attestation__claim">claim: <code>pytest -q</code> re-run, exit 0, 1249 passed
+    &middot; by: verifier-2 &middot; at: 2026-09-12T09:14Z</div>
+</div>
+
+<h2>Attestation, rejected</h2>
+<div class="ac-attestation ac-attestation--rejected" style="max-width:54rem;margin-top:var(--ac-space-3)">
+  <div class="ac-attestation__claim">by: executor-3 &middot; at: 2026-09-12T09:14Z</div>
+  <div class="ac-attestation__why">rejected &mdash; names an identity and a time, no verdict</div>
+</div>
+<p class="rule"><strong>The component is shaped so the missing piece is
+visible.</strong> An attestation that names only who and when renders as
+incomplete, which is the point: an identity and a timestamp are not a verdict.
+The rejected variant also fires when the signer is the executor.</p>

@@ -1,0 +1,141 @@
+/* Agentic Co design tokens, v1.
+ *
+ * Two layers, deliberately. The PRIMITIVES are the four brand colours and
+ * nothing else. The SEMANTIC layer names roles — background, rule, verdict —
+ * and is the only layer a component should touch. Swapping ground (light/dark)
+ * rebinds the semantic layer and leaves every component untouched.
+ *
+ * The rule that governs the whole file: --ac-attest is a verdict, not an
+ * accent. Nothing uses it to decorate. A link is not green, a heading is not
+ * green, a hover is not green. If it is green, it passed a gate.
+ * See BRAND.md § Palette.
+ */
+
+:root {
+  /* ── primitives ─────────────────────────────────────────────── */
+  --ac-ink:            #10131A;
+  --ac-paper:          #FAF9F5;
+  --ac-attest:         #1B9E77;
+  --ac-refuse:         #D95F02;
+  --ac-grey:           #6B7280;
+
+  /* Ground-specific lifts. The verdict colours are darkened for white and
+   * brightened for ink so both clear AA on the ground they sit on. */
+  --ac-attest-on-ink:  #2DD4A7;
+  --ac-refuse-on-ink:  #F2803C;
+  --ac-grey-on-ink:    #7C889B;
+
+  /* ── typography ─────────────────────────────────────────────── */
+  /* Prose argues; mono is the machine speaking. Anything a system would
+   * emit — a gate kind, a command, an identifier, a verdict — is mono. */
+  --ac-font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
+                  Helvetica, Arial, sans-serif;
+  --ac-font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", SFMono-Regular,
+                  Menlo, monospace;
+
+  --ac-text-xs:   0.8125rem;
+  --ac-text-sm:   0.9rem;
+  --ac-text-base: 1.0625rem;
+  --ac-text-lg:   1.15rem;
+  --ac-text-xl:   1.5rem;
+  --ac-text-2xl:  1.9rem;
+  --ac-text-3xl:  2.6rem;
+
+  --ac-leading-tight: 1.2;
+  --ac-leading-snug:  1.4;
+  --ac-leading-body:  1.65;
+
+  /* Display type is set tight; body type is not. */
+  --ac-tracking-display: -0.025em;
+  --ac-tracking-tight:   -0.01em;
+  --ac-tracking-label:    0.08em;
+
+  --ac-weight-regular: 400;
+  --ac-weight-medium:  500;
+  --ac-weight-semi:    600;
+  --ac-weight-bold:    700;
+
+  /* ── space, on a 4px base ───────────────────────────────────── */
+  --ac-space-1: 0.25rem;
+  --ac-space-2: 0.5rem;
+  --ac-space-3: 0.75rem;
+  --ac-space-4: 1rem;
+  --ac-space-5: 1.5rem;
+  --ac-space-6: 2rem;
+  --ac-space-7: 3rem;
+  --ac-space-8: 4rem;
+
+  --ac-radius-sm:   3px;
+  --ac-radius-md:   6px;
+  --ac-radius-lg:  12px;
+  --ac-radius-pill: 999px;
+
+  /* The measure. Prose stops being readable past roughly this. */
+  --ac-measure: 68ch;
+
+  /* ── semantic: light ground ─────────────────────────────────── */
+  --ac-bg:        var(--ac-paper);
+  --ac-surface:   #F2F1EC;
+  --ac-fg:        var(--ac-ink);
+  --ac-fg-muted:  var(--ac-grey);
+  --ac-rule:      #E2E0DA;
+
+  --ac-verdict-pass:    var(--ac-attest);
+  --ac-verdict-fail:    var(--ac-refuse);
+  --ac-verdict-pending: var(--ac-grey);
+  --ac-verdict-pass-bg:    rgba(27, 158, 119, 0.13);
+  --ac-verdict-fail-bg:    rgba(217, 95, 2, 0.13);
+  --ac-verdict-pending-bg: rgba(107, 114, 128, 0.14);
+
+  /* Links carry no colour. The one accent is spoken for, and an underline
+   * has always been enough. */
+  --ac-link:           var(--ac-fg);
+  --ac-link-underline: #B9B6AC;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ac-bg:        #121620;
+    --ac-surface:   #171B24;
+    --ac-fg:        #E4E6EA;
+    --ac-fg-muted:  var(--ac-grey-on-ink);
+    --ac-rule:      #272D3A;
+
+    --ac-verdict-pass:    var(--ac-attest-on-ink);
+    --ac-verdict-fail:    var(--ac-refuse-on-ink);
+    --ac-verdict-pending: var(--ac-grey-on-ink);
+    --ac-verdict-pass-bg:    rgba(45, 212, 167, 0.12);
+    --ac-verdict-fail-bg:    rgba(242, 128, 60, 0.12);
+    --ac-verdict-pending-bg: rgba(124, 136, 155, 0.15);
+
+    --ac-link:           var(--ac-fg);
+    --ac-link-underline: #4A5364;
+  }
+}
+
+/* Explicit override wins over the media query in both directions, so a
+ * toggle can force either ground. */
+:root[data-theme="light"] {
+  --ac-bg: var(--ac-paper); --ac-surface: #F2F1EC;
+  --ac-fg: var(--ac-ink);   --ac-fg-muted: var(--ac-grey);
+  --ac-rule: #E2E0DA;
+  --ac-verdict-pass: var(--ac-attest); --ac-verdict-fail: var(--ac-refuse);
+  --ac-verdict-pending: var(--ac-grey);
+  --ac-verdict-pass-bg: rgba(27,158,119,.13);
+  --ac-verdict-fail-bg: rgba(217,95,2,.13);
+  --ac-verdict-pending-bg: rgba(107,114,128,.14);
+  --ac-link: var(--ac-fg); --ac-link-underline: #B9B6AC;
+}
+
+:root[data-theme="dark"] {
+  --ac-bg: #121620; --ac-surface: #171B24;
+  --ac-fg: #E4E6EA; --ac-fg-muted: var(--ac-grey-on-ink);
+  --ac-rule: #272D3A;
+  --ac-verdict-pass: var(--ac-attest-on-ink);
+  --ac-verdict-fail: var(--ac-refuse-on-ink);
+  --ac-verdict-pending: var(--ac-grey-on-ink);
+  --ac-verdict-pass-bg: rgba(45,212,167,.12);
+  --ac-verdict-fail-bg: rgba(242,128,60,.12);
+  --ac-verdict-pending-bg: rgba(124,136,155,.15);
+  --ac-link: var(--ac-fg); --ac-link-underline: #4A5364;
+}

@@ -124,6 +124,20 @@ def main() -> int:
         if got != want:
             bad.append(f"space.{key}: css {got!r} != json {want!r}")
 
+    # 4. the vendored copies are byte-identical.
+    #
+    # tokens.css exists three times: here, under design-system/ so the gallery
+    # pages resolve it, and inside the blog repo. Copies are the honest choice
+    # — there is no build step spanning two repos — but a copy nobody checks is
+    # just drift with a delay. The blog lives outside this tree, so only the
+    # in-tree copy can be gated here; BRAND.md § Consumers carries the rest.
+    for rel in ("tokens.css", "components.css"):
+        vendored = HERE / "design-system" / rel
+        if not vendored.exists():
+            bad.append(f"design-system/{rel} is missing — the gallery pages will render unstyled")
+        elif vendored.read_bytes() != (HERE / rel).read_bytes():
+            bad.append(f"design-system/{rel} has drifted from brand/{rel} — re-copy it")
+
     if bad:
         print("tokens: FAIL", file=sys.stderr)
         for line in bad:

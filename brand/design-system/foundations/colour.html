@@ -1,0 +1,53 @@
+<!-- @dsCard group="Foundations" -->
+<!doctype html>
+<meta charset="utf-8">
+<title>Colour</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="../components.css">
+<link rel="stylesheet" href="../preview.css">
+
+<h1>Colour</h1>
+<p class="lede">Four colours. Attest and Refuse are the ColorBrewer Dark2 pair,
+chosen because a pass/fail distinction a colour-blind reader cannot make is not
+a distinction.</p>
+
+<h2>Primitives</h2>
+<div class="row row--top">
+  <div class="sw"><div class="chip" style="background:#10131A"></div>
+    <div class="nm">Ink</div><div class="hex">#10131A</div>
+    <div class="use">Ground, structure, body text</div></div>
+  <div class="sw"><div class="chip" style="background:#FAF9F5"></div>
+    <div class="nm">Paper</div><div class="hex">#FAF9F5</div>
+    <div class="use">Light ground &mdash; warm, never pure white</div></div>
+  <div class="sw"><div class="chip" style="background:#1B9E77"></div>
+    <div class="nm">Attest</div><div class="hex">#1B9E77</div>
+    <div class="use">Gates and passing verdicts only</div></div>
+  <div class="sw"><div class="chip" style="background:#D95F02"></div>
+    <div class="nm">Refuse</div><div class="hex">#D95F02</div>
+    <div class="use">Refusals, failed gates, separation</div></div>
+  <div class="sw"><div class="chip" style="background:#6B7280"></div>
+    <div class="nm">Grey</div><div class="hex">#6B7280</div>
+    <div class="use">Labels, secondary prose</div></div>
+</div>
+
+<h2>On ink, the verdict colours lift</h2>
+<div class="row row--top">
+  <div class="sw"><div class="chip" style="background:#2DD4A7"></div>
+    <div class="nm">Attest</div><div class="hex">#2DD4A7</div></div>
+  <div class="sw"><div class="chip" style="background:#F2803C"></div>
+    <div class="nm">Refuse</div><div class="hex">#F2803C</div></div>
+  <div class="sw"><div class="chip" style="background:#7C889B"></div>
+    <div class="nm">Grey</div><div class="hex">#7C889B</div></div>
+</div>
+
+<p class="rule"><strong>The rule that keeps the palette honest: Attest never
+decorates.</strong> If something is green, it passed a gate. The moment green
+becomes a generic accent, the mark stops meaning anything and the identity is
+just three bars. This is why links on the blog carry no colour at all.</p>
+
+<h2>Semantic layer</h2>
+<p class="lede">Components bind to these, never to a primitive. Swapping ground
+rebinds this layer and leaves every component untouched.</p>
+<pre style="font-family:var(--ac-font-mono);font-size:var(--ac-text-xs);background:var(--ac-surface);padding:var(--ac-space-4);border-radius:var(--ac-radius-md);overflow-x:auto">--ac-bg  --ac-surface  --ac-fg  --ac-fg-muted  --ac-rule
+--ac-verdict-pass  --ac-verdict-fail  --ac-verdict-pending
+--ac-link  --ac-link-underline</pre>
