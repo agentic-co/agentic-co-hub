@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege. A workflow with no `permissions:` takes the repository
+# default, which on many repos is a write-scoped GITHUB_TOKEN — handed to
+# every third-party action in the job. Nothing here writes to the repo.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -16,7 +22,7 @@ jobs:
     # and it must not be reported as one line in a test summary.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Scan for identity leakage
         # No leakguard.toml in the tree on purpose — a denylist of real names is
         # itself a list of real names. CI runs base rules; a fork or a private
@@ -30,8 +36,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
         with:
           enable-cache: true
       - run: uv python install ${{ matrix.python-version }}

@@ -1,0 +1,21 @@
+# Dependabot keeps two things current, and the second is the reason this file
+# exists: workflow actions are pinned to commit SHAs for supply-chain safety,
+# and a pinned SHA is a frozen dependency unless something proposes the bump.
+# Pinning without this is how a "hardened" workflow quietly rots on an old
+# action for a year.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+    open-pull-requests-limit: 5
