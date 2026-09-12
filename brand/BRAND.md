@@ -79,6 +79,43 @@ aren't signed yet" — in the same breath as the claim.
 
 Lowercase for the wordmark, sentence case everywhere else. No exclamation marks.
 
+## The design system
+
+The guidelines above describe the brand; these files *are* it, in a form code
+can import.
+
+| file | what it is |
+|---|---|
+| `tokens.css` | primitives + a semantic layer, both grounds. The only file allowed to contain a literal colour |
+| `tokens.json` | the same values for tooling that cannot parse CSS |
+| `components.css` | `.ac-verdict`, `.ac-gate`, `.ac-step`, `.ac-attestation`, plus label/card/button |
+| `check-tokens.py` | proves the two token files agree, and that the manual dark toggle matches the automatic one |
+
+**Components touch the semantic layer only.** A component that reaches past it
+to `--ac-attest` has hardcoded a ground and will be wrong on the other one.
+
+The ASOP components are not decoration — they encode the spec. `.ac-verdict`
+renders pass, fail and pending and nothing else, so a page cannot invent a
+fourth state or paint a passing colour on something that did not pass. Gate
+*kind* is always shown as a word; colour says whether it passed, never what it
+is.
+
+Run the check before publishing anything that uses these:
+
+```
+python3 brand/check-tokens.py
+```
+
+It fails on drift in either direction — I broke a value on purpose to confirm
+it catches it, rather than trusting a green first run.
+
+### Consumers
+
+The blog (`agentic-co.github.io`) vendors `tokens.css` and `components.css`
+into `assets/`. That is a copy, so **a token change here is not live until it is
+copied there** — there is no build step linking the two repos, and pretending
+otherwise is how the two drift.
+
 ## Regenerating
 
 The PNGs come from the SVGs and two HTML sheets via headless Chrome; the render

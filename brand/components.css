@@ -1,0 +1,151 @@
+/* Agentic Co components, v1. Requires tokens.css.
+ *
+ * Two groups. The GENERIC ones (label, card, button) are unremarkable on
+ * purpose. The ASOP ones (step, gate, verdict, attestation) encode the spec,
+ * and that is the reason this file exists rather than a pile of ad-hoc markup:
+ * the invariants belong in one place.
+ *
+ * The invariant these carry: a verdict is a verdict. `.ac-verdict` renders
+ * pass/fail/pending and nothing else, so no page can invent a fourth state or
+ * paint a passing colour on something that did not pass.
+ */
+
+/* ── generic ────────────────────────────────────────────────────── */
+
+.ac-label {
+  font-family: var(--ac-font-mono);
+  font-size: var(--ac-text-xs);
+  letter-spacing: var(--ac-tracking-label);
+  text-transform: uppercase;
+  color: var(--ac-fg-muted);
+}
+
+.ac-card {
+  background: var(--ac-surface);
+  border: 1px solid var(--ac-rule);
+  border-radius: var(--ac-radius-lg);
+  padding: var(--ac-space-5);
+}
+
+.ac-btn {
+  font: var(--ac-weight-semi) var(--ac-text-sm)/1 var(--ac-font-sans);
+  padding: var(--ac-space-3) var(--ac-space-5);
+  border-radius: var(--ac-radius-md);
+  border: 1px solid var(--ac-fg);
+  background: var(--ac-fg);
+  color: var(--ac-bg);
+  cursor: pointer;
+}
+.ac-btn--ghost { background: transparent; color: var(--ac-fg); }
+.ac-btn:focus-visible { outline: 2px solid var(--ac-fg); outline-offset: 2px; }
+
+/* ── verdict ────────────────────────────────────────────────────── */
+/* Three states, and there is no fourth. "Awaiting" is not a soft pass —
+ * it is styled as neutral so it can never be mistaken for one. */
+
+.ac-verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ac-space-2);
+  font-family: var(--ac-font-mono);
+  font-size: var(--ac-text-xs);
+  font-weight: var(--ac-weight-semi);
+  padding: var(--ac-space-1) var(--ac-space-3);
+  border-radius: var(--ac-radius-pill);
+  white-space: nowrap;
+}
+.ac-verdict::before { content: "•"; font-size: 1.1em; line-height: 0; }
+
+.ac-verdict--pass    { color: var(--ac-verdict-pass);    background: var(--ac-verdict-pass-bg); }
+.ac-verdict--pass::before    { content: "✓"; }
+.ac-verdict--fail    { color: var(--ac-verdict-fail);    background: var(--ac-verdict-fail-bg); }
+.ac-verdict--fail::before    { content: "✗"; }
+.ac-verdict--pending { color: var(--ac-verdict-pending); background: var(--ac-verdict-pending-bg); }
+.ac-verdict--pending::before { content: "…"; }
+
+/* ── gate ───────────────────────────────────────────────────────── */
+/* The three gate kinds from the spec. Kind is shown as a word, never as
+ * colour alone — the colour says whether it passed, not what it is. */
+
+.ac-gate {
+  font-family: var(--ac-font-mono);
+  font-size: var(--ac-text-xs);
+  letter-spacing: var(--ac-tracking-tight);
+  padding: 2px var(--ac-space-2);
+  border: 1px solid var(--ac-rule);
+  border-radius: var(--ac-radius-sm);
+  color: var(--ac-fg-muted);
+}
+.ac-gate--deterministic::before { content: "↻ "; }
+.ac-gate--judged::before        { content: "⚖ "; }
+.ac-gate--human::before         { content: "☺ "; }
+
+/* ── step ───────────────────────────────────────────────────────── */
+
+.ac-step {
+  background: var(--ac-surface);
+  border: 1px solid var(--ac-rule);
+  border-radius: var(--ac-radius-lg);
+  padding: var(--ac-space-5);
+}
+.ac-step__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ac-space-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--ac-space-4);
+}
+.ac-step__head h3 {
+  margin: 0;
+  font-size: var(--ac-text-lg);
+  font-weight: var(--ac-weight-semi);
+  letter-spacing: var(--ac-tracking-tight);
+}
+
+.ac-step__fields { margin: 0; }
+.ac-field {
+  display: flex;
+  gap: var(--ac-space-4);
+  padding: var(--ac-space-2) 0 var(--ac-space-2) var(--ac-space-3);
+  border-left: 3px solid transparent;
+  font-family: var(--ac-font-mono);
+  font-size: var(--ac-text-sm);
+  line-height: var(--ac-leading-snug);
+}
+.ac-field dt { flex: none; width: 10.5rem; color: var(--ac-fg-muted); }
+.ac-field dd { margin: 0; color: var(--ac-fg); }
+
+/* The gate row is the only coloured row, because it is the only row that
+ * carries a verdict. */
+.ac-field--gate {
+  border-left-color: var(--ac-verdict-pass);
+  background: var(--ac-verdict-pass-bg);
+  border-radius: 0 var(--ac-radius-md) var(--ac-radius-md) 0;
+}
+.ac-field--gate dt { color: var(--ac-verdict-pass); }
+
+/* executor ≠ verifier. The separator is refuse-coloured because it is a
+ * prohibition, not a decoration. */
+.ac-ne { color: var(--ac-verdict-fail); font-weight: var(--ac-weight-semi); }
+
+@media (max-width: 34rem) {
+  .ac-field { flex-direction: column; gap: var(--ac-space-1); }
+  .ac-field dt { width: auto; }
+}
+
+/* ── attestation ────────────────────────────────────────────────── */
+/* Shaped so the missing piece is visible. An attestation that names only
+ * an identity and a time renders as incomplete, which is the point. */
+
+.ac-attestation {
+  border: 1px solid var(--ac-rule);
+  border-radius: var(--ac-radius-md);
+  padding: var(--ac-space-4);
+  font-family: var(--ac-font-mono);
+  font-size: var(--ac-text-xs);
+  line-height: var(--ac-leading-snug);
+  color: var(--ac-fg-muted);
+}
+.ac-attestation__claim { color: var(--ac-fg); }
+.ac-attestation--rejected { border-color: var(--ac-verdict-fail); }
+.ac-attestation--rejected .ac-attestation__why { color: var(--ac-verdict-fail); }
