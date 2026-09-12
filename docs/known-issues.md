@@ -25,12 +25,27 @@ because they are easy to get wrong:
 | # | Defect | Why it is still open |
 |---|---|---|
 | **6a** | A scope conflict raised by an unverified `holder` claim is indistinguishable from a verified one. `holder` is payload-supplied; the lease records `holderAttested`, but the conflict record third parties read does not carry it. | Needs a decision on whether the flag propagates or attested leases stop raising third-party conflicts. Both are honest fixes; the test accepts either. |
-| **claim 1** | `resolve_https` sends HEAD, but urllib re-issues a redirect as GET, so a redirected pointer transfers the body it then discards. Nothing is stored either way. | Redirects are the norm for the document stores this targets. Fix is a redirect handler that preserves the method. |
 | **claim 3** | Seven scope-evasion routes: repo-name case, prefix case, zero-width characters, BOM, Unicode NFC/NFD, trailing dot, and `Scope()` bypassing validation. | Each makes two claims that overlap in reality fail to intersect. The repo-name one is worst — it hides a lease from the whole registry, and GitHub and ADO both treat `Acme/X` and `acme/x` as one repository. |
 | **claim 5** | Four paths return HTTP 500 with "This is a registry bug" instead of a refusal — a non-numeric `ttlSeconds` or `limit`, an unreachable snapshot URI — and the generic handler echoes raw exception text, including filesystem paths, to the caller. | The fix is one coercion helper rather than four patches. Note the asymmetry that gives it away: on the same `GET /events`, a malformed `since` gets a careful refusal and a malformed `limit` gets "registry bug". |
 | **6b** | The HMAC covers the path but not the query string, so one captured signed `GET /events` replays as any feed query for the replay window. | Cannot be fixed server-side alone; both ends must change. |
 | **A15** | The server signs the percent-**decoded** path while a client signs the wire form, so any path needing encoding fails as a 401 rather than as anything pointing at path handling. | The repo already chose a side: `auth.py`'s own bad-signature remediation tells callers to sign "the path exactly as sent". The server contradicts its own error message. |
 | **MCP refusals** | The MCP encoding renders a `Refusal` as `ToolError(str(exc))`, so the machine `code` survives only as a string prefix. Over HTTP it is a field. | `errors.py` says clients branch on the code; over MCP they cannot without parsing prose. |
+
+
+## Removed: claim 1 (redirect downgraded HEAD to GET)
+
+Fixed, and it had been fixed for a while — `_KeepMethodOnRedirect`
+(`agentco/snapshots.py`) preserves the method across a 3xx, and
+`test_registry.py` proves it by asserting the methods a real local server
+RECEIVED through a redirect rather than the client's intent. The entry stayed
+listed as open anyway.
+
+Noted rather than quietly deleted, because a known-issues file that is wrong in
+the SAFE direction is still wrong in the way that matters: it is what somebody
+reaches for to decide whether a defect is already understood, and one stale row
+teaches them not to trust the other rows. The same staleness hit this project's
+conformance README in the same week.
+
 
 ## Open, no test yet
 
