@@ -67,7 +67,7 @@ def test_declaring_the_scheme_is_not_declaring_where(monkeypatch):
 
 @pytest.mark.parametrize(
     "host",
-    ["127.0.0.1", "localhost", "169.254.169.254", "10.0.0.1", "192.168.1.1"],
+    ["127.0.0.1", "localhost", "169.254.169.254", "10.0.0.1", "192.168.1.1"],  # leakguard: allow — the metadata address this refuses
 )
 def test_the_plane_does_not_reach_into_its_own_network_for_a_participant(host):
     """Resolved, not pattern-matched: `localhost`, `127.1` and a hostname whose
@@ -109,7 +109,7 @@ def test_an_operator_may_name_an_internal_host_deliberately(monkeypatch):
     """
     monkeypatch.setenv(snapshots.HTTP_HOSTS_ENV_VAR, "127.0.0.1")
     assert snapshots.admission_reason("http://127.0.0.1:9/x") is None
-    assert snapshots.admission_reason("http://10.0.0.5/x") is not None
+    assert snapshots.admission_reason("http://10.0.0.5/x") is not None  # leakguard: allow — a private range this refuses
 
 
 def test_a_connectors_scheme_is_admitted_by_installing_the_connector():

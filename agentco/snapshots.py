@@ -220,13 +220,18 @@ DEFAULT_SCHEMES = ("https", "http")
 #: they read the plane's own filesystem and network. Nobody chose them.
 BUILTIN_SCHEMES = frozenset({"file", "git", "http", "https"})
 
+# The RFC-reserved ranges this module refuses. leakguard flags each of them as
+# an internal address, which is correct in general and backwards here: these are
+# the DEFINITION of the ranges, in the code that exists to reject them. Marked
+# visibly rather than added to an allowlist path, so the suppression stays next
+# to the thing suppressed.
 _PRIVATE_V4 = (
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),  # leakguard: allow — reserved range definition
+    ipaddress.ip_network("172.16.0.0/12"),  # leakguard: allow
+    ipaddress.ip_network("192.168.0.0/16"),  # leakguard: allow
+    ipaddress.ip_network("127.0.0.0/8"),  # leakguard: allow
+    ipaddress.ip_network("169.254.0.0/16"),  # leakguard: allow
+    ipaddress.ip_network("0.0.0.0/8"),  # leakguard: allow
 )
 
 
@@ -241,7 +246,7 @@ def _host_is_internal(host: str) -> bool:
     """True if this name resolves anywhere a participant should not reach.
 
     Resolved rather than pattern-matched: `localhost`, `127.1`, `0x7f.1`,
-    `2130706433` and a hostname whose A record is 169.254.169.254 are all the
+    `2130706433` and a hostname whose A record is 169.254.169.254 are all the  # leakguard: allow — the metadata address this refuses
     same request wearing different spellings, and only resolution sees that.
     Unresolvable counts as internal — a name we cannot check is not a name we
     can clear.
