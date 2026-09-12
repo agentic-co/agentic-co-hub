@@ -140,3 +140,28 @@ deliberately and tests on purpose (`test_a_clock_only_queue_never_reads_as_
 configured`, `test_a_queue_approving_itself_on_a_timer_says_so_loudly`). The
 design here is detect-and-report-in-aggregate, not prevent. Changing that is a
 separate product decision and should be argued on its own terms.
+
+## Finding 5: snapshot admission is bypassed by a redirect
+
+**Status: OPEN and KNOWN. HIGH. No test yet.** Recorded from internal review so a
+reporter finding it independently can see it is not news.
+
+`admission_reason` (`agentco/snapshots.py`) runs once, against the URI a
+participant supplied, and resolves the hostname there to decide whether it is
+internal. `resolve_https` then issues its HEAD request through
+`_KeepMethodOnRedirect`, which preserves the method across a 3xx (that part is
+Finding "claim 1", already fixed) but re-runs no admission check on the redirect
+*target* — and the resolution done at admission is never bound to the
+connection `urllib` eventually makes.
+
+So a participant registers a public URL — passes admission cleanly — that 302s
+to `127.0.0.1:<port>` or any other address `admission_reason` exists to refuse,
+and gets back the internal HEAD request and its header oracle in response. This
+is not one request: `check_all` re-resolves every live snapshot on a cadence for
+the TTL (90 days by default), so one accepted registration keeps firing the
+redirect on every scheduled re-check.
+
+**Fix direction, not yet done:** re-run `admission_reason` against each redirect
+target inside the handler rather than once at admission, and pin the resolved
+address used for the connection rather than letting the redirect target be
+re-resolved independently of what was checked.
