@@ -30,7 +30,7 @@ dependencies = ["asop-spec>=0.1.0"]
 
 [project.optional-dependencies]
 server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
-mcp = ["mcp<2"]
+mcp = ["mcp<3"]
 # The Postgres storage backend (agentco/pgadapter.py). Optional because the
 # default install stays dependency-free — this is only pulled in by a
 # deployment that sets AGENTCO_DB to a postgresql:// URL.
