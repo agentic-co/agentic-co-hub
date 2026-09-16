@@ -50,12 +50,34 @@ TRANSPORTS = ("http", "mcp", "mcp-remote", "outbox")
 #: write 29 items into the operator's live database, then found the budget
 #: probe doing the same after the scenarios were fixed. The pin is per call
 #: site, so a new site that opens a store must wrap itself the same way.
+#:
+#: 🛑 **A variable read under two spellings must be pinned under both.** The
+#: `AGENTCO_*` → `ASOP_*` rename left the canonical names off this tuple, so
+#: they were never unset — and `policy._declared()` prefers the canonical name
+#: over the legacy one, which meant an operator with `ASOP_VERIFIERS` exported
+#: had their real registry silently displace the scenario's. Measured with
+#: `ASOP_HUMANS=alice ASOP_VERIFIERS=carol ASOP_ADJUDICATORS=alice`, three
+#: scenarios turned a refusal into an acceptance: `verifier-binding/mcp`
+#: (carol attest), `judged-gate/mcp` (carol adjudicate), `procedure/mcp`
+#: (alice sop_revise). Only `*/mcp`, because `World` hands the registries to
+#: `Queue`/`create_app` explicitly and only the MCP handlers resolve policy
+#: from the environment. `tests/test_conformance_isolation.py` holds both
+#: halves of that check.
 STORE_ENV_VARS = (
     "AGENTCO_DB", "AGENTCO_REGISTRY_DB", "AGENTCO_WORK_STORE", "AGENTCO_SOP_STORE",
     "AGENTCO_REGISTRY_URL", "AGENTCO_SECRET", "AGENTCO_REGISTRY_KEYS", "AGENTCO_ACTOR",
     "AGENTCO_CAPABILITIES", "AGENTCO_HUMANS", "AGENTCO_VERIFIERS", "AGENTCO_PROTECTED_TAGS",
     "AGENTCO_ADJUDICATORS",
     "AGENTCO_OUTBOX", "AGENTCO_AGENT_LABEL", "AGENTCO_REGISTRY_OPERATOR",
+    # The canonical spellings of the four renamed registry declarations. These
+    # are what `_declared()` reads FIRST, so leaving them out was the whole of
+    # the hole above.
+    "ASOP_HUMANS", "ASOP_VERIFIERS", "ASOP_PROTECTED_TAGS", "ASOP_ADJUDICATORS",
+    # Snapshot reach, which has no legacy spelling. Measured NOT to change any
+    # scenario outcome today — pinned anyway, because these decide what a
+    # snapshot may read, and the first scenario that exercises a file-root
+    # snapshot should not quietly depend on the operator's own allowlist.
+    "ASOP_SNAPSHOT_FILE_ROOTS", "ASOP_SNAPSHOT_HTTP_HOSTS", "ASOP_SNAPSHOT_SCHEMES",
 )
 
 #: The verbs a scenario may use. Every transport carries a subset; the core
@@ -565,11 +587,23 @@ class World:
 
     def env(self) -> dict[str, Optional[str]]:
         """The whole store-finding environment, pinned: unset everything, then
-        the operator declarations this scenario makes."""
+        the operator declarations this scenario makes.
+
+        Each declaration is written under BOTH spellings. Writing only the
+        legacy name meant conformance never exercised the canonical one — the
+        name the spec defines and every other implementation prefers was
+        covered by unit tests alone, never by the vectors that exist to prove
+        the implementations agree. Writing only the canonical name would be the
+        mirror of that, and would also break the moment a code path still reads
+        the legacy spelling. Both, until the fallback is actually removed.
+        """
         pinned: dict[str, Optional[str]] = {name: None for name in STORE_ENV_VARS}
-        pinned["AGENTCO_HUMANS"] = ",".join(sorted(self.humans)) or None
-        pinned["AGENTCO_VERIFIERS"] = ",".join(sorted(self.verifiers)) or None
-        pinned["AGENTCO_ADJUDICATORS"] = ",".join(sorted(self.adjudicators)) or None
+        for canonical, legacy, declared in (
+            ("ASOP_HUMANS", "AGENTCO_HUMANS", self.humans),
+            ("ASOP_VERIFIERS", "AGENTCO_VERIFIERS", self.verifiers),
+            ("ASOP_ADJUDICATORS", "AGENTCO_ADJUDICATORS", self.adjudicators),
+        ):
+            pinned[canonical] = pinned[legacy] = ",".join(sorted(declared)) or None
         return pinned
 
     # -- labels ---------------------------------------------------------------
