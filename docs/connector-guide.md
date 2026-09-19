@@ -164,3 +164,51 @@ care about: `ScopeConflict`, `WorkParked`, `GateEscalated`, `DivergenceObserved`
 5. `ready=1` for visibility, never for choosing — the server chooses on pull.
 6. If you send `verify`, be ready for `awaiting_verify` on your own `done`.
 7. Persist the events cursor per harness identity.
+
+## Following the feed instead of polling the stores
+
+A harness has two standing questions — *is there work for me* and *have the
+procedures changed* — and until 2026-09-19 the feed could answer neither. So
+every harness asked the queue and the library directly, on a timer. Both answer
+by reading everything they hold: `ready()` reads the whole `work_items` table
+and filters in Python, and the library reads every record. That is fine for four
+actors and it is the wrong shape for a hundred, because the cost is paid by
+every poller on every poll whether or not anything changed.
+
+Four kinds close it:
+
+| kind | means | the payload carries |
+|---|---|---|
+| `AsopVersioned` | a new version exists, v1 or the tenth | `asopId`, `version`, `status`, `title` |
+| `AsopActivated` | this version is what every reader now gets | same |
+| `AsopRetired` | withdrawn, with no successor | same |
+| `WorkFiled` | an item entered the queue | `itemId`, `title`, `requires`, `assignedAgent`, `blockedBy` |
+
+**The loop.** Poll `GET /events?since=<cursor>` on your own timer. An empty page
+means nothing changed and the cursor does not move — that is the call your
+harness spends most of its day on, and it is an indexed read of a few rows.
+Touch `/sops` or `/work/pull` only when an event says there is a reason to.
+
+**Decide from the payload, not from a pull.** `requires` and `assignedAgent` are
+on `WorkFiled` so a harness can ignore work that is not its own without asking
+the queue. `blockedBy` is how you tell a claimable item from a step of a run that
+is waiting on its predecessors — empty means claim it now. A harness that pulls
+the queue to find out what an event already told it has moved the scan rather
+than removed it.
+
+**What the feed does not tell you yet.** Nothing is emitted when an item becomes
+unblocked because its predecessor finished. Emitting that needs a successor set,
+which nothing stores — `ready()` recomputes blockers on every read. Until it
+exists, a harness waiting on step two learns from its own next poll, exactly as
+it does today. Everything else is event-driven.
+
+**Retries and cadence.** The cursor is a position, not a delivery receipt: a
+missed announcement costs one cycle of staleness that the next poll closes, so
+retrying a failed poll is always safe and never duplicates work. Jitter your
+timer — a fleet started by one deploy shares a clock, and an un-jittered fleet
+manufactures a thundering herd on exactly the schedule an outage creates.
+
+**Announcements never fail the write.** If the feed refuses an append, the
+operation still succeeds and the miss goes to stderr. The alternative — failing
+an accepted `sop_create` — would have the client retry, and a retried create is
+a second draft version.

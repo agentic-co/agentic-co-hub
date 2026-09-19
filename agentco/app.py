@@ -222,6 +222,12 @@ def create_app(
     # restriction lifts, which is most of why the backend exists.
     queue = open_queue(work_store)
     library = open_sop_library(sop_store)
+    # Every write these two perform goes on the change feed, wired ONCE here
+    # rather than at each handler. A harness following `GET /events?since=`
+    # learns about new procedures and new work without asking the library or
+    # the queue for everything they hold — which is what both of them do when
+    # asked, and what a fleet of a hundred pollers cannot afford.
+    queue.announce = library.announce = events.announcer(conn)
     declared_humans = frozenset(humans) if humans is not None else policy.humans_from_env()
     # The queue answers "who may adjudicate" and reads the same two
     # declarations. Injected rather than left to the environment for the

@@ -1112,6 +1112,41 @@ def build_item(
 class Queue:
     """A JSONL work store with an advisory lock around every mutation."""
 
+    #: Set by whoever builds the plane, exactly as `SopLibrary.announce` is and
+    #: for the same reason: the announcement belongs to the OPERATION, not to
+    #: the transport that carried it. HTTP, MCP, the outbox and the in-process
+    #: core all file work, and a feed that only heard about it over one of them
+    #: would make the same act mean different things by route.
+    announce: Optional[Callable[[str, str, dict], None]] = None
+
+    #: A write the plane performed rather than a person. `create` takes no
+    #: actor — a filer is not modelled — so `WorkFiled` is the plane observing
+    #: its own queue, which is what `events.PLANE_ACTOR` is reserved for, and
+    #: it keeps a queue write out of the adoption counts that measure people.
+    PLANE_ACTOR = "agentco"
+
+    def _announced_filed(self, item: "WorkItem") -> None:
+        """Put a filed item on the feed. Never fails the write it announces."""
+        if self.announce is None:
+            return
+        try:
+            self.announce("WorkFiled", self.PLANE_ACTOR, {
+                "itemId": item.id,
+                "title": item.title,
+                "requires": list(item.requires or ()),
+                "assignedAgent": item.assigned_agent,
+                # Empty means claimable now. A step of a run arrives blocked on
+                # its predecessors, and a subscriber reads this to tell the
+                # difference without pulling the queue to find out.
+                "blockedBy": list(item.blocked_by or ()),
+            })
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"agentco: WorkFiled for {item.id!r} was NOT announced on the "
+                f"feed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
     def __init__(self, path: Path | str = "work.jsonl", verifiers: Optional[Sequence[str]] = None,
                  humans: Optional[Sequence[str]] = None,
                  adjudicators: Optional[Sequence[str]] = None):
@@ -1407,6 +1442,7 @@ class Queue:
                 parent_row["updated_at"] = _iso(_now())
             raw_rows.append(json.loads(item.to_json()))
             self._write_all(raw_rows, quarantined)
+        self._announced_filed(item)
         return item
 
     # -- reading ---------------------------------------------------------

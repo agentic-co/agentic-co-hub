@@ -377,10 +377,17 @@ def create_server(
             )
         backend = _RemoteBackend(Registry(who, key, url))
     else:
+        _conn = db.connect(resolve_db_path(db_path))
+        _queue, _library = open_queue(work_store), open_sop_library(sop_store)
+        # The same wiring as the HTTP surface, for the same reason: a procedure
+        # activated over MCP and one activated over HTTP are the same act, and a
+        # feed that heard only one of them would be a feed nobody can trust to
+        # be complete. The conformance suite compares exactly this.
+        _queue.announce = _library.announce = events_module.announcer(_conn)
         backend = _LocalBackend(
-            db.connect(resolve_db_path(db_path)),
-            open_queue(work_store),
-            open_sop_library(sop_store),
+            _conn,
+            _queue,
+            _library,
             who,
             resolve_db_path(db_path),
             resolve_agent_label(agent_label),

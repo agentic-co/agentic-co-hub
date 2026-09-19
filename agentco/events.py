@@ -20,7 +20,7 @@ import json
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from agentco.errors import Refusal
 
@@ -56,6 +56,55 @@ KINDS = (
     # the same cursor every other subscriber uses. No new read surface, one
     # new write.
     "DigestReceived",
+    # ------------------------------------------------------------------ #
+    # The procedure's own lifecycle, added for the same reason the work-queue
+    # kinds above were: the absence was the substrate, not a channel choice.
+    #
+    # A harness has two standing questions — is there work for me, and have the
+    # procedures changed — and until these kinds existed the feed could answer
+    # neither. So every harness asked the LIBRARY and the QUEUE directly, on a
+    # timer, and both answer by reading everything they hold (`SopLibrary`
+    # reads all records; the queue's `ready()` reads the whole table and filters
+    # in Python). The scans are not a careless query. They are what a subscriber
+    # is forced into when the feed cannot tell it that nothing has changed.
+    #
+    # With these, a harness polls ONE cursor and touches the expensive paths
+    # only when an event says there is a reason to.
+    #
+    # `AsopVersioned` — a new version exists, whether that is version 1 or the
+    # tenth revision. Deliberately one kind rather than Created/Revised: a
+    # subscriber's question is "is there a version I have not read", and the
+    # ordinal it starts at is not a different event.
+    "AsopVersioned",
+    # `AsopActivated` — a version became the one every reader gets by default.
+    # THE event for synchronisation: a draft changes nothing a harness executes,
+    # an activation changes what every future run is pinned to.
+    "AsopActivated",
+    # `AsopRetired` — withdrawn with no successor. A harness holding it cached
+    # must stop offering it; runs already pinned to it stay resolvable, which is
+    # why this is an announcement and not a deletion.
+    "AsopRetired",
+    # `WorkFiled` — an item entered the queue, carrying `requires`,
+    # `assignedAgent` and `blockedBy` so a subscriber can decide whether to pull
+    # WITHOUT pulling. A kind that forced a pull to find out would move the scan
+    # rather than remove it.
+    #
+    # FILED, not "available", and the word is chosen against the nicer one: a
+    # step of a run arrives blocked on its predecessors, and announcing it as
+    # available would offer work nothing can claim. `blockedBy` is how a
+    # subscriber tells the difference, and an empty one means claim it now.
+    #
+    # What this kind does NOT yet carry is the moment an item becomes unblocked
+    # because its predecessor finished. Emitting that needs the successor set,
+    # which nothing stores — `ready()` recomputes blockers on every read. Until
+    # it exists a harness waiting on step two still learns from its own next
+    # poll, which is the behaviour it has today; this kind removes the scan for
+    # everything else and is honest about the case it does not close.
+    #
+    # `queue.create` returns the EXISTING item for a duplicate natural key, so
+    # this can repeat for one item id. Harmless by construction: no clock starts
+    # on it, unlike `WorkParked`, so a repeat cannot restart one.
+    "WorkFiled",
 )
 
 # Events the PLANE observes rather than an actor performing. A reserved name
@@ -211,3 +260,19 @@ def read(
         "nextCursor": encode_cursor(next_seq),
         "count": len(events),
     }
+
+
+def announcer(conn) -> "Callable[[str, str, dict], None]":
+    """A callable a store can hold to put its writes on this feed.
+
+    The inversion exists so that `sop.py` and `work.py` never import this
+    module: storage that reached for a registry connection would be storage
+    that knows about a feed, and those are separate jobs. The plane builds one
+    of these and hands it over; the store calls it and does not know what it is.
+
+    Whoever builds a plane wires this ONCE, for every transport, because the
+    announcement belongs to the operation rather than the route that carried it.
+    """
+    def announce(kind: str, actor: str, payload: dict) -> None:
+        append(conn, kind=kind, actor=actor, payload=payload)
+    return announce

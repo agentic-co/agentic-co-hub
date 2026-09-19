@@ -235,4 +235,9 @@ def test_events_read_through_the_proxy_carry_both_identities(remote, filer):
     tool(filer, "claim_scope")(repo="acme/web", prefixes=["src/billing"], intent="implement")
     tool(remote, "claim_scope")(repo="acme/web", prefixes=["docs/runbooks"], intent="review")
     feed = tool(remote, "events")()
-    assert {e["actor"] for e in feed["events"]} == {"bigmac", "macbook"}
+    # Containment, not equality: the question is whether BOTH harness identities
+    # survive the proxy, and the plane also writes rows under its own reserved
+    # name (`WorkFiled` here, `PulseObserved` on any registry a pulse has run
+    # against). An equality here asserts something the test never meant — that
+    # nothing the plane observes may share the feed with what actors perform.
+    assert {"bigmac", "macbook"} <= {e["actor"] for e in feed["events"]}

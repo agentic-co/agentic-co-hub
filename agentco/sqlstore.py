@@ -514,6 +514,11 @@ class SqlQueue(_SqlBacked, Queue):
                 f"VALUES ({', '.join('?' for _ in WORK_COLUMNS)})",
                 tuple(row[c] for c in WORK_COLUMNS),
             )
+        # The SQL backend overrides `create` wholesale, so the announcement has
+        # to be repeated here rather than inherited. A backend that filed work
+        # silently while the other announced it is the shape of drift the
+        # conformance suite exists to catch — and did, for this very change.
+        self._announced_filed(item)
         return item
 
     # -- the one mutation primitive --------------------------------------

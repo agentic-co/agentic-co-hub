@@ -46,12 +46,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterator, Optional, Sequence
+from typing import Callable, Iterator, Optional, Sequence
 
 from agentco import policy
 from agentco.errors import Refusal
@@ -299,8 +300,63 @@ def read_record(line: str) -> ASOP:
 # --------------------------------------------------------------------------- #
 
 
+def _version_payload(asop) -> dict:
+    """What a subscriber needs to decide whether to fetch the version itself.
+
+    Deliberately small: identity, ordinal, status and title. The record can be
+    large — steps, gates, inputs, roles — and a feed that carried it would make
+    every subscriber read every procedure it does not run, which is the cost
+    this kind exists to remove.
+    """
+    return {
+        "asopId": asop.asop_id,
+        "version": asop.version,
+        "status": str(getattr(asop.status, "value", asop.status)),
+        "title": asop.title,
+    }
+
+
 class SopLibrary:
     """Versioned ASOP storage. Same JSONL-under-a-lock shape as the work queue."""
+
+    #: Set by whoever builds the plane (`app.create_app`, the MCP surface, the
+    #: CLI) to put this library's writes on the change feed. Left `None` here on
+    #: purpose: a store that reached for a registry connection would be storage
+    #: that knows about a feed, and the two are separate jobs — the same split
+    #: `verifiers.py` already draws, where the PASS holds the connection and
+    #: decides to announce, not the thing it read.
+    #:
+    #: It lives on the OPERATION rather than on a transport because the
+    #: conformance suite is right that it must: HTTP, MCP, the outbox and the
+    #: in-process core all perform `activate`, and a feed that only heard about
+    #: it over HTTP would make the same act mean different things depending on
+    #: how it arrived. Announcing from `app.py` did exactly that, and the
+    #: conformance run said so in 38 failures.
+    #: The reserved name for a write the PLANE performed rather than a person.
+    #: Spelled here rather than imported from `events`: this module must not
+    #: depend on the feed, and the constant is a name, not a connection.
+    PLANE_ACTOR = "agentco"
+
+    announce: Optional[Callable[[str, str, dict], None]] = None
+
+    def _announced(self, kind: str, actor: Optional[str], payload: dict) -> None:
+        """Announce, and never let the announcement break the write.
+
+        The write has already landed. Raising here would hand the caller a
+        failure for an operation that succeeded, and the caller's retry of
+        `create` is a SECOND draft version — a cure worse than the miss, which
+        costs one cursor cycle of staleness that the next poll closes.
+        """
+        if self.announce is None:
+            return
+        try:
+            self.announce(kind, actor or self.PLANE_ACTOR, payload)
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            print(
+                f"agentco: {kind} for {payload.get('asopId')!r} was NOT announced "
+                f"on the feed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
 
     def __init__(self, path: Path | str = "sops.jsonl", protected_tags: Optional[Sequence[str]] = None,
                  actors: Optional[Sequence[str]] = None):
@@ -438,6 +494,7 @@ class SopLibrary:
             existing = self._read_all()
             existing.append(asop)
             self._write_all(existing, self.quarantined)
+        self._announced("AsopVersioned", author, _version_payload(asop))
         return asop
 
     def _validated(self, body: dict) -> dict:
@@ -571,6 +628,7 @@ class SopLibrary:
                     asop.superseded_by = new.version
             all_asops.append(new)
             self._write_all(all_asops, self.quarantined)
+        self._announced("AsopVersioned", author, _version_payload(new))
         return new
 
     def activate(
@@ -634,6 +692,7 @@ class SopLibrary:
             target.status = SopStatus.ACTIVE
             target.superseded_by = None
             self._write_all(all_asops, self.quarantined)
+        self._announced("AsopActivated", author, _version_payload(target))
         return target
 
     def retire(
@@ -682,6 +741,7 @@ class SopLibrary:
             target.status = SopStatus.RETIRED
             target.superseded_by = None
             self._write_all(all_asops, self.quarantined)
+        self._announced("AsopRetired", author, _version_payload(target))
         return target
 
     # -- reading ---------------------------------------------------------

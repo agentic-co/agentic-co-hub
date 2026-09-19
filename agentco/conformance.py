@@ -544,6 +544,12 @@ class World:
         self.queue = Queue(self.work_path, verifiers=verifiers, humans=humans,
                            adjudicators=sorted(self.adjudicators))
         self.library = SopLibrary(self.sop_path)
+        # The core is the reference every transport is compared against, so it
+        # announces like one. Wiring this only into the transports would have
+        # made "HTTP emits two events the core does not" a conformance FAILURE
+        # that was really a wiring gap — which is precisely what it reported
+        # when the announcement lived in `app.py`.
+        self.queue.announce = self.library.announce = events.announcer(self.conn)
         self.labels: dict[str, str] = {}     # label -> identifier
         self.saved: dict[str, Any] = {}      # label -> whatever a step produced
         self._client = None
