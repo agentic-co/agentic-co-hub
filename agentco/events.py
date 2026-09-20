@@ -50,6 +50,12 @@ KINDS = (
     # judge — a pass that records nothing when it crashes leaves the gap as the
     # signal, which is the one property worth keeping from a heartbeat file.
     "PulseObserved",
+    # A child hub's cadence-boundary digest, filed by `POST /digests` (ADR
+    # 0005). Federation reuses THIS feed rather than a parallel one — a parent
+    # hub reading `GET /events` already gets a per-team rollup for free, on
+    # the same cursor every other subscriber uses. No new read surface, one
+    # new write.
+    "DigestReceived",
 )
 
 # Events the PLANE observes rather than an actor performing. A reserved name

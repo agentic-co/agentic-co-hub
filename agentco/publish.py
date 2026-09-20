@@ -200,6 +200,29 @@ class Registry:
         query = f"?limit={limit}" + (f"&since={since}" if since else "")
         return self._call("GET", "/events", None, query)
 
+    def digest(
+        self,
+        text: str,
+        generated_at: Optional[str] = None,
+        meta: Optional[dict[str, Any]] = None,
+        agent_label: Optional[str] = None,
+    ) -> dict:
+        """File this registry's own cadence-boundary digest with a hub above it.
+
+        ADR 0005: a hub federates by being a worker on the hub above it, same
+        as any other actor — this is that hub's own `agentco digest` output,
+        signed as the CHILD's identity and never re-derived by the parent.
+        `text` should be `divergence.render_text`'s output, or your own.
+        """
+        body: dict[str, Any] = {"text": text}
+        if generated_at:
+            body["generatedAt"] = generated_at
+        if meta:
+            body["meta"] = meta
+        if agent_label:
+            body["agentLabel"] = agent_label
+        return self._call("POST", "/digests", body)
+
     # --- the work queue --------------------------------------------------
     #
     # A harness on another machine can now pull work and report on it. The

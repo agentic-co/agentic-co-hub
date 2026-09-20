@@ -2,6 +2,7 @@
 
     `POST /scope-claims`   — open a ScopeLease (the scope-model decision (docs/decisions/0001) scope model)
     `POST /snapshots`      — record a pointer + version token, never a body
+    `POST /digests`        — a child hub's cadence-boundary rollup (ADR 0005); read back via /events
     `GET  /events?since=`  — the change feed, opaque resumable cursor
 
 Plus two reads that are not new surface, because they are the same data
@@ -61,7 +62,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, db, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, db, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
@@ -422,6 +423,20 @@ def create_app(
             )
 
         return await _handle(request, "snapshot", work)
+
+    @app.post("/digests")
+    async def post_digest(request: Request) -> JSONResponse:
+        def work(actor: str, payload: dict) -> dict:
+            return digests.receive(
+                conn,
+                actor=actor,
+                text=payload.get("text", ""),
+                generated_at=payload.get("generatedAt"),
+                meta=payload.get("meta"),
+                agent_label=payload.get("agentLabel"),
+            )
+
+        return await _handle(request, "digest_receive", work)
 
     @app.get("/events")
     async def get_events(request: Request) -> JSONResponse:
