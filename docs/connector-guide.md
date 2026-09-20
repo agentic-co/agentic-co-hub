@@ -128,6 +128,73 @@ A deterministic gate wants the attestation on the report itself; judged and
 human gates refuse one from the executor. Once the operator declares
 `AGENTCO_VERIFIERS`, `verify` counts only for those actors.
 
+## Procedures: what a bead tells you about the ASOP it came from
+
+A bead filed by `work_create` carries no procedure. A bead produced by
+instantiating an ASOP carries **`metadata.sop_ref`**, and this is the field
+most likely to cost you an afternoon:
+
+```json
+"metadata": {
+  "sop_ref": {"asop_id": "asop-6da6c50d", "version": 2, "step": 1},
+  "sop_plan": { "...": "the step's own text, copied at instantiate" },
+  "parent":   "w-9ba21ba0"
+}
+```
+
+`asop_id`, **not** `sop_id`. The `/sops/{id}` resource has its own natural key
+spelled `sop_id`; a bead's pin does not. Two independently written readers in the
+same codebase both guessed `sop_id`, both compiled, both passed their own unit
+tests — because the tests asserted the same wrong name — and both returned a null
+pin against a live registry for weeks. If you take one thing from this document,
+take this: **read a real payload before you write the parser.**
+
+The same trap on the procedure itself. An ASOP is a **versioned sequence of gated
+steps**, and almost everything a connector wants is per-step, not top level:
+
+```
+top level   asop_id, version, title, task_type, purpose, trigger, status,
+            inputs (a LIST of {name, description}, not a string), roles,
+            constraints, steps, proposals, author, author_kind, created_at,
+            superseded_by
+per step    name, step, role, purpose, entry_check, definition_of_done,
+            validation, write_back, common_mistakes, gate, after, inputs
+            (free text here), uses, tags, proposals
+```
+
+`entry_check`, `definition_of_done`, `validation`, `write_back`,
+`common_mistakes` and `gate` all live **inside a step**. A reader modelled on a
+flat one-procedure-one-gate shape does not error on this — it returns a procedure
+with every instructional field empty, which reads as a procedure that says
+nothing rather than as a parse failure.
+
+Two more shapes worth knowing before you assume:
+
+- **A gate carries `check` (a string) OR `checks` (a list).** Both occur in the
+  same library. A reader that handles one silently nulls the other.
+- **`after` is how step order is expressed** — `"after": [1]` on step 2. There is
+  no `next_sop`; inter-procedure sequencing was deliberately removed from the
+  contract and belongs to the harness. A connector that expects to find chaining
+  in the artefact will not find it.
+
+### Check the round trip, not just the parse
+
+Every failure above is the same one: a field that MOVED — renamed, or relocated
+into a step — read at its old address and returning **null instead of raising**.
+Null is what makes it survive; three of these degraded silently for as long as
+nothing looked.
+
+Neither habit that feels like diligence catches it. A unit test written beside
+the reader replays the reader's own assumption. Validating a payload on the way
+IN asks whether the store will accept it, never whether your reader gets it back.
+
+So do both directions: read a procedure from the registry, read it back through
+your own consumer, and diff the populated fields. `tools/roundtrip_check.py` in
+this repo does exactly that against any consumer URL and exits non-zero on a
+drop. Pointed at a connector for the first time it found six dropped fields in
+under two minutes, one of them the gate — which is to say the connector could
+read what the work was and not how it would be judged.
+
 ## Scope claims and the feed
 
 `POST /scope-claims` `{"repo": "org/repo", "prefixes": ["src/billing/"], "intent": "refactor"}`

@@ -28,6 +28,11 @@ work.jsonl
 sops.jsonl
 tasks.jsonl
 receipts.jsonl
+# `do_export` writes SIX files and this list named four, so these two were
+# ignored nowhere and went into a tree by plain `git add`. They are store
+# content like the rest of them.
+events.jsonl
+outcomes.jsonl
 .agentco/
 
 # Per-developer harness config. `.claude/settings.local.json` is where a  # leakguard: allow
