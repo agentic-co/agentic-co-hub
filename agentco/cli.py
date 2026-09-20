@@ -89,14 +89,25 @@ def cmd_digest(args) -> int:
         )
         return 0
 
-    delivered = divergence.deliver(conn, collected)
-    print(f"\nDelivered {delivered} DivergenceObserved event(s).", file=sys.stderr)
-
+    # External delivery happens BEFORE `divergence.deliver` marks these
+    # pointers reported. Found in review: the reverse order meant a failed
+    # `--post` (parent hub down, webhook unreachable) still marked every
+    # moved pointer as said-once, so it silently never appeared in any later
+    # digest either — "eventually consistent" was actually "at most once."
+    # `--deliver` with no `--post` is unaffected: there is nothing external
+    # to fail on, so marking immediately is correct, same as before.
     if args.post:
         from agentco import delivery
 
-        delivery.send(text, collected, via=args.via)
+        try:
+            delivery.send(text, collected, via=args.via)
+        except (delivery.DeliveryNotConfigured, delivery.DeliveryFailed) as exc:
+            print(f"digest delivery failed, nothing marked delivered: {exc}", file=sys.stderr)
+            return 1
         print(f"Delivered via {args.via}.", file=sys.stderr)
+
+    delivered = divergence.deliver(conn, collected)
+    print(f"\nDelivered {delivered} DivergenceObserved event(s).", file=sys.stderr)
     return 0
 
 

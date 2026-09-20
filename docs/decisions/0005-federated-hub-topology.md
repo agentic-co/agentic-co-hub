@@ -1,6 +1,8 @@
 # 0005 — Hubs can federate, and federation is optional
 
-**Status:** proposed · **Date:** 2026-09-19
+**Status:** accepted · **Date:** 2026-09-19 (updated 2026-09-20 after independent
+cross-vendor review — GPT-5.4 via codex and Gemini 3.1 Pro via agy — found real
+defects in the first pass; see Consequences)
 
 > A decision with no revisit condition is doctrine. Every record here carries one.
 
@@ -46,19 +48,30 @@ from drifting apart, which is exactly the kind of duplication this project's
 `asop-spec`-arrives-by-version discipline exists to avoid elsewhere.
 
 **(c) A parent hub is just another actor on the child hub's own registry** —
-recursion, not a new concept. The same `hub pull / status / sync` surface a
-leaf uses to talk to its hub is what a hub uses to talk to the hub above it.
-Federating one level up costs exactly what connecting a worker costs today: a
-`hub.url` and a signed identity, nothing new to build twice.
+recursion, not a new concept. Reuse the signed-request client (`Registry`,
+`publish.py`) a leaf agent already uses to talk to its hub, pointed one level
+up. Federating one level up costs exactly what connecting a worker costs
+today: a URL and a signed identity, nothing new to build twice.
 
 ## Decision
 
 **(c).** A hub is symmetric: it always runs `serve` for whoever connects
-beneath it, and *optionally* also runs as a client (`hub pull/status/sync`)
-against a `hub.url` above it. Unset that URL — which is already every
-registry's default state — and the hub is standalone, exactly as a lone team's
-registry is today. Federation is a hub deciding to also be a worker one level
-up; it is never a precondition for the hub working locally.
+beneath it, and *optionally* also files its own cadence-boundary digest with a
+hub above it — `agentco digest --deliver --post --via hub`, the exact command
+a team already runs to post its digest anywhere else, pointed at a parent
+instead of a webhook. Unset the three env vars that name the parent, and the
+hub is standalone, exactly as a lone team's registry is today. Federation is a
+hub choosing to also be a worker one level up; it is never a precondition for
+the hub working locally.
+
+⚠️ **Correction (2026-09-20, found in review):** this section originally said
+federation reused "the same `hub pull/status/sync` surface a leaf uses to talk
+to its hub." No such CLI surface exists — `agentco` has no `hub` subcommand at
+all. What was actually built, and is the real Decision, is narrower and
+PUSH-ONLY: a child files its digest upward; nothing flows back down. A parent
+polling or pushing WORK to its children (the fuller symmetry the original text
+implied) is a different, unbuilt feature — if it's ever wanted, it is new
+scope, not something this ADR already covers.
 
 Three subordinate decisions follow from it.
 
@@ -95,20 +108,57 @@ extended one layer up.
   for what a *team* hub reports at company scope vs. what stays team-internal
   — not decided here; likely answered by whatever a digest's summary shape
   ends up being, which is separable follow-up work, not a blocker to (c).
-- **(1) Built 2026-09-19.** `POST /digests` (`agentco/digests.py`) records a
-  child's rollup as a `DigestReceived` event — no new read surface, the parent
-  reads it back through the existing `GET /events` cursor. `Registry.digest`
-  (`publish.py`) and a new `--via hub` built-in sender (`delivery.py`,
-  `post_to_hub`, opt-in via `AGENTCO_REGISTRY_URL`/`AGENTCO_ACTOR`/
-  `AGENTCO_SECRET` — the same three variables that already connect a worker to
-  a hub) close the loop. Verified end-to-end against a real listening parent
-  instance, not mocked at the transport (`tests/test_digests.py`); full suite
-  1325 passed/18 xfailed, `conform --level L2` still 12/12 MCP tools (this
-  work added no MCP surface, deliberately — see the roadmap's 12-tool ceiling).
-- **(2)** still open: a conformance case exercising a hub acting as BOTH
-  server (to children) and client (to a parent) in one process. The unit and
-  live-server tests above prove each half works; nothing yet proves them
-  composing inside a single `agentco serve` instance simultaneously.
+- **(1) Built 2026-09-19, hardened 2026-09-20 after review.** `POST /digests`
+  (`agentco/digests.py`) records a child's rollup as a `DigestReceived` event
+  — no new read surface, the parent reads it back through the existing
+  `GET /events` cursor. `Registry.digest` (`publish.py`) and a `--via hub`
+  built-in sender (`delivery.py`, `post_to_hub`) close the loop.
+
+  **Independent review (GPT-5.4 via codex, Gemini 3.1 Pro via agy) found the
+  first pass genuinely unsafe, not just imperfect.** Both, from different
+  angles, converged on the same real gap: nothing distinguished a declared
+  team hub from an ordinary correctly-signed leaf agent, so the ADR's own
+  scaling argument ("the parent's registry grows with team count, never agent
+  count") was a convention nobody enforced. Fixed: `ASOP_FEDERATED_CHILDREN`
+  (legacy `AGENTCO_FEDERATED_CHILDREN`) is a declared allowlist a parent must
+  set before `POST /digests` accepts anything from anyone — **fails CLOSED**,
+  unlike `humans`/`verifiers`, because an empty-but-permissive default here
+  would defeat the entire mechanism (see `digests.py`'s module docstring).
+
+  Other real defects found and fixed: a failed upward send used to mark the
+  local pointer as reported ANYWAY (`divergence.deliver` ran before
+  `delivery.send`), so "eventually consistent" was actually silent
+  at-most-once loss — `cli.py`'s `cmd_digest` now sends first and only marks
+  on success, and returns exit 1 with a message instead of an uncaught
+  traceback on failure. A non-JSON 200 response (the single likeliest
+  misconfiguration — wrong URL, a proxy, an SSO portal) used to leak a raw
+  `JSONDecodeError` from `Registry._call`; it now raises `RegistryError` like
+  every other refusal. The three env vars originally reused for "the hub
+  above me" (`AGENTCO_REGISTRY_URL`/`AGENTCO_ACTOR`/`AGENTCO_SECRET`) turned
+  out to already mean "proxy every local MCP tool over HTTP" in
+  `mcp_server.py` — renamed to `AGENTCO_PARENT_HUB_URL`/`_ACTOR`/`_SECRET` so
+  federating a team hub cannot silently break that team's own local MCP.
+  `meta` is now passed through by the built-in sender (movedCount /
+  stuckGateCount) instead of silently dropped, and both `text` and `meta` are
+  now type-checked (a non-string `text` or non-object `meta` used to reach a
+  bare 500 "this is a registry bug" instead of a clean refusal).
+
+  Re-verified after the fixes, not just before: full suite 1333 passed/18
+  xfailed (up from 1325 — 8 new tests covering the fixes), `conform --level
+  L2` still 12/12 MCP tools (deliberately no new MCP surface — see the
+  roadmap's 12-tool ceiling), leakguard clean on every changed file.
+
+- **(2) Resolved, not just left open — verified 2026-09-20.** The original
+  text flagged "a hub acting as BOTH server and client at once" as untested.
+  Checked directly rather than assumed: `delivery.send` is called from exactly
+  one place (`cli.py`'s `cmd_digest`, a short-lived CLI invocation), nothing in
+  `app.py` imports `delivery`, and `divergence.collect` reads only the
+  `snapshots` table — it never reads the event feed at all, so a
+  `DigestReceived` event cannot feed the next digest and there is no
+  feedback-loop or amplification risk. The two roles never actually run in the
+  same process at the same time; they share a database file, not a runtime.
+  No code change was needed — this was a documentation-accuracy fix once
+  someone actually traced the call graph instead of leaving the question open.
 
 ## Revisit condition
 

@@ -123,7 +123,20 @@ class Registry:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read().decode())
+                status = response.status
+                raw = response.read()
+            try:
+                return json.loads(raw.decode())
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # A 2xx that is not JSON — a proxy, an SSO portal, a wrong path
+                # segment. This is the single most likely first-contact mistake
+                # federation adds (nothing else in this file talks to a URL an
+                # operator hand-configured), and it must reach the caller as
+                # the same RegistryError every refusal does, never a bare
+                # decode exception a caller's except clause does not expect.
+                raise RegistryError(
+                    status, {"message": f"non-JSON response body: {raw[:200]!r}"}
+                )
         except urllib.error.HTTPError as exc:
             try:
                 payload = json.loads(exc.read().decode())

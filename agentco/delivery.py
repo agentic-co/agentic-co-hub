@@ -95,15 +95,19 @@ def post_json(text: str, digest: dict, url: Optional[str] = None, timeout: int =
         raise DeliveryFailed(None, str(exc)) from exc
 
 
-# Same three variables `mcp_server.py` reads to connect this process AS a
-# worker to a registry — not imported from there (that module pulls in the
-# optional `mcp` extra, and webhook delivery must not need it installed) but
-# declared here as the same three strings on purpose: a deployment that
-# already points a harness at a hub via these variables gets `--via hub`
-# delivery for free, no separate configuration surface to learn.
-HUB_URL_ENV_VAR = "AGENTCO_REGISTRY_URL"
-HUB_ACTOR_ENV_VAR = "AGENTCO_ACTOR"
-HUB_SECRET_ENV_VAR = "AGENTCO_SECRET"
+# Deliberately NOT the same three variables `mcp_server.py` reads
+# (`AGENTCO_REGISTRY_URL`/`AGENTCO_ACTOR`/`AGENTCO_SECRET`) to connect this
+# process AS AN MCP WORKER to a registry. An earlier version of this module
+# reused those three, on the theory that a deployment already pointed at a
+# hub got federation "for free" — found, in review, to silently repoint
+# every local MCP tool at that same URL too (`mcp_server.py`'s own env vars),
+# so a team hub that opted into federation could stop its own agents from
+# reaching their own local registry. "The hub I am a worker on" and "the hub
+# above me" are different destinations and need different variables even
+# when, for one deployment, they happen to be the same place.
+HUB_URL_ENV_VAR = "AGENTCO_PARENT_HUB_URL"
+HUB_ACTOR_ENV_VAR = "AGENTCO_PARENT_HUB_ACTOR"
+HUB_SECRET_ENV_VAR = "AGENTCO_PARENT_HUB_SECRET"
 
 
 def post_to_hub(text: str, digest: dict) -> None:
@@ -111,7 +115,7 @@ def post_to_hub(text: str, digest: dict) -> None:
 
     Reuses `Registry.digest` — the same signed-request client a leaf agent
     uses to talk to any hub — pointed one level up. A hub that never set
-    `AGENTCO_REGISTRY_URL` (i.e. never opted into federation) raises
+    `AGENTCO_PARENT_HUB_URL` (i.e. never opted into federation) raises
     `DeliveryNotConfigured` here exactly as `post_json` does when no webhook
     is set: absent means absent, never a guessed destination.
     """
@@ -141,9 +145,21 @@ def post_to_hub(text: str, digest: dict) -> None:
     from agentco.publish import RegistryError
     from agentco.publish import Registry as _Registry
 
+    # Structured `meta` by default, built from the same digest dict every
+    # sender receives — not just the rendered text — so `--via hub` reaches
+    # the documented "structured rollup" half without a caller having to
+    # hand-write a Registry call. Kept small and closed-shape on purpose: a
+    # parent's DigestReceived payload should be predictable across children,
+    # not whatever fields one child's divergence run happened to produce.
+    meta = {
+        "movedCount": len(digest.get("moved") or []),
+    }
+    if "stuckGates" in digest:
+        meta["stuckGateCount"] = len(digest["stuckGates"] or [])
+
     registry = _Registry(actor, secret, base_url=url)
     try:
-        registry.digest(text, generated_at=digest.get("generatedAt"))
+        registry.digest(text, generated_at=digest.get("generatedAt"), meta=meta)
     except RegistryError as exc:
         raise DeliveryFailed(exc.status, str(exc)) from exc
 

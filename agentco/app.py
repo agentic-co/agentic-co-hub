@@ -197,6 +197,7 @@ def create_app(
     protected_tags: Optional[Iterable[str]] = None,
     verifiers: Optional[Iterable[str]] = None,
     adjudicators: Optional[Iterable[str]] = None,
+    federated_children: Optional[Iterable[str]] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -246,6 +247,14 @@ def create_app(
         library.protected_tags = policy.DEFAULT_PROTECTED_TAGS | frozenset(
             t.lower() for t in protected_tags
         )
+    # ADR 0005: fails CLOSED, unlike humans/verifiers — see digests.py's
+    # module docstring for why an undeclared set means nobody may federate,
+    # not everybody.
+    declared_federators = (
+        frozenset(federated_children)
+        if federated_children is not None
+        else digests.federators_from_env()
+    )
     app = FastAPI(
         title="AgentCo scope + snapshot registry (stage 1b)",
         description=(
@@ -434,6 +443,7 @@ def create_app(
                 generated_at=payload.get("generatedAt"),
                 meta=payload.get("meta"),
                 agent_label=payload.get("agentLabel"),
+                declared_federators=declared_federators,
             )
 
         return await _handle(request, "digest_receive", work)

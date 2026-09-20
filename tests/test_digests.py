@@ -18,8 +18,9 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from agentco import auth, db, delivery, digests, events
+from agentco import auth, db, delivery, digests, events, snapshots
 from agentco.app import create_app
+from agentco.cli import build_parser, cmd_digest
 from agentco.errors import Refusal
 from agentco.publish import Registry
 
@@ -33,7 +34,12 @@ def conn(tmp_path):
 
 @pytest.fixture()
 def client(tmp_path):
-    app = create_app(db_path=str(tmp_path / "api.sqlite3"), keys=KEYS, operator="operator")
+    app = create_app(
+        db_path=str(tmp_path / "api.sqlite3"),
+        keys=KEYS,
+        operator="operator",
+        federated_children=["team-frontend"],
+    )
     return TestClient(app)
 
 
@@ -61,8 +67,13 @@ def get(client, path, actor, query=""):
 # --------------------------------------------------------------------------- #
 
 
+FEDERATORS = frozenset({"team-frontend"})
+
+
 def test_receive_appends_a_digest_received_event(conn):
-    receipt = digests.receive(conn, actor="team-frontend", text="3 scopes closed, 0 stale")
+    receipt = digests.receive(
+        conn, actor="team-frontend", text="3 scopes closed, 0 stale", declared_federators=FEDERATORS
+    )
     assert receipt["state"] == "accepted"
     assert receipt["eventId"].startswith("evt_")
 
@@ -75,14 +86,72 @@ def test_receive_appends_a_digest_received_event(conn):
 
 def test_an_empty_digest_is_refused_not_recorded(conn):
     with pytest.raises(Refusal) as exc:
-        digests.receive(conn, actor="team-frontend", text="   ")
+        digests.receive(
+            conn, actor="team-frontend", text="   ", declared_federators=FEDERATORS
+        )
     assert exc.value.code == "text_required"
+
+
+def test_a_non_string_digest_is_refused_not_a_500(conn):
+    for bad in (5, ["a"], {"a": 1}):
+        with pytest.raises(Refusal) as exc:
+            digests.receive(
+                conn, actor="team-frontend", text=bad, declared_federators=FEDERATORS
+            )
+        assert exc.value.code == "text_required"
+
+
+def test_a_non_object_meta_is_refused(conn):
+    with pytest.raises(Refusal) as exc:
+        digests.receive(
+            conn,
+            actor="team-frontend",
+            text="hello",
+            meta="not an object",
+            declared_federators=FEDERATORS,
+        )
+    assert exc.value.code == "meta_must_be_object"
 
 
 def test_digest_received_is_a_real_kind_not_a_typo():
     # A closed-set violation raises ValueError from events.append itself —
     # this just pins that the kind this module writes is one events.py knows.
     assert "DigestReceived" in events.KINDS
+
+
+# --------------------------------------------------------------------------- #
+# The gap both cross-vendor reviews converged on: nothing distinguished a
+# declared child hub from an ordinary correctly-signed actor. Fails CLOSED —
+# see digests.py's module docstring for why that (not humans/verifiers'
+# fail-open) is the right default here.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_undeclared_actor_is_refused_even_though_the_signature_is_valid(conn):
+    with pytest.raises(Refusal) as exc:
+        digests.receive(conn, actor="team-frontend", text="hello", declared_federators=frozenset())
+    assert exc.value.code == "not_a_declared_federator"
+
+
+def test_federation_is_off_by_default_when_nothing_is_declared(conn, monkeypatch):
+    for var in (digests.FEDERATORS_ENV_VAR, digests.LEGACY_FEDERATORS_ENV_VAR):
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(Refusal) as exc:
+        digests.receive(conn, actor="team-frontend", text="hello")
+    assert exc.value.code == "not_a_declared_federator"
+
+
+def test_an_endpoint_level_undeclared_actor_is_refused(tmp_path):
+    """The same fail-closed rule at the transport, not just the domain
+    function — a hub with NO federated_children declared refuses everyone,
+    even a correctly-signed actor a sibling deployment might trust."""
+    app = create_app(
+        db_path=str(tmp_path / "api.sqlite3"), keys=KEYS, operator="operator"
+    )  # no federated_children passed — undeclared
+    c = TestClient(app)
+    response = post(c, "/digests", "team-frontend", {"text": "hello"})
+    assert response.status_code == 422
+    assert response.json()["code"] == "not_a_declared_federator"
 
 
 # --------------------------------------------------------------------------- #
@@ -145,7 +214,12 @@ def live_hub(tmp_path):
 
     import uvicorn
 
-    app = create_app(db_path=str(tmp_path / "parent.sqlite3"), keys=KEYS, operator="operator")
+    app = create_app(
+        db_path=str(tmp_path / "parent.sqlite3"),
+        keys=KEYS,
+        operator="operator",
+        federated_children=["team-frontend"],
+    )
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -206,6 +280,103 @@ def test_post_to_hub_surfaces_a_refusal_as_delivery_failed(live_hub, monkeypatch
     with pytest.raises(delivery.DeliveryFailed) as exc:
         delivery.send("text", {}, via="hub")
     assert exc.value.status == 401
+
+
+def test_post_to_hub_wraps_a_non_json_200_as_delivery_failed(monkeypatch):
+    """The likeliest real misconfiguration — a proxy, an SSO portal, a wrong
+    path — answers 200 with an HTML body, not JSON. Must surface as
+    `DeliveryFailed`, never a bare `json.JSONDecodeError` the caller's
+    `except (DeliveryNotConfigured, DeliveryFailed)` would not catch."""
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib method name
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            body = b"<html>not json</html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):  # silence
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv(delivery.HUB_URL_ENV_VAR, f"http://127.0.0.1:{server.server_port}")
+        monkeypatch.setenv(delivery.HUB_ACTOR_ENV_VAR, "team-frontend")
+        monkeypatch.setenv(delivery.HUB_SECRET_ENV_VAR, "whatever")
+
+        with pytest.raises(delivery.DeliveryFailed) as exc:
+            delivery.send("text", {}, via="hub")
+        assert "non-JSON" in str(exc.value) or "non-JSON" in exc.value.detail
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+# --------------------------------------------------------------------------- #
+# `cmd_digest`'s delivery ordering — found in review: `divergence.deliver`
+# (which marks every moved pointer "said once") ran BEFORE `delivery.send`,
+# so a failed `--post` still lost that pointer from every future digest.
+# --------------------------------------------------------------------------- #
+
+
+def _digest_args(db_path, tmp_path, via="hub"):
+    return build_parser().parse_args(
+        ["--db", str(db_path), "digest", "--deliver", "--post", "--via", via]
+    )
+
+
+def _moved_count(db_path) -> int:
+    conn = db.connect(db_path)
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM events WHERE kind = 'DivergenceObserved'"
+    ).fetchone()["n"]
+
+
+def test_a_failed_post_marks_nothing_delivered(tmp_path, monkeypatch, capsys):
+    db_path = tmp_path / "child.sqlite3"
+    conn = db.connect(db_path)
+    artifact = tmp_path / "prd.md"
+    artifact.write_text("v1")
+    snapshots.take(conn, actor="dana", artifact_uri=f"file:{artifact}", purpose="baseline")
+    artifact.write_text("v2 — changed")
+    conn.close()
+
+    for var in (delivery.HUB_URL_ENV_VAR, delivery.HUB_ACTOR_ENV_VAR, delivery.HUB_SECRET_ENV_VAR):
+        monkeypatch.delenv(var, raising=False)  # not configured -> DeliveryNotConfigured
+
+    exit_code = cmd_digest(_digest_args(db_path, tmp_path))
+    assert exit_code == 1
+    assert _moved_count(db_path) == 0, (
+        "the moved pointer must stay unmarked so the NEXT digest still reports it — "
+        "a failed send that marks delivery anyway is a permanent, silent hole"
+    )
+
+
+def test_a_successful_post_marks_delivered(tmp_path, monkeypatch, live_hub):
+    url, _ = live_hub
+    db_path = tmp_path / "child.sqlite3"
+    conn = db.connect(db_path)
+    artifact = tmp_path / "prd.md"
+    artifact.write_text("v1")
+    snapshots.take(conn, actor="team-frontend", artifact_uri=f"file:{artifact}", purpose="baseline")
+    artifact.write_text("v2 — changed")
+    conn.close()
+
+    monkeypatch.setenv(delivery.HUB_URL_ENV_VAR, url)
+    monkeypatch.setenv(delivery.HUB_ACTOR_ENV_VAR, "team-frontend")
+    monkeypatch.setenv(delivery.HUB_SECRET_ENV_VAR, KEYS["team-frontend"])
+
+    exit_code = cmd_digest(_digest_args(db_path, tmp_path))
+    assert exit_code == 0
+    assert _moved_count(db_path) == 1
 
 
 def test_registry_digest_matches_the_endpoints_wire_shape(client):
