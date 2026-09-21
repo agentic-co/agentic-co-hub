@@ -16,6 +16,8 @@ about each other's work**, **the pointers you built against, so you are told whe
 move**, and **a router that puts a decision in front of a named human and records the
 acknowledgement**.
 
+*New here, or explaining it to someone else? [`docs/ecosystem.md`](docs/ecosystem.md) is the seven-minute version: the problem, what a hub holds, what a harness does, and what counts as this working.*
+
 The organizing idea is the **ASOP — Agentic Standard Operating Procedure**
 ([full definition](docs/asop.md)): a procedure that is **versioned** (outcomes
 recorded per version, never per vibe), **verified** (it carries its own definition
