@@ -50,3 +50,103 @@ jobs:
       # The contract's own suite used to run here, when the contract was a
       # workspace member of this repo. It now lives in github.com/mabidoli/asop
       # and is tested there, against every implementation rather than this one.
+
+  postgres:
+    # The Postgres backend, as a GATE rather than as something a developer may
+    # remember to run. `conftest` adds the `postgres` fixture parameter only
+    # when AGENTCO_TEST_PG names a DSN, which is the honest design — a suite
+    # that silently dropped a backend would report a pass count that quietly
+    # excluded it. The consequence is that without this job, every claim about
+    # this backend rested on someone having run it by hand.
+    #
+    # One Python, not the matrix: 3.12 is what the image ships. Whether the
+    # code runs on 3.11 and 3.13 is a language-compatibility question the
+    # matrix above answers; whether it runs on Postgres is a different one, and
+    # running it three times would pay three times for the same answer.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agentco
+          # Throwaway credentials for a container that exists for the length of
+          # one job and listens only to it. Written in the open deliberately:
+          # a secret here would imply this database is worth protecting, and
+          # the next person would wonder what is in it.
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: agentco
+        options: >-
+          --health-cmd "pg_isready -U agentco"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    env:
+      AGENTCO_TEST_PG: postgresql://agentco:ci-only-not-a-secret@127.0.0.1:5432/agentco
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      # ASSERT THE BACKEND IS ACTUALLY ACTIVE before running anything against it.
+      # A mistyped variable name would otherwise produce a green job that proves
+      # nothing about Postgres, which is the failure this whole job exists to
+      # close — and it would look exactly like success.
+      - name: Refuse to pass without the Postgres backend
+        run: |
+          uv run --extra dev --extra server --extra mcp --extra postgres --python 3.12 python -c "
+          from tests.conftest import BACKENDS
+          assert 'postgres' in BACKENDS, f'postgres backend is not active: {BACKENDS}'
+          print('backends under test:', BACKENDS)
+          "
+      - run: uv run --extra dev --extra server --extra mcp --extra postgres --python 3.12 pytest -q
+
+  image:
+    # The image builds, and the thing inside it works.
+    #
+    # This job exists because its absence cost twelve days: 42fcf7a moved the
+    # ASOP contract to its own repository and deleted `packages/`, correctly,
+    # and left the Dockerfile copying that directory. Every `docker build` on
+    # main failed from that commit onward and CI reported green the whole time,
+    # because CI ran the suite and never built a container. A packaging break
+    # only a downstream consumer can see is one that will happen again.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build
+        run: docker build -t agentco:ci .
+      - name: The contract resolves, and the shims ARE it
+        # Not just "imports": the plane re-exports the contract's types, and an
+        # image that shadowed them with its own copies would satisfy an import
+        # check while quietly running a second, drifting contract.
+        run: |
+          docker run --rm --entrypoint python agentco:ci -c "
+          import asop, asop.revision, agentco.policy as policy
+          assert policy.RevisionPolicyError is asop.revision.RevisionPolicyError
+          assert policy.check_asop_revision is asop.revision.check_asop_revision
+          print('asop resolves from', asop.__file__)
+          "
+      - name: Unauthenticated is 401, and 200 would be the failure
+        # The image's own healthcheck encodes this: a 200 here means the key
+        # table loaded OPEN, which is the one outcome worse than being down.
+        run: |
+          set -euo pipefail
+          docker run -d --name agentco-ci -p 8787:8787 \
+            -e AGENTCO_REGISTRY_DB=/tmp/registry.sqlite3 \
+            -e AGENTCO_WORK_STORE=/tmp/work.jsonl \
+            -e AGENTCO_SOP_STORE=/tmp/sops.jsonl \
+            agentco:ci serve --host 0.0.0.0 --port 8787
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/events || true)
+            [ "$code" = "401" ] && { echo "registry refused an unauthenticated read, as it must"; exit 0; }
+            [ "$code" = "200" ] && { echo "FAIL: /events answered 200 unauthenticated — the key table loaded open"; docker logs agentco-ci; exit 1; }
+            sleep 2
+          done
+          echo "FAIL: the registry never answered (last code: ${code:-none})"
+          docker logs agentco-ci
+          exit 1
+      - name: Stop
+        if: always()
+        run: docker rm -f agentco-ci || true
