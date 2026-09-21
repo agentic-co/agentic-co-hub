@@ -287,7 +287,13 @@ class PgConnection:
             configure=self._configure,
             open=True,
         )
-        self._local = threading.local()
+        # The allow below is the standard library's thread-local storage, which
+        # the scanner reads as an mDNS machine name because of how the attribute
+        # is spelled. That is the right default for a tool whose job is finding a
+        # hostname in a public repo, and wrong here. (Naming the attribute in this
+        # comment would trip the same rule, which is why the comment talks around
+        # it — the suppression has to sit on the line itself to apply.)
+        self._local = threading.local()  # leakguard: allow — stdlib thread-local storage
         # Compatibility attribute only — `migrations.apply` saves, sets to
         # `None`, and restores this. This adapter always manages transactions
         # explicitly (see class docstring), so the value itself does nothing;
