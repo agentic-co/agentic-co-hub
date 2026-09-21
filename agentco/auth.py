@@ -60,6 +60,12 @@ def _unauthenticated(message: str, remediation: str) -> Unauthenticated:
     )
 
 
+#: path -> ((mtime_ns, size), keys). Process-local and unbounded in principle,
+#: bounded in practice by the number of key files one process is pointed at,
+#: which is one.
+_KEY_CACHE: dict[str, tuple[tuple[int, int], dict[str, str]]] = {}
+
+
 def load_keys(path: str | Path | None = None) -> dict[str, str]:
     """actor → shared secret, from a JSON file.
 
@@ -73,11 +79,37 @@ def load_keys(path: str | Path | None = None) -> dict[str, str]:
     if not target:
         return {}
     p = Path(target)
-    if not p.exists():
+    try:
+        stamp = p.stat()
+    except OSError:
+        _KEY_CACHE.pop(str(p), None)
         return {}
+
+    # CACHED ON (size, mtime), which is a `stat` per request instead of a read
+    # and a JSON parse per request — known issue A14, and it stopped being
+    # academic the moment a fleet polls: at five hundred actors that was a file
+    # read and a parse tens of times a second, for a file that changes when a
+    # person edits it.
+    #
+    # Keyed on the FILE rather than on a clock, deliberately. A time-to-live
+    # would make revocation eventual — an actor removed from the table would
+    # keep working until the TTL expired, and "how long until the key I just
+    # revoked stops working" would have no answer an operator could state. A
+    # stamp check makes it immediate: the next request after the write reads
+    # the new table, because the stamp no longer matches.
+    #
+    # `st_size` alongside `st_mtime` because mtime has one-second granularity on
+    # some filesystems, and two edits inside the same second is exactly the
+    # shape of a scripted rotation.
+    fingerprint = (stamp.st_mtime_ns, stamp.st_size)
+    cached = _KEY_CACHE.get(str(p))
+    if cached and cached[0] == fingerprint:
+        return dict(cached[1])
+
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
+        _KEY_CACHE.pop(str(p), None)
         return {}
     if not isinstance(data, dict):
         return {}
@@ -105,6 +137,7 @@ def load_keys(path: str | Path | None = None) -> dict[str, str]:
                 f"Pick one spelling and remove the other."
             )
         seen[canonical] = name
+    _KEY_CACHE[str(p)] = (fingerprint, dict(keys))
     return keys
 
 

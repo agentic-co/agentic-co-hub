@@ -218,6 +218,66 @@ def cmd_prune(args) -> int:
     return 0
 
 
+def cmd_revoke(args) -> int:
+    """Remove one actor from the key table. Dry by default.
+
+    `keygen` deliberately never writes the file — "a tool that writes secrets to
+    a path it guessed is how a secret ends up in a git repo". The risk here is
+    the other one: a revocation that did not happen because somebody edited the
+    wrong copy. So this writes, and the path is explicit or comes from the
+    environment the server itself reads, never guessed.
+
+    Revocation takes effect on the NEXT REQUEST, with no restart. `auth.load_keys`
+    caches on the file's stamp rather than on a clock, precisely so that "how
+    long until the key I revoked stops working" has an answer an operator can
+    state out loud: it already has.
+    """
+    import json as _json
+    import os as _os
+    from pathlib import Path as _Path
+
+    from agentco.auth import KEYS_ENV_VAR
+
+    target = args.keys or _os.environ.get(KEYS_ENV_VAR)
+    if not target:
+        print(f"no key file named: pass one, or set {KEYS_ENV_VAR}", file=sys.stderr)
+        return 2
+    path = _Path(target)
+    try:
+        table = _json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(table, dict):
+        print(f"{path} is not an actor -> secret object", file=sys.stderr)
+        return 1
+
+    if args.actor not in table:
+        # Not an error worth failing a script over, and worth SAYING: an
+        # operator who typed a name that is not there has not revoked anybody,
+        # and silence would read as success.
+        print(f"{args.actor!r} is not in {path} — nothing to revoke. "
+              f"Present: {', '.join(sorted(table)) or '(none)'}")
+        return 0
+
+    remaining = {k: v for k, v in table.items() if k != args.actor}
+    print(f"{path}: revoking {args.actor!r}, leaving {len(remaining)} actor(s)")
+    if not args.apply:
+        print("\n(dry run — nothing written. Re-run with --apply.)", file=sys.stderr)
+        return 0
+
+    # Atomic, and the mode is carried over rather than recreated at whatever
+    # umask happens to be set: a key table that lands world-readable during a
+    # revocation is a worse outcome than the access being revoked slowly.
+    mode = path.stat().st_mode & 0o777
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(_json.dumps(remaining, indent=2, sort_keys=True), encoding="utf-8")
+    _os.chmod(tmp, mode)
+    tmp.replace(path)
+    print(f"revoked. It stops working on the next request — no restart.")
+    return 0
+
+
 def cmd_hook_install(args) -> int:
     result = hook.install(args.settings, command=args.command, write=args.write)
     print(f"{result.path}: {result.status} — {result.reason}")
@@ -926,6 +986,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_inject.add_argument("--write", action="store_true", help="apply the splice (default: dry run)")
     p_inject.set_defaults(func=cmd_inject)
+
+    p_revoke = sub.add_parser("revoke", help="remove one actor from the key table")
+    p_revoke.add_argument("actor")
+    p_revoke.add_argument("--keys", default=None,
+                          help="path to the key file (default: $AGENTCO_REGISTRY_KEYS)")
+    p_revoke.add_argument("--apply", action="store_true", help="actually write (default: dry run)")
+    p_revoke.set_defaults(func=cmd_revoke)
 
     p_prune = sub.add_parser(
         "prune", help="roll old poll traffic into a daily summary and delete it"

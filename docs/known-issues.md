@@ -52,7 +52,7 @@ conformance README in the same week.
 Small, cheap, and recorded here so they exist somewhere other than a chat log.
 
 - **A13** — `_iso()` calls `astimezone(timezone.utc)` on possibly-naive datetimes, which Python treats as *local* time. A naive `now=` argument is silently shifted by the UTC offset.
-- **A14** — `auth.load_keys()` re-reads the key file from disk on every request when the app is constructed without explicit keys.
+- ~~**A14** — `auth.load_keys()` re-reads the key file from disk on every request when the app is constructed without explicit keys.~~ **Closed 2026-09-21.** Cached on the file's `(mtime_ns, size)`, so it is a `stat` per request rather than a read and a parse. Keyed on the file rather than on a clock deliberately: a TTL would make revocation eventual, and "how long until the key I just revoked stops working" would have no answer an operator could state. It is immediate, and `tests/test_revocation.py` asserts that on the next request with no restart.
 - **A16** — `resolve_file` on a FIFO blocks forever with no timeout, and `path.exists()` is true for a directory, so `file:/some/dir` raises an uncaught `IsADirectoryError`.
 
 ## Not defects, stated because they read like them
