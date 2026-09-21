@@ -588,6 +588,42 @@ def _asdict(step) -> dict:
     return _dc_asdict(step)
 
 
+# 0010 — `calls_daily`: what a pruned call row leaves behind.
+#
+# `calls` had no retention at all, which was survivable while the only traffic
+# was somebody publishing a scope claim. It stops being survivable the moment a
+# fleet polls: measured 2026-09-21, five hundred actors on a fifteen-second
+# cadence write 3.2 MILLION rows a day, essentially all of them `events`.
+#
+# The grain is one row per (day, actor, verb, status) — enough to answer how
+# much, by whom, when first and last, and what it cost on average, forever.
+# What it deliberately cannot answer is a percentile outside the retention
+# window, because percentiles do not aggregate: keeping a p99 for a day would
+# mean keeping the day's rows, which is the thing being removed.
+#
+# The adoption instruments never read this table, and that is the point. They
+# read `calls` filtered to the publishing verbs, and those rows are never
+# pruned (`metrics.RETAINED_VERBS`), so the gate measures the same thing before
+# and after a prune.
+_0010: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS calls_daily (
+        day          TEXT NOT NULL,
+        actor        TEXT NOT NULL,
+        verb         TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        n            INTEGER NOT NULL,
+        latency_sum  REAL NOT NULL,
+        latency_max  REAL NOT NULL,
+        first_at     TEXT NOT NULL,
+        last_at      TEXT NOT NULL,
+        PRIMARY KEY (day, actor, verb, status)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_calls_daily_actor ON calls_daily(actor, day)",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -598,6 +634,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(7, "sop-proposals", _0007),
     Migration(8, "work-items-insertion-order", _0008, pg_statements=_0008_pg),
     Migration(9, "asop-v3-records", _0009, backfill=_backfill_legacy_sops),
+    Migration(10, "calls-daily-rollup", _0010),
 )
 
 

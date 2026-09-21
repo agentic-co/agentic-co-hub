@@ -179,6 +179,45 @@ def cmd_sync(args) -> int:
     return 0
 
 
+def cmd_prune(args) -> int:
+    """Roll poll traffic older than the window into a daily summary, then delete it.
+
+    Dry by default. A command that deletes rows the first time somebody types it
+    to see what it does is a command that teaches people not to type it.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from agentco import db, metrics
+    from agentco.stores import resolve_db_path
+
+    conn = db.connect(resolve_db_path(args.db))
+    before = datetime.now(timezone.utc) - timedelta(days=args.days)
+
+    kept = conn.execute(
+        "SELECT COUNT(*) AS n FROM calls WHERE verb IN "
+        f"({','.join('?' for _ in metrics.RETAINED_VERBS)})",
+        metrics.RETAINED_VERBS,
+    ).fetchone()["n"]
+    doomed = conn.execute(
+        "SELECT COUNT(*) AS n FROM calls WHERE at < ? AND verb NOT IN "
+        f"({','.join('?' for _ in metrics.RETAINED_VERBS)})",
+        (before.isoformat(), *metrics.RETAINED_VERBS),
+    ).fetchone()["n"]
+
+    print(f"retention window: {args.days} days (before {before.date().isoformat()})")
+    print(f"publishing rows kept at any age: {kept}  (verbs: {', '.join(metrics.RETAINED_VERBS)})")
+    print(f"older poll rows in scope:        {doomed}")
+
+    if not args.apply:
+        print("\n(dry run — nothing written. Re-run with --apply.)", file=sys.stderr)
+        return 0
+
+    report = metrics.roll_up_and_prune_calls(conn, before=before)
+    print(f"summarised into {report['summarisedRows']} daily row(s) "
+          f"across {report['rolledUpDays']} day(s); deleted {report['deleted']}")
+    return 0
+
+
 def cmd_hook_install(args) -> int:
     result = hook.install(args.settings, command=args.command, write=args.write)
     print(f"{result.path}: {result.status} — {result.reason}")
@@ -887,6 +926,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_inject.add_argument("--write", action="store_true", help="apply the splice (default: dry run)")
     p_inject.set_defaults(func=cmd_inject)
+
+    p_prune = sub.add_parser(
+        "prune", help="roll old poll traffic into a daily summary and delete it"
+    )
+    p_prune.add_argument("--days", type=int, default=30,
+                         help="keep raw rows newer than this (default 30)")
+    p_prune.add_argument("--apply", action="store_true", help="actually write (default: dry run)")
+    p_prune.set_defaults(func=cmd_prune)
 
     p_sync = sub.add_parser(
         "sync", help="pull the hub's active procedures into this harness's local cache"

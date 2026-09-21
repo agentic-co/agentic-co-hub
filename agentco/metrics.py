@@ -495,6 +495,105 @@ def l1_conversion(
     }
 
 
+#: Verbs whose rows are NEVER pruned, whatever the retention window says.
+#:
+#: `PUBLISHING_VERBS` is the whole of what the adoption instruments read —
+#: `weekly_active_publishers`, `gate1_status` and the L1→L2 conversion all
+#: filter on it — and a publish is a rare, deliberate act. Keeping every one of
+#: them forever costs almost nothing and means retention cannot move the single
+#: number that decides whether any of this gets built.
+#:
+#: What retention removes is the poll traffic, which is the growth: measured on
+#: 2026-09-21, 500 actors at a fifteen-second cadence write 3.2 MILLION rows a
+#: day, and essentially all of them are `events`.
+RETAINED_VERBS = PUBLISHING_VERBS
+
+
+def roll_up_and_prune_calls(
+    conn: sqlite3.Connection,
+    *,
+    before: datetime,
+    now: Optional[datetime] = None,
+) -> dict:
+    """Summarise call rows older than `before` into `calls_daily`, then delete them.
+
+    **The problem this closes.** Every authenticated request writes a row here,
+    refusals included, and nothing ever removed one. That is fine at four actors
+    and it is 3.2 million rows a day at five hundred. Stage-1d is computed FROM
+    this table, so the growth degrades the signal the table exists to produce —
+    it is not only a disk question.
+
+    **What survives, exactly.** Every `RETAINED_VERBS` row, untouched, at any
+    age. So `weekly_active_publishers`, `gate1_status` and the conversion
+    measure the same thing after a prune as before it, and there is a test that
+    asserts precisely that rather than trusting this paragraph.
+
+    **What survives, summarised.** Everything else becomes one `calls_daily` row
+    per (day, actor, verb, status), carrying the count, the latency sum and max,
+    and the first and last timestamp. Volume, liveness and average cost stay
+    answerable forever; exact percentiles stay answerable only inside the
+    window, which is the honest trade and is stated in the report.
+
+    **Idempotent.** Re-running adds nothing: the aggregate is merged into the
+    existing day row rather than inserted beside it, so a prune interrupted
+    half-way and re-run does not double-count.
+    """
+    at = now or datetime.now(timezone.utc)
+    cutoff = before.astimezone(timezone.utc).isoformat()
+    retained = ",".join("?" for _ in RETAINED_VERBS)
+
+    with conn:
+        rows = conn.execute(
+            f"SELECT substr(at, 1, 10) AS day, actor, verb, status, "
+            f"COUNT(*) AS n, SUM(latency_ms) AS latency_sum, MAX(latency_ms) AS latency_max, "
+            f"MIN(at) AS first_at, MAX(at) AS last_at "
+            f"FROM calls WHERE at < ? AND verb NOT IN ({retained}) "
+            f"GROUP BY substr(at, 1, 10), actor, verb, status",
+            (cutoff, *RETAINED_VERBS),
+        ).fetchall()
+
+        for row in rows:
+            conn.execute(
+                "INSERT INTO calls_daily "
+                "(day, actor, verb, status, n, latency_sum, latency_max, first_at, last_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (day, actor, verb, status) DO UPDATE SET "
+                "  n = calls_daily.n + excluded.n, "
+                "  latency_sum = calls_daily.latency_sum + excluded.latency_sum, "
+                # CASE rather than MAX()/MIN(). SQLite has those as two-argument
+                # SCALAR functions; Postgres spells them GREATEST and LEAST and
+                # reserves MAX/MIN for aggregates, so `MAX(a, b)` is a hard error
+                # there. Found by running this against Postgres before pushing,
+                # which is what that gate exists for. A CASE is the one form both
+                # dialects read identically, and it needs no new rule in the
+                # adapter — where a textual rewrite could not tell a scalar MAX
+                # from an aggregate one anyway.
+                "  latency_max = CASE WHEN excluded.latency_max > calls_daily.latency_max "
+                "                     THEN excluded.latency_max ELSE calls_daily.latency_max END, "
+                "  first_at = CASE WHEN excluded.first_at < calls_daily.first_at "
+                "                  THEN excluded.first_at ELSE calls_daily.first_at END, "
+                "  last_at = CASE WHEN excluded.last_at > calls_daily.last_at "
+                "                 THEN excluded.last_at ELSE calls_daily.last_at END",
+                (row["day"], row["actor"], row["verb"], row["status"], row["n"],
+                 float(row["latency_sum"] or 0.0), float(row["latency_max"] or 0.0),
+                 row["first_at"], row["last_at"]),
+            )
+
+        deleted = conn.execute(
+            f"DELETE FROM calls WHERE at < ? AND verb NOT IN ({retained})",
+            (cutoff, *RETAINED_VERBS),
+        ).rowcount
+
+    return {
+        "prunedBefore": cutoff,
+        "rolledUpDays": len({r["day"] for r in rows}),
+        "summarisedRows": len(rows),
+        "deleted": max(0, deleted),
+        "retainedVerbs": list(RETAINED_VERBS),
+        "at": at.astimezone(timezone.utc).isoformat(),
+    }
+
+
 def record_call(
     conn: sqlite3.Connection,
     *,
