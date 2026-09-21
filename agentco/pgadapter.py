@@ -66,6 +66,7 @@ lock) — that path is hardened separately, see `sqlstore.SqlQueue.create`.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from typing import Any, Optional, Sequence
@@ -73,17 +74,52 @@ from typing import Any, Optional, Sequence
 try:
     import psycopg
     import psycopg.errors
+    from psycopg_pool import ConnectionPool
 except ImportError as exc:  # pragma: no cover - exercised only without the extra installed
     psycopg = None
+    ConnectionPool = None
     _IMPORT_ERROR = exc
 else:
     _IMPORT_ERROR = None
+
+
+#: How many server connections one process may hold. The ceiling matters more
+#: than the floor: this backend exists to be pointed at a SHARED Postgres, and
+#: a process that opens as many connections as it has threads is a process that
+#: can exhaust a server other applications are also using.
+DEFAULT_POOL_MIN = 1
+DEFAULT_POOL_MAX = 10
+POOL_MIN_ENV_VAR = "AGENTCO_PG_POOL_MIN"
+POOL_MAX_ENV_VAR = "AGENTCO_PG_POOL_MAX"
 
 
 #: `AGENTCO_DB=postgresql://...` or `AGENTCO_DB=postgres://...` selects this
 #: backend; anything else is a filesystem path and stays SQLite. Checked with
 #: a plain prefix test — no URL parsing needed to answer "which backend".
 POSTGRES_SCHEMES = ("postgresql://", "postgres://")
+
+
+def _pool_bounds() -> tuple[int, int]:
+    """`(min, max)` connections, from the environment, clamped to something sane.
+
+    An operator pointing this at a shared server needs to be able to say how
+    much of it this process may take, without editing code. A max below one is
+    a process that cannot talk to its database, and a min above max is a
+    configuration that would refuse to open — both are corrected here rather
+    than raised, because a registry that will not start over a pool size is a
+    worse outcome than one that starts with a sensible number.
+    """
+    def _read(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if not raw:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+    maximum = max(1, _read(POOL_MAX_ENV_VAR, DEFAULT_POOL_MAX))
+    minimum = max(0, min(_read(POOL_MIN_ENV_VAR, DEFAULT_POOL_MIN), maximum))
+    return minimum, maximum
 
 
 def is_postgres_target(target: Any) -> bool:
@@ -220,9 +256,38 @@ class PgConnection:
                 "pip install 'agentco[postgres]' (or uv add --optional postgres "
                 "'psycopg[binary]')."
             ) from _IMPORT_ERROR
-        self._conn = psycopg.connect(dsn, autocommit=True)
-        self._lock = threading.RLock()
-        self._tx_depth = 0
+        # A POOL, not a connection, and no process-wide lock around it.
+        #
+        # What stood here was `psycopg.connect(...)` plus a `threading.RLock`
+        # held for the duration of every `execute`. One connection is a
+        # capacity decision; the LOCK was the real ceiling, because it made
+        # every request in the process wait for every other one regardless of
+        # what the database could have served in parallel. A hundred pollers
+        # against that is a hundred pollers in a queue of one.
+        #
+        # Removing it is safe for the reason this module's own docstring
+        # already gives for not needing `BEGIN IMMEDIATE`'s whole-database
+        # lock: correctness here rests on the compare-and-swap in
+        # `sqlstore._mutate`'s WHERE clause, which fails loudly rather than
+        # overwriting, not on callers being serialised. The lock was never
+        # what made concurrent writers correct; it only made them rare.
+        #
+        # Transactions still need ONE connection for their whole span, so a
+        # thread checks one out at `_begin` and returns it at `_end`. Outside
+        # a transaction each statement borrows and returns immediately, which
+        # is what lets a small pool serve many more callers than it has
+        # connections.
+        self._min, self._max = _pool_bounds()
+        self._lock_timeout_ms: Optional[int] = None
+        self._pool = ConnectionPool(
+            dsn,
+            min_size=self._min,
+            max_size=self._max,
+            kwargs={"autocommit": True},
+            configure=self._configure,
+            open=True,
+        )
+        self._local = threading.local()
         # Compatibility attribute only — `migrations.apply` saves, sets to
         # `None`, and restores this. This adapter always manages transactions
         # explicitly (see class docstring), so the value itself does nothing;
@@ -233,42 +298,82 @@ class PgConnection:
 
     # -- transaction control ---------------------------------------------
 
+    def _configure(self, conn) -> None:
+        """Applied to every connection the pool opens, including replacements.
+
+        Session settings have to live here rather than on one connection,
+        because with a pool there is no "the" connection to set them on — and a
+        `lock_timeout` that held only for whichever connection happened to be
+        first would be a timeout that applies to some requests and not others.
+        """
+        if self._lock_timeout_ms is not None:
+            conn.execute(f"SET lock_timeout = '{self._lock_timeout_ms}ms'")
+
+    @property
+    def _depth(self) -> int:
+        return getattr(self._local, "depth", 0)
+
     @property
     def in_transaction(self) -> bool:
-        return self._tx_depth > 0
+        """Per THREAD, which is the only reading that means anything now.
+
+        Two threads can be inside transactions on two connections at the same
+        instant; a process-wide answer would be true for a caller that is not
+        in one.
+        """
+        return self._depth > 0
 
     def _begin(self) -> None:
-        if self._tx_depth == 0:
-            self._conn.autocommit = False
-        self._tx_depth += 1
+        if self._depth == 0:
+            conn = self._pool.getconn()
+            conn.autocommit = False
+            self._local.conn = conn
+        self._local.depth = self._depth + 1
 
     def _end(self, *, commit: bool) -> None:
-        self._tx_depth -= 1
-        if self._tx_depth < 0:  # pragma: no cover - defensive, should not happen
-            self._tx_depth = 0
-        if self._tx_depth == 0:
-            if commit:
-                self._conn.commit()
-            else:
-                self._conn.rollback()
-            self._conn.autocommit = True
+        depth = self._depth - 1
+        if depth < 0:  # pragma: no cover - defensive, should not happen
+            depth = 0
+        self._local.depth = depth
+        if depth == 0:
+            conn = self._local.conn
+            self._local.conn = None
+            try:
+                if commit:
+                    conn.commit()
+                else:
+                    conn.rollback()
+                conn.autocommit = True
+            finally:
+                # Returned even if the commit raised: a connection kept out of
+                # the pool by a failure is a connection the pool never gets
+                # back, and enough of those is an outage that looks like a hang.
+                self._pool.putconn(conn)
 
     def __enter__(self) -> "PgConnection":
-        self._lock.acquire()
         self._begin()
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        try:
-            self._end(commit=exc_type is None)
-        finally:
-            self._lock.release()
+        self._end(commit=exc_type is None)
         return False
 
     # -- the one entry point every caller uses ----------------------------
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> PgCursor:
-        with self._lock:
+        """One statement. Inside a transaction it runs on that transaction's
+        pinned connection; outside one it borrows from the pool and gives it
+        straight back, which is what lets ten connections serve a hundred
+        pollers.
+        """
+        if self._depth > 0:
+            return self._execute_on(self._local.conn, sql, params)
+        with self._pool.connection() as conn:
+            return self._execute_on(conn, sql, params)
+
+    def _execute_on(self, conn, sql: str, params: Sequence[Any] = ()) -> PgCursor:
+        """The translation layer, against whichever connection the caller holds."""
+        if True:  # keeps the body's indentation; see `execute` for the choice of conn
             stripped = sql.strip()
             upper = stripped.upper()
 
@@ -286,7 +391,12 @@ class PgConnection:
             busy = _PRAGMA_BUSY_TIMEOUT.match(stripped)
             if busy:
                 ms = int(busy.group(1))
-                self._conn.execute(f"SET lock_timeout = '{ms}ms'")
+                # Remembered as well as applied: `configure` replays it onto
+                # every connection the pool opens later, so the timeout is a
+                # property of the deployment rather than of whichever
+                # connection happened to receive the PRAGMA.
+                self._lock_timeout_ms = ms
+                conn.execute(f"SET lock_timeout = '{ms}ms'")
                 return PgCursor([], lastrowid=None, rowcount=0)
             if _PRAGMA_QUICK_CHECK.match(stripped):
                 stripped = "SELECT 'ok'"
@@ -301,7 +411,7 @@ class PgConnection:
                 returning_seq = True
 
             try:
-                cur = self._conn.execute(translated, tuple(params) if params else None)
+                cur = conn.execute(translated, tuple(params) if params else None)
             except psycopg.errors.OperationalError as exc:
                 raise OperationalError(str(exc)) from exc
 
@@ -318,20 +428,30 @@ class PgConnection:
             return PgCursor(rows, lastrowid=lastrowid, rowcount=rowcount)
 
     def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> None:  # pragma: no cover - unused today
-        with self._lock:
-            translated = _translate_placeholders(sql.strip())
-            self._conn.executemany(translated, [tuple(p) for p in seq_of_params])
+        translated = _translate_placeholders(sql.strip())
+        rows = [tuple(p) for p in seq_of_params]
+        if self._depth > 0:
+            self._local.conn.executemany(translated, rows)
+            return
+        with self._pool.connection() as conn:
+            conn.executemany(translated, rows)
 
     def commit(self) -> None:
-        with self._lock:
-            self._conn.commit()
+        """Only meaningful inside a transaction now.
+
+        Outside one every statement already committed as it ran, and there is
+        no connection this object owns to commit — borrowing one from the pool
+        to commit nothing on it would be a no-op wearing a method name.
+        """
+        if self._depth > 0:
+            self._local.conn.commit()
 
     def rollback(self) -> None:
-        with self._lock:
-            self._conn.rollback()
+        if self._depth > 0:
+            self._local.conn.rollback()
 
     def close(self) -> None:
-        self._conn.close()
+        self._pool.close()
 
 
 def connect(dsn: str) -> PgConnection:

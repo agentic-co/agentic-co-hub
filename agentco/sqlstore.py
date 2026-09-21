@@ -59,6 +59,7 @@ from agentco.work import (
     build_item,
     enforce_decomposition,
     is_child_row,
+    releases_blockers,
 )
 
 # Every WorkItem field is a column of the same name. Asserted at import rather
@@ -520,6 +521,39 @@ class SqlQueue(_SqlBacked, Queue):
         # conformance suite exists to catch — and did, for this very change.
         self._announced_filed(item)
         return item
+
+    def _ready_candidates(self) -> tuple[list[WorkItem], set[str]]:
+        """Two indexed reads over the WORKING SET, instead of one scan of all history.
+
+        `ready()` only ever admits PENDING, or IN_PROGRESS whose lease has
+        lapsed, so every terminal row the base implementation decodes is work
+        done to be thrown away — and terminal rows are the ones that accumulate
+        forever. `idx_work_status` (migration 0001) is what makes the first
+        query cheap; the second asks about a BOUNDED set, the blocker ids the
+        candidates actually name, which is usually empty and never larger than
+        the candidates themselves.
+
+        Same answers as the base version, by construction: the candidate filter
+        is the same predicate `ready()` applies next, and `unmet_blockers` only
+        tests membership for an item's own blockers, so ids nothing depends on
+        cannot change a result.
+        """
+        with self._read_tx() as conn:
+            rows = conn.execute(
+                "SELECT * FROM work_items WHERE status IN (?, ?)",
+                (WorkStatus.PENDING.value, WorkStatus.IN_PROGRESS.value),
+            ).fetchall()
+            items = [WorkItem.from_json(json.dumps(_row_to_dict(r))) for r in rows]
+
+            wanted = {b for i in items for b in (i.blocked_by or ())}
+            if not wanted:
+                return items, set()
+            placeholders = ", ".join("?" for _ in wanted)
+            done_rows = conn.execute(
+                f"SELECT id, status FROM work_items WHERE id IN ({placeholders})",
+                tuple(wanted),
+            ).fetchall()
+        return items, {r["id"] for r in done_rows if releases_blockers(r["status"])}
 
     # -- the one mutation primitive --------------------------------------
 

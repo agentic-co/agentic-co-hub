@@ -36,6 +36,11 @@ mcp = ["mcp<2"]
 # deployment that sets AGENTCO_DB to a postgresql:// URL.
 postgres = [
     "psycopg[binary]>=3.1",
+    # The pool is a separate distribution from the driver. It is here rather
+    # than optional-within-optional because the adapter no longer works without
+    # one: a single connection behind a process-wide lock was the ceiling this
+    # backend existed to lift.
+    "psycopg-pool>=3.2",
 ]
 dev = ["pytest>=8.0"]
 # The ASOP eval harness (`evals/`, not shipped in the wheel). LiteLLM is a
