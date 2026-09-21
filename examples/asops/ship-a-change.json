@@ -1,0 +1,54 @@
+{
+  "title": "Ship a change to this repository",
+  "task_type": "change",
+  "purpose": "Get a change from a working tree into main with every check it claims to have passed actually evaluated by something other than the party claiming it",
+  "trigger": "A change is ready to publish — not after it has been published, which is too late for two of the three steps",
+  "inputs": [
+    {"name": "change", "description": "what the change is for, in one line, so a divergence later reads as something other than 'a commit'"}
+  ],
+  "roles": {
+    "author": {"kind": "agent"}
+  },
+  "constraints": [],
+  "steps": [
+    {
+      "name": "prove-it-here",
+      "role": "author",
+      "purpose": "Establish, before anything leaves this machine, that the suite and the identity scan pass",
+      "definition_of_done": "The suite is green on every backend the environment can reach, leakguard exits zero, and the tree is committed",
+      "gate": {
+        "kind": "deterministic",
+        "check": "python3 tools/verify_change.py --pre",
+        "max_park_seconds": 1800,
+        "on_timeout": "fail"
+      }
+    },
+    {
+      "name": "publish",
+      "role": "author",
+      "purpose": "Move the change to the remote that other people and other machines read",
+      "definition_of_done": "The remote's main is the commit that was proven in step 1, not a near relative of it",
+      "after": [1],
+      "gate": {
+        "kind": "deterministic",
+        "check": "git fetch origin --quiet && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse origin/main)\"",
+        "max_park_seconds": 900,
+        "on_timeout": "fail"
+      }
+    },
+    {
+      "name": "confirm-what-the-push-started",
+      "role": "author",
+      "purpose": "Read the verdict of every job the push triggered, rather than the headline of whichever run is newest",
+      "definition_of_done": "Every job of the CI workflow for this exact commit concluded success — job by job, workflow named explicitly",
+      "after": [2],
+      "gate": {
+        "kind": "deterministic",
+        "check": "python3 tools/verify_change.py --ci",
+        "max_park_seconds": 3600,
+        "on_timeout": "escalate",
+        "escalate_to": "role:author"
+      }
+    }
+  ]
+}
