@@ -147,6 +147,38 @@ def cmd_inject(args) -> int:
     return exit_code
 
 
+def cmd_sync(args) -> int:
+    """One pass of the feed into the local procedure cache.
+
+    Exits non-zero on a transport or configuration failure, because the caller
+    decides what to do about it. The `SessionStart` hook wraps this; a cron or a
+    person wants to know.
+    """
+    from agentco.sync import AsopCache, Sync, registry_from_env
+
+    try:
+        registry = registry_from_env()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    cache = AsopCache(args.root) if args.root else AsopCache()
+    try:
+        report = Sync(registry, cache, limit=args.limit).once()
+    except Exception as exc:  # noqa: BLE001 - reported with its type, not swallowed
+        print(f"sync failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+    print(report.summary())
+    for label, ids in (("activated", report.activated), ("updated", report.updated),
+                       ("retired", report.retired)):
+        for asop_id in ids:
+            print(f"  {label}: {asop_id}")
+    for asop_id in report.unreadable:
+        print(f"  UNREADABLE (skipped, cursor advanced): {asop_id}", file=sys.stderr)
+    print(f"holding {len(cache.held())} procedure(s) in {cache.dir}")
+    return 0
+
+
 def cmd_hook_install(args) -> int:
     result = hook.install(args.settings, command=args.command, write=args.write)
     print(f"{result.path}: {result.status} — {result.reason}")
@@ -855,6 +887,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_inject.add_argument("--write", action="store_true", help="apply the splice (default: dry run)")
     p_inject.set_defaults(func=cmd_inject)
+
+    p_sync = sub.add_parser(
+        "sync", help="pull the hub's active procedures into this harness's local cache"
+    )
+    p_sync.add_argument("--root", default=None,
+                        help="where the cache lives (default: .agentco in the working directory)")
+    p_sync.add_argument("--limit", type=int, default=200, help="events per pass")
+    p_sync.set_defaults(func=cmd_sync)
 
     p_hook = sub.add_parser(
         "hook", help="tier-3 SessionStart hook — install/uninstall in a harness's settings file"
