@@ -27,6 +27,7 @@ import json
 import os
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from agentco.errors import Refusal, Unauthenticated
@@ -60,10 +61,50 @@ def _unauthenticated(message: str, remediation: str) -> Unauthenticated:
     )
 
 
-#: path -> ((mtime_ns, size), keys). Process-local and unbounded in principle,
-#: bounded in practice by the number of key files one process is pointed at,
-#: which is one.
-_KEY_CACHE: dict[str, tuple[tuple[int, int], dict[str, str]]] = {}
+@dataclass(frozen=True)
+class Identity:
+    """One entry in the key table: who this actor is, and who answers for it.
+
+    **Why the table grew a shape.** `{"alice": "secret"}` says an actor may
+    sign. It cannot say that `alice-codex-01` is a tool Alice runs, and at two
+    or three agents per person that is the fact everything else needs:
+    offboarding is one act per PERSON or it is a hunt for three keys per
+    leaver; and a separation check that compares actors lets one person's two
+    agents be executor and verifier of the same work — satisfying the letter
+    while an agent grades its owner's homework.
+
+    **Both shapes are valid, on purpose.** A bare string stays exactly what it
+    was, because every deployment already has one and a format change that
+    invalidates existing tables is a format change nobody applies. An object
+    adds the facts; a string declines to state them, and a fact not stated is
+    read as unknown rather than guessed.
+
+    `owner` is a NAME, not necessarily another entry. The person accountable
+    for an agent may hold no key of their own — a product manager whose agent
+    files work is still the party to revoke — and requiring them to have one
+    would be this file inventing an access grant to make its own bookkeeping
+    tidy.
+    """
+
+    actor: str
+    secret: str
+    owner: Optional[str] = None
+    label: Optional[str] = None
+
+    @property
+    def owned(self) -> bool:
+        return self.owner is not None
+
+
+#: path -> ((mtime_ns, size), identities). Process-local and unbounded in
+#: principle, bounded in practice by the number of key files one process is
+#: pointed at, which is one.
+#:
+#: IDENTITIES rather than secrets, so that `load_keys` and `load_identities`
+#: cannot disagree about what the file says. Two caches over one file is two
+#: answers to "is this actor still allowed", and the revocation path is exactly
+#: where those must not diverge.
+_KEY_CACHE: dict[str, tuple[tuple[int, int], dict[str, "Identity"]]] = {}
 
 
 def load_keys(path: str | Path | None = None) -> dict[str, str]:
@@ -104,7 +145,7 @@ def load_keys(path: str | Path | None = None) -> dict[str, str]:
     fingerprint = (stamp.st_mtime_ns, stamp.st_size)
     cached = _KEY_CACHE.get(str(p))
     if cached and cached[0] == fingerprint:
-        return dict(cached[1])
+        return {name: ident.secret for name, ident in cached[1].items()}
 
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
@@ -113,7 +154,8 @@ def load_keys(path: str | Path | None = None) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    keys = {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
+    identities = _parse_identities(data)
+    keys = {name: ident.secret for name, ident in identities.items()}
 
     # REFUSE two identities that differ only by case, rather than silently
     # serving both. Downstream, anything that counts distinct people has to pick
@@ -137,8 +179,94 @@ def load_keys(path: str | Path | None = None) -> dict[str, str]:
                 f"Pick one spelling and remove the other."
             )
         seen[canonical] = name
-    _KEY_CACHE[str(p)] = (fingerprint, dict(keys))
+    _KEY_CACHE[str(p)] = (fingerprint, identities)
     return keys
+
+
+def _parse_identities(data: dict) -> dict[str, "Identity"]:
+    """Both table shapes, with the rules that keep the ownership graph readable.
+
+    Refusals here rather than at the point of use, because a key table is a
+    deliberate act by an operator and a malformed one is worth naming when it is
+    written, not when somebody's request is mysteriously refused at 02:00.
+    """
+    out: dict[str, Identity] = {}
+    for name, value in data.items():
+        actor = str(name)
+        if isinstance(value, str):
+            if value:
+                out[actor] = Identity(actor=actor, secret=value)
+            continue
+        if not isinstance(value, dict):
+            continue
+        secret = value.get("secret")
+        if not isinstance(secret, str) or not secret:
+            continue
+        owner = value.get("owner")
+        owner = str(owner).strip() if isinstance(owner, str) and owner.strip() else None
+        label = value.get("label")
+        label = str(label).strip() if isinstance(label, str) and label.strip() else None
+        if owner == actor:
+            raise AmbiguousIdentityError(
+                f"{actor!r} is listed as its own owner. An identity cannot answer "
+                f"for itself — that is what having an owner means."
+            )
+        out[actor] = Identity(actor=actor, secret=secret, owner=owner, label=label)
+
+    # ONE LEVEL, never a chain. An agent owned by an agent makes "who do I
+    # revoke" a graph walk, and "is this the same party" a transitive question
+    # the separation check would have to answer at request time. A person owns
+    # tools; tools own nothing.
+    owned = {name for name, ident in out.items() if ident.owned}
+    for name, ident in out.items():
+        if ident.owner in owned:
+            raise AmbiguousIdentityError(
+                f"{name!r} is owned by {ident.owner!r}, which is itself owned by "
+                f"{out[ident.owner].owner!r}. Ownership is one level: a person owns "
+                f"the tools they run, and a tool owns nothing."
+            )
+    return out
+
+
+def load_identities(path: str | Path | None = None) -> dict[str, "Identity"]:
+    """The key table WITH its ownership, for callers that need more than a secret.
+
+    `load_keys` stays the signing path and returns exactly what it always
+    returned; this is the same file read through a wider lens, for revocation
+    and for the separation check.
+    """
+    target = path or os.environ.get(KEYS_ENV_VAR)
+    if not target:
+        return {}
+    p = Path(target)
+    try:
+        stamp = p.stat()
+    except OSError:
+        _KEY_CACHE.pop(str(p), None)
+        return {}
+    fingerprint = (stamp.st_mtime_ns, stamp.st_size)
+    cached = _KEY_CACHE.get(str(p))
+    if cached and cached[0] == fingerprint:
+        return dict(cached[1])
+    # Populating through `load_keys` on purpose: one read, one parse, one set of
+    # refusals. A second parser here would be a second opinion about a malformed
+    # table, and they would drift.
+    load_keys(p)
+    cached = _KEY_CACHE.get(str(p))
+    return dict(cached[1]) if cached else {}
+
+
+def owner_of(actor: Optional[str], identities: Mapping[str, "Identity"]) -> Optional[str]:
+    """The party accountable for `actor` — itself when nobody else is named.
+
+    Returning the actor rather than `None` for an unowned entry is what lets a
+    caller compare two parties without branching: an unowned actor is its own
+    party, which is the pre-ownership behaviour exactly.
+    """
+    if actor is None:
+        return None
+    ident = identities.get(actor)
+    return ident.owner if (ident and ident.owner) else actor
 
 
 def signing_string(method: str, path: str, timestamp: str, body: bytes) -> str:

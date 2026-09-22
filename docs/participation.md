@@ -181,6 +181,50 @@ refusal a work-queue seam meets, and the fence in action.
 python3 -m agentco keygen your-name   # prints a secret; never writes it anywhere
 ```
 
+### Saying who runs what
+
+The key table takes two shapes, and both are valid forever. A bare string is
+what it always was:
+
+```json
+{ "alice": "a-secret" }
+```
+
+An object says the things a string cannot — who answers for this actor, and
+which tool it is:
+
+```json
+{
+  "alice":           { "secret": "…", "label": "laptop" },
+  "alice-codex-01":  { "secret": "…", "owner": "alice", "label": "codex" },
+  "alice-claude-01": { "secret": "…", "owner": "alice", "label": "claude-code" }
+}
+```
+
+Worth stating because it costs one field and buys two properties that are hard
+to add later:
+
+**Offboarding is one act.** `agentco revoke alice --owner` removes Alice and
+every tool answering to her. Without `owner`, one leaver is a hunt for however
+many keys they happened to run, and the one you miss still works.
+
+**The gate compares parties, not actors.** A judged gate rests on the verifier
+not being the executor. Compare ACTORS and one person's two agents can be both
+— the letter satisfied while an agent grades its owner's homework. At two or
+three agents per person that is the ordinary case rather than a corner one, so
+the check asks who answers for an actor instead.
+
+`owner` is a name, not necessarily another entry: the person accountable for an
+agent may hold no key themselves, and requiring one would be this file inventing
+an access grant to keep its own bookkeeping tidy. Ownership is one level — a
+person owns the tools they run, and a tool owns nothing — because a chain makes
+"who do I revoke" a graph walk and "is this the same party" a transitive question
+the gate would have to answer on every request.
+
+An entry that states nothing is read as unknown rather than guessed, so a
+deployment that adopts none of this behaves exactly as it did before.
+
+
 ```python
 from agentco.publish import Registry
 

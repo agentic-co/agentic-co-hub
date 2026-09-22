@@ -228,6 +228,14 @@ def create_app(
     # the queue for everything they hold — which is what both of them do when
     # asked, and what a fleet of a hundred pollers cannot afford.
     queue.announce = library.announce = events.announcer(conn)
+    # Who answers for each actor, read from the SAME key table that decides
+    # whether they may sign at all. Passed as a callable so an offboarding has
+    # one answer rather than two: the table is edited while this process runs,
+    # and separation that only noticed at restart would disagree with
+    # authentication, which notices on the next request.
+    queue.owners = lambda: {
+        name: ident.owner for name, ident in auth.load_identities().items() if ident.owner
+    }
     declared_humans = frozenset(humans) if humans is not None else policy.humans_from_env()
     # The queue answers "who may adjudicate" and reads the same two
     # declarations. Injected rather than left to the environment for the

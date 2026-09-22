@@ -62,7 +62,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Optional, Sequence
+from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
 from agentco import gates, policy
 from agentco.errors import Refusal
@@ -1147,6 +1147,35 @@ class Queue:
                 file=sys.stderr,
             )
 
+    #: actor -> the party accountable for it. Set by whoever builds the plane,
+    #: from the key table. Left empty here, and an actor absent from it is its
+    #: own party — which is the behaviour before ownership existed, so a
+    #: deployment that declares nothing is unchanged.
+    #:
+    #: A CALLABLE rather than a dict, because the key table is edited while the
+    #: process runs: an offboarding that took effect on the next request for
+    #: authentication and on the next RESTART for separation would be an
+    #: offboarding with two different answers.
+    owners: Optional[Callable[[], Mapping[str, str]]] = None
+
+    def party_of(self, actor: Optional[str]) -> Optional[str]:
+        """Who answers for `actor` — itself, unless the table names somebody.
+
+        This is the unit the separation check compares. Comparing ACTORS lets
+        one person's two agents be executor and verifier of the same work, which
+        satisfies the letter of "not the same actor" while an agent grades its
+        owner's homework — and at two or three agents per person that is the
+        ordinary case, not a corner one.
+        """
+        if actor is None or self.owners is None:
+            return actor
+        try:
+            return self.owners().get(actor, actor)
+        except Exception:  # noqa: BLE001 - a table that cannot be read must not
+            # turn every attestation into a 500. Falling back to the actor is
+            # the pre-ownership rule, which is stricter than nothing.
+            return actor
+
     def __init__(self, path: Path | str = "work.jsonl", verifiers: Optional[Sequence[str]] = None,
                  humans: Optional[Sequence[str]] = None,
                  adjudicators: Optional[Sequence[str]] = None):
@@ -2114,17 +2143,30 @@ class Queue:
                     ),
                 )
             executor = (item.metadata or {}).get("lease_report", {}).get("reported_by")
-            if gate.get("kind") != "deterministic" and submitted_by == executor:
+            submitting_party, executing_party = self.party_of(submitted_by), self.party_of(executor)
+            if gate.get("kind") != "deterministic" and submitting_party == executing_party \
+                    and executor is not None:
+                same_actor = submitted_by == executor
                 raise Refusal(
                     code=gates.ATTESTATION_INVALID,
                     message=(
                         f"{submitted_by!r} executed {item.id} and cannot also "
                         f"verify its {gate.get('kind')!r} gate"
+                        if same_actor else
+                        f"{submitted_by!r} and {executor!r} both answer to "
+                        f"{submitting_party!r}, so one cannot verify the other's "
+                        f"work on {item.id}"
                     ),
                     remediation=(
                         "Route this gate to a worker declaring the `verify` "
                         "capability, or to a person. The separation is the "
                         "whole property being bought."
+                        if same_actor else
+                        "Route it to somebody else's worker, or to a person. Two "
+                        "tools run by one party are one party: the check compares "
+                        "who answers for an actor, not which actor it is, because "
+                        "otherwise a second agent is a way around the rule rather "
+                        "than a second opinion."
                     ),
                 )
 

@@ -252,6 +252,30 @@ def cmd_revoke(args) -> int:
         print(f"{path} is not an actor -> secret object", file=sys.stderr)
         return 1
 
+    if args.owner:
+        # The whole point of recording an owner: offboarding is ONE act per
+        # person, not a hunt for the two or three keys they happened to run.
+        from agentco.auth import load_identities
+
+        identities = load_identities(path)
+        doomed = sorted(name for name, ident in identities.items()
+                        if ident.owner == args.actor or name == args.actor)
+        if not doomed:
+            print(f"nothing answers to {args.actor!r} in {path}, and it holds no key itself. "
+                  f"Nothing to revoke.")
+            return 0
+        remaining = {k: v for k, v in table.items() if k not in doomed}
+        print(f"{path}: revoking {len(doomed)} identit(y/ies) answering to {args.actor!r}:")
+        for name in doomed:
+            owned_by = identities[name].owner
+            print(f"  {name}" + (f"  (owned by {owned_by})" if owned_by else "  (the person's own key)"))
+        if not args.apply:
+            print("\n(dry run — nothing written. Re-run with --apply.)", file=sys.stderr)
+            return 0
+        _write_table(path, remaining)
+        print(f"revoked {len(doomed)}. They stop working on the next request — no restart.")
+        return 0
+
     if args.actor not in table:
         # Not an error worth failing a script over, and worth SAYING: an
         # operator who typed a name that is not there has not revoked anybody,
@@ -269,13 +293,25 @@ def cmd_revoke(args) -> int:
     # Atomic, and the mode is carried over rather than recreated at whatever
     # umask happens to be set: a key table that lands world-readable during a
     # revocation is a worse outcome than the access being revoked slowly.
-    mode = path.stat().st_mode & 0o777
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(_json.dumps(remaining, indent=2, sort_keys=True), encoding="utf-8")
-    _os.chmod(tmp, mode)
-    tmp.replace(path)
+    _write_table(path, remaining)
     print(f"revoked. It stops working on the next request — no restart.")
     return 0
+
+
+def _write_table(path, table) -> None:
+    """Atomic, and carrying the file's mode rather than recreating it.
+
+    A key table that lands world-readable DURING a revocation is a worse
+    outcome than the access being revoked slowly.
+    """
+    import json as _json
+    import os as _os
+
+    mode = path.stat().st_mode & 0o777
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(_json.dumps(table, indent=2, sort_keys=True), encoding="utf-8")
+    _os.chmod(tmp, mode)
+    tmp.replace(path)
 
 
 def cmd_hook_install(args) -> int:
@@ -991,6 +1027,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_revoke.add_argument("actor")
     p_revoke.add_argument("--keys", default=None,
                           help="path to the key file (default: $AGENTCO_REGISTRY_KEYS)")
+    p_revoke.add_argument("--owner", action="store_true",
+                          help="treat the name as a PERSON and revoke everything answering to "
+                               "them, including their own key — offboarding in one act")
     p_revoke.add_argument("--apply", action="store_true", help="actually write (default: dry run)")
     p_revoke.set_defaults(func=cmd_revoke)
 
