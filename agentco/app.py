@@ -327,6 +327,11 @@ def create_app(
                 request.url.path,
                 body,
                 keys=app.state.keys,
+                # The query is part of what is signed now, canonicalised on both
+                # ends so a proxy reordering parameters cannot invalidate it.
+                # Without this, one captured `GET /events` replayed as any feed
+                # query inside the timestamp window (known issue 6b).
+                query=request.url.query,
             )
             payload: dict = {}
             if body:

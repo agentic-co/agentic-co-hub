@@ -25,13 +25,14 @@ import hmac
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 
 
-# vendored-from: agentco/auth.py sha256=cd9e310668a447186d8df3c47e84cc76076911a10cb3e17c12decefd7ba76623
+# vendored-from: agentco/auth.py sha256=3a882ef9631360e100165f534d31ea5897123ab90a1aafc3f1552763cc58e8f4
 #
 # A DECLARED COPY, not an accident, and not an import. This file exists to be
 # copy-pasted by someone who never installs the package — that is the whole
@@ -48,9 +49,27 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 #
 # Two docstrings used to claim this file imported the function. Neither was
 # true, and each pointed at the other as the safeguard.
-def _sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> str:
+def _canonical_query(query: Optional[str]) -> str:
+    """Sorted and consistently escaped, so a proxy reordering parameters cannot
+    invalidate a signature while the values stay bound. Mirrors
+    `auth.canonical_query`; `tests/test_signing_contract.py` asserts they agree,
+    which is the guard this file's duplication has always needed."""
+    if not query:
+        return ""
+    pairs = urllib.parse.parse_qsl(query.lstrip("?"), keep_blank_values=True)
+    return "&".join(
+        f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}"
+        for k, v in sorted(pairs)
+    )
+
+
+def _sign(secret: str, method: str, path: str, timestamp: str, body: bytes,
+          query: Optional[str] = None) -> str:
     digest = hashlib.sha256(body or b"").hexdigest()
     signing_string = f"{method.upper()}\n{path}\n{timestamp}\n{digest}"
+    canonical = _canonical_query(query)
+    if canonical:
+        signing_string = f"{signing_string}\n{canonical}"
     return hmac.new(secret.encode(), signing_string.encode(), hashlib.sha256).hexdigest()
 
 
@@ -106,9 +125,19 @@ class Registry:
     def _call(self, method: str, path: str, body: Optional[dict] = None, query: str = "") -> dict:
         raw = json.dumps(body).encode() if body is not None else b""
         timestamp = str(int(time.time()))
-        # The signature covers the path WITHOUT the query string — the server
-        # signs `request.url.path` for the same reason: a proxy that reorders
-        # or re-encodes query parameters must not invalidate the signature.
+        # The signature covers the DECODED path and the CANONICAL query.
+        #
+        # The query used to be excluded, for a reason that was sound: a proxy
+        # reordering or re-encoding parameters must not invalidate a signature.
+        # Canonicalising keeps that property — parse, sort, re-encode — while
+        # still binding the values, which is what closes the replay of one
+        # captured `GET /events` as any other feed query (known issue 6b).
+        #
+        # Decoding the path is the other half: the server signs the decoded
+        # path, so a client signing the wire form disagreed with it the moment
+        # a path needed encoding, and the disagreement surfaced as a 401 that
+        # pointed nowhere (known issue A15).
+        signed_path = urllib.parse.unquote(path)
         request = urllib.request.Request(
             f"{self.base_url}{path}{query}",
             data=raw if raw else None,
@@ -117,7 +146,8 @@ class Registry:
                 "Content-Type": "application/json",
                 "X-AgentCo-Actor": self.actor,
                 "X-AgentCo-Timestamp": timestamp,
-                "X-AgentCo-Signature": _sign(self.secret, method, path, timestamp, raw),
+                "X-AgentCo-Signature": _sign(self.secret, method, signed_path, timestamp, raw,
+                                             query=query),
                 **({"X-AgentCo-Via": self.via} if self.via else {}),
             },
         )

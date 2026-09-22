@@ -26,6 +26,7 @@ import hmac
 import json
 import os
 import time
+import urllib.parse
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Mapping, Optional
@@ -269,12 +270,62 @@ def owner_of(actor: Optional[str], identities: Mapping[str, "Identity"]) -> Opti
     return ident.owner if (ident and ident.owner) else actor
 
 
-def signing_string(method: str, path: str, timestamp: str, body: bytes) -> str:
+#: Set to refuse signatures that do not cover the query string. Off by default
+#: because both ends must change together and a registry that stopped serving
+#: every existing client on upgrade is a registry nobody upgrades; ON is the
+#: destination, and until it is on, known issue 6b remains open for whoever is
+#: still signing the old string.
+REQUIRE_SIGNED_QUERY_ENV_VAR = "ASOP_REQUIRE_SIGNED_QUERY"
+
+
+def canonical_query(query: Optional[str]) -> str:
+    """The query string in one form both ends can agree on, or "" for none.
+
+    **Why canonical rather than literal.** The reason this was left out of the
+    signature in the first place is sound and stated in `publish.py`: a proxy
+    that reorders or re-encodes parameters must not invalidate a signature. A
+    literal query would make every such proxy an outage. So: parse, SORT, and
+    re-encode with one consistent escaping — reordering cannot change the
+    result, and neither can a different-but-equivalent encoding, while the
+    VALUES are still bound. The same shape AWS SigV4 uses, for the same reason.
+
+    **What it closes.** Without it, one captured `GET /events` replays as any
+    feed query for the whole 300-second window — a different `since`, a
+    different `limit`, a different `kind` — because none of that was signed
+    (known issue 6b).
+    """
+    if not query:
+        return ""
+    pairs = urllib.parse.parse_qsl(query.lstrip("?"), keep_blank_values=True)
+    return "&".join(
+        f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}"
+        for k, v in sorted(pairs)
+    )
+
+
+def signing_string(method: str, path: str, timestamp: str, body: bytes,
+                   query: Optional[str] = None) -> str:
+    """What both ends hash.
+
+    `path` is the DECODED path, and both ends must decode before signing. The
+    server cannot reliably recover the wire form — ASGI's `raw_path` is
+    optional and proxies rewrite it — while decoding is deterministic on both
+    sides. Two different percent-encodings of one path denote one resource and
+    should produce one signature; what must never happen is the two ends
+    disagreeing, which is what known issue A15 was.
+
+    The query is appended as its own line only when there is one, so a request
+    without a query hashes exactly as it always did — which is what lets the
+    old and new forms be told apart without a version field.
+    """
     digest = hashlib.sha256(body or b"").hexdigest()
-    return f"{method.upper()}\n{path}\n{timestamp}\n{digest}"
+    canonical = canonical_query(query)
+    base = f"{method.upper()}\n{path}\n{timestamp}\n{digest}"
+    return f"{base}\n{canonical}" if canonical else base
 
 
-def sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> str:
+def sign(secret: str, method: str, path: str, timestamp: str, body: bytes,
+         query: Optional[str] = None) -> str:
     """The client side, exported so tests and the example publishers share one implementation.
 
     A second hand-written copy of this in a publisher example is how a signing
@@ -285,7 +336,7 @@ def sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> st
     """
     return hmac.new(
         secret.encode(),
-        signing_string(method, path, timestamp, body).encode(),
+        signing_string(method, path, timestamp, body, query=query).encode(),
         hashlib.sha256,
     ).hexdigest()
 
@@ -361,6 +412,7 @@ def authenticate(
     body: bytes,
     keys: Optional[Mapping[str, str]] = None,
     now: Optional[float] = None,
+    query: Optional[str] = None,
 ) -> str:
     """Return the authenticated actor, or raise `Unauthenticated`.
 
@@ -409,12 +461,35 @@ def authenticate(
             "Check the actor name and shared secret against the registry's key file.",
         )
 
-    expected = sign(secret, method, path, timestamp, body)
-    if not hmac.compare_digest(expected, presented):
-        raise _unauthenticated(
-            "actor or signature rejected",
-            "Check the actor name and shared secret against the registry's key file. "
-            "The signed string is 'METHOD\\npath\\ntimestamp\\nsha256(body)' with the "
-            "path exactly as sent, query string excluded.",
-        )
-    return actor
+    # The current form first: the query is part of what was signed.
+    expected = sign(secret, method, path, timestamp, body, query=query)
+    if hmac.compare_digest(expected, presented):
+        return actor
+
+    # Then, unless the operator has closed it, the legacy form — the same
+    # string without the query line. Both ends have to change together, and a
+    # registry that stopped serving every existing client the moment it was
+    # upgraded is a registry nobody upgrades.
+    #
+    # This branch IS known issue 6b, deliberately left reachable and deliberately
+    # switchable: while a caller can still authenticate without signing the
+    # query, one captured `GET /events` replays as any feed query inside the
+    # timestamp window. Set ASOP_REQUIRE_SIGNED_QUERY=1 once every client has
+    # moved, and the hole closes.
+    legacy_allowed = not _truthy(os.environ.get(REQUIRE_SIGNED_QUERY_ENV_VAR))
+    if legacy_allowed and query:
+        if hmac.compare_digest(sign(secret, method, path, timestamp, body), presented):
+            return actor
+
+    raise _unauthenticated(
+        "actor or signature rejected",
+        "Check the actor name and shared secret against the registry's key file. "
+        "The signed string is 'METHOD\\npath\\ntimestamp\\nsha256(body)', plus a "
+        "fifth line with the canonical query when the request has one — parameters "
+        "sorted and percent-encoded, so a proxy reordering them cannot invalidate "
+        "the signature. The path is the DECODED path: decode before signing.",
+    )
+
+
+def _truthy(value: Optional[str]) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}

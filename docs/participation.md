@@ -181,6 +181,97 @@ refusal a work-queue seam meets, and the fence in action.
 python3 -m agentco keygen your-name   # prints a secret; never writes it anywhere
 ```
 
+### Adding a person, and the tools they run
+
+The whole procedure, once. It is four steps and the fourth is the one people
+skip.
+
+**1. Mint a key for the person.** They are an identity in their own right even
+if they never call the registry directly, because they are who the tools answer
+to and who gets offboarded.
+
+```bash
+python3 -m agentco keygen alice          # prints {"alice": "<secret>"}
+```
+
+**2. Mint one for each tool they run — one per tool, never a shared key.**
+
+```bash
+python3 -m agentco keygen alice-codex-01
+python3 -m agentco keygen alice-claude-01
+```
+
+One key per tool is what makes "which of my agents did this" answerable at all.
+A shared key answers "somebody on Alice's machine", which is not a thing you can
+go and look at. Name them so a human reading a refusal knows what to open:
+`<person>-<tool>-<instance>`.
+
+**3. Merge them into the key table, with `owner` and `label` on the tools.**
+
+```json
+{
+  "alice":           { "secret": "…", "label": "laptop" },
+  "alice-codex-01":  { "secret": "…", "owner": "alice", "label": "codex" },
+  "alice-claude-01": { "secret": "…", "owner": "alice", "label": "claude-code" }
+}
+```
+
+`keygen` prints and deliberately writes nothing — a tool that writes secrets to a
+path it guessed is how a secret reaches a git repository. Merging is the
+operator's act, into the file `$AGENTCO_REGISTRY_KEYS` names, mode `600`.
+
+Send each secret to its holder over a channel you would send a password down.
+The person's own secret goes to the person; a tool's secret goes into that
+tool's configuration and nowhere else.
+
+**4. Tell each tool who it is.** Three variables, and the harness is connected:
+
+```bash
+AGENTCO_REGISTRY_URL=https://registry.example.com
+AGENTCO_ACTOR=alice-codex-01
+AGENTCO_SECRET=<that tool's secret>
+```
+
+Then `agentco sync` pulls the active procedures, and the tool is an L2 worker.
+
+**Check it took, rather than assuming.** A new actor that cannot authenticate
+looks identical to one nobody added:
+
+```bash
+AGENTCO_ACTOR=alice-codex-01 AGENTCO_SECRET=… agentco sync
+```
+
+Anything other than a clean exit means the table and the tool disagree, and the
+refusal says which.
+
+#### Removing them again
+
+One command, because the unit is the person:
+
+```bash
+agentco revoke alice --owner            # dry run: lists what would go
+agentco revoke alice --owner --apply
+```
+
+That removes Alice and every tool answering to her. It takes effect on the NEXT
+REQUEST — no restart, no cache to wait out. Revoking a single tool (they
+replaced a laptop, an instance is retired) is the same command without `--owner`.
+
+#### What goes wrong, and how it reads
+
+**A tool's key is shared between two tools.** Both work, and every question that
+starts "which one" is unanswerable forever afterwards. This is the mistake worth
+preventing rather than detecting.
+
+**The tool is added without an `owner`.** Everything functions — it signs, it
+pulls, it reports — and two things quietly do not: offboarding Alice leaves it
+running, and it can verify work another of Alice's tools executed, because the
+gate compares parties and an unowned actor is its own party.
+
+**The person is never given a key of their own.** Also works, also fine, until
+someone needs to answer a human gate: a gate names a person, and a person with no
+identity cannot answer one.
+
 ### Saying who runs what
 
 The key table takes two shapes, and both are valid forever. A bare string is
