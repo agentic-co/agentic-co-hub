@@ -57,10 +57,19 @@ Small, cheap, and recorded here so they exist somewhere other than a chat log.
 
 ## Not defects, stated because they read like them
 
-- **The adoption gate counts identities, not humans.** One person holding two
-  keys counts twice and no mechanism here can tell. Letter case was fixed
-  specifically because it is the variant that looks identical to whoever reads
-  the report.
+- ~~**The adoption gate counts identities, not humans.**~~ **Fixed 2026-09-23.**
+  It was listed here as something that reads like a defect and is not, on the
+  grounds that "no mechanism here can tell". There is a mechanism now: the key
+  table binds every agent actor to an owner, so `metrics.weekly_active_publishers`
+  buckets by party and `gate1_status` resolves the operator to a party before
+  excluding him. One person's three keys are one publisher; the operator's own
+  agents no longer count as publishers other than the operator.
+
+  Kept visible rather than deleted, because the entry was wrong in an
+  instructive way. "No mechanism can tell" was true of the code and read as
+  though it were true of the problem, which is how a defect gets filed as a
+  property. The thing to notice is that it sat one line below the letter-case
+  fix — the same defect, one level up, already solved once.
 - **`k = 2`, the minimum scope depth, is unvalidated.** There is no usage data
   yet. The registry publishes its own conflict precision for exactly this, and
   the report refuses to recommend a change below a minimum sample.

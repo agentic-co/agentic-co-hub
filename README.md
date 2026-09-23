@@ -154,7 +154,9 @@ The L1 outbox reaches a harness that configured nothing, and a conformance suite
 versus planned, and [`docs/known-issues.md`](docs/known-issues.md) for what is broken.
 
 The project's own adoption gate is written down and deliberately hard to game: **two
-identities other than the author publishing weekly for four consecutive weeks.** Stars
+people other than the author publishing weekly for four consecutive weeks.** A person's
+agents count once, for them — at two or three agents each, counting keys would have let
+one adopter clear a two-publisher bar alone. Stars
 are the vanity metric that will be available; weekly publishers are not. A public repo
 with no users is a worse outcome than a private tool with two, because it looks like
 adoption while being none.

@@ -313,6 +313,20 @@ Not "have tried it" — that measures politeness. Four consecutive weeks measure
 missed week resets the streak rather than bridging it, and the current week never counts
 while it is still running.
 
+**Corrected 2026-09-23: "identities" was the wrong unit, and the gate now counts
+PEOPLE.** The sentence above is left as written because a falsification criterion that
+gets quietly reworded is not one. At two or three agents per person, one adopter holding
+a laptop key and two agent keys satisfied "two identities other than the author" by
+himself, every week, and the report named three actors that nobody reading it could tell
+were one person. The key table's `owner` field is what makes the unit available; a
+person's agents now count once, for them, and the operator's own agents are excluded with
+him rather than counting as publishers other than the operator.
+
+A criterion revised after the clock has started deserves suspicion, so the direction is
+stated plainly: this can only make the gate HARDER. Every party is one or more
+identities, so a party count is never larger than the identity count it replaces, and no
+week that fails under the new rule would have failed under the old one.
+
 If that fails, the honest reading is that coordination across independently-owned
 harnesses is not a problem other people have, and this stops at the primitives that are
 useful on their own. Stars are the metric that will be available and they are not the one

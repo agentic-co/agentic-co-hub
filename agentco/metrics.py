@@ -15,10 +15,17 @@ elapse before the gate can be evaluated, and then the clock starts.
     would make one call, which measures politeness. Four consecutive weeks
     measures use."
 
-Three definitions this module commits to, because a gate whose terms are
+The word "identities" in that quote is the original text, kept because a
+falsification criterion is not improved by being quietly reworded. It was
+corrected on 2026-09-23 to PEOPLE — see definition (4). The correction can
+only make the gate harder to clear: every party is one or more identities, so
+a party count is never larger than the identity count it replaces. A revision
+that could have loosened it would not have been made after the clock started.
+
+Four definitions this module commits to, because a gate whose terms are
 argued after the fact is not a gate:
 
-  1. A **publisher** is an identity with at least one ACCEPTED WRITE — a
+  1. A **publisher** is a PARTY with at least one ACCEPTED WRITE — a
      scope claim or a snapshot. Reading the feed is consuming, not
      publishing. the adoption gate counts publishers, so `GET /events` does not qualify.
   2. **Weekly** is the ISO week (Mon–Sun), keyed `YYYY-Www`. Rolling
@@ -27,16 +34,37 @@ argued after the fact is not a gate:
      resets the streak to zero rather than being bridged, because the gate
      measures sustained use and bridging is how a failing gate passes.
 
+  4. A **party** is the person an actor answers to — `auth.owner_of`, which
+     returns the actor itself when no owner is declared. The gate asks
+     whether PEOPLE other than the operator use this, and at two or three
+     agents per person the actor is not that unit: one adopter with a
+     laptop key and two agent keys would satisfy "two publishers" alone,
+     four weeks running, and the report would show three names that the
+     person reading it has no way to recognise as one. This is the same
+     defect letter case was, one level up — case was fixed first only
+     because a doubled spelling is the variant a reader can see.
+
+     Folding to the party is safe in exactly the way folding case is: the
+     key table settles who owns whom, and `auth` refuses a self-owning
+     entry and a two-level chain, so one hop is the whole answer. Where no
+     table declares ownership every actor is its own party and this module
+     counts precisely what it counted before.
+
 The operator's own identity is excluded by NAME, supplied by the caller. It
 is not inferred from "whoever has the most calls" — that heuristic would
-silently exclude the programme's first genuine power user.
+silently exclude the programme's first genuine power user. The name is
+resolved to a party before the exclusion, so an operator's own agents are
+excluded with him; otherwise the one identity the gate is careful to remove
+walks back in wearing its tools' names.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Mapping, Optional
+
+from agentco import auth
 
 # The verbs that count as publishing. Closed, and deliberately excluding the
 # read verb — see definition (1) above.
@@ -96,14 +124,49 @@ def _percentile(values: list[float], pct: float) -> Optional[float]:
     return round(ordered[min(rank, len(ordered)) - 1], 2)
 
 
+def _fold(name: str) -> str:
+    """The one canonical form. Used for actors, owners and the exclusion alike."""
+    return name.strip().lower()
+
+
+def _party_lookup(
+    parties: Optional[Mapping[str, str]] = None,
+) -> Callable[[str], str]:
+    """actor → the party accountable for it, both folded.
+
+    `parties` is an actor→owner mapping for callers that have one (tests, and
+    anything counting against a table it holds in memory). Passing `None`
+    reads the deployment's own key table, which is what every production
+    caller wants and none of them should have to remember to do; passing `{}`
+    states that no ownership is declared, which is the pre-ownership
+    behaviour.
+
+    An actor with no owner maps to ITSELF rather than to `None`, so a caller
+    compares parties without ever branching on whether one was declared.
+    """
+    if parties is None:
+        identities = auth.load_identities()
+        table = {actor: ident.owner for actor, ident in identities.items() if ident.owner}
+    else:
+        table = dict(parties)
+    folded = {_fold(a): _fold(o) for a, o in table.items() if a and o and o.strip()}
+
+    def lookup(actor: str) -> str:
+        canonical = _fold(actor)
+        return folded.get(canonical, canonical)
+
+    return lookup
+
+
 def weekly_active_publishers(
     conn: sqlite3.Connection,
     *,
     exclude: Iterable[str] = (),
     weeks: int = 8,
     now: Optional[datetime] = None,
+    parties: Optional[Mapping[str, str]] = None,
 ) -> dict[str, list[str]]:
-    """ISO week → sorted list of identities that published in it.
+    """ISO week → sorted list of PARTIES that published in it.
 
     Weeks with no publishers are present with an empty list rather than
     absent, so a streak calculation reads a gap as a gap. Omitting empty weeks
@@ -111,7 +174,12 @@ def weekly_active_publishers(
     anything happened at all".
     """
     at = now or datetime.now(timezone.utc)
-    excluded = {e.strip().lower() for e in exclude if e and e.strip()}
+    party_of = _party_lookup(parties)
+    # The exclusion is resolved the same way as the rows it filters. Folding
+    # only the case here would leave the operator's OWN agents counting as
+    # publishers other than the operator — the gate's single subtraction
+    # undone by the tools of the person it subtracts.
+    excluded = {party_of(e) for e in exclude if e and e.strip()}
     placeholders = ",".join("?" for _ in PUBLISHING_VERBS)
     rows = conn.execute(
         f"SELECT actor, at FROM calls WHERE status = 'accepted' AND verb IN ({placeholders})",
@@ -130,12 +198,16 @@ def weekly_active_publishers(
     # would merge two genuinely distinct authenticated actors, which is the
     # opposite error and just as wrong. The ambiguity is settled where identity
     # is configured, not where it is counted.
+    #
+    # The party fold has the same shape and the same justification one level
+    # up: `alice` and `alice-codex-01` are two authenticated actors and one
+    # publisher, and the key table is where that was already stated.
     buckets: dict[str, set[str]] = {}
     for row in rows:
-        canonical = row["actor"].strip().lower()
-        if canonical in excluded:
+        party = party_of(row["actor"])
+        if party in excluded:
             continue
-        buckets.setdefault(_iso_week(row["at"]), set()).add(canonical)
+        buckets.setdefault(_iso_week(row["at"]), set()).add(party)
 
     # Materialise the trailing window, empty weeks included.
     out: dict[str, list[str]] = {}
@@ -153,6 +225,7 @@ def gate1_status(
     required_publishers: int = 2,
     consecutive_weeks: int = 4,
     now: Optional[datetime] = None,
+    parties: Optional[Mapping[str, str]] = None,
 ) -> dict:
     """Is the adoption gate met? The whole gate, computed, with its own terms attached.
 
@@ -160,10 +233,15 @@ def gate1_status(
     yet be known to have met the bar, and counting it would let the gate pass
     on a Monday and fail on the following Sunday — a gate that oscillates is
     not a decision instrument.
+
+    `operator` is a name; it is resolved to a party like every other name
+    here, so naming one of a person's actors excludes all of them.
     """
     at = now or datetime.now(timezone.utc)
     window = max(consecutive_weeks + 4, 8)
-    weekly = weekly_active_publishers(conn, exclude=[operator], weeks=window, now=at)
+    weekly = weekly_active_publishers(
+        conn, exclude=[operator], weeks=window, now=at, parties=parties
+    )
 
     current = _week_key(at.date())
     completed = [(k, v) for k, v in weekly.items() if k != current]
@@ -180,7 +258,7 @@ def gate1_status(
     return {
         "gate": "GATE-1",
         "criterion": (
-            f"≥{required_publishers} identities other than {operator} are weekly active "
+            f"≥{required_publishers} PEOPLE other than {operator} are weekly active "
             f"publishers for {consecutive_weeks} consecutive ISO weeks"
         ),
         "met": streak >= consecutive_weeks,
@@ -191,8 +269,11 @@ def gate1_status(
         "weekInProgress": current,
         "byWeek": {k: v for k, v in completed},
         "definitions": {
-            "publisher": "an identity with ≥1 accepted write (scope claim or snapshot); "
+            "publisher": "a party with ≥1 accepted write (scope claim or snapshot); "
             "reading the feed does not qualify",
+            "party": "the person an actor answers to, per the key table's `owner`; "
+            "an actor with no declared owner is its own party. A person's agents "
+            "count once, for them — including the operator's, who is excluded",
             "week": "ISO week, Monday–Sunday",
             "consecutive": "adjacent ISO weeks; a missed week resets the streak",
         },
