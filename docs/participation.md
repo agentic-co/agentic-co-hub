@@ -306,11 +306,20 @@ to add later:
 every tool answering to her. Without `owner`, one leaver is a hunt for however
 many keys they happened to run, and the one you miss still works.
 
-**The gate compares parties, not actors.** A judged gate rests on the verifier
-not being the executor. Compare ACTORS and one person's two agents can be both
-— the letter satisfied while an agent grades its owner's homework. At two or
-three agents per person that is the ordinary case rather than a corner one, so
-the check asks who answers for an actor instead.
+**A judged gate compares parties; a declared human answering a human gate
+compares actors.** A judged gate rests on the verifier not being the executor.
+Compare ACTORS and one person's two agents can be both — the letter satisfied
+while an agent grades its owner's homework. At two or three agents per person
+that is the ordinary case rather than a corner one, so the check asks who
+answers for an actor instead.
+
+A human gate asks a different question. It buys one named person's judgement on
+the work, and the person it names is usually the one who runs the tool that did
+the work — so folding to the party there refuses the human-in-the-loop case the
+gate exists for. A person may sign off their own agent's step; nobody, person or
+not, signs off their own. The relaxation is for actors named in `AGENTCO_HUMANS`
+only, because a registry that declares nobody human must keep the party
+comparison it already had rather than start granting what it used to refuse.
 
 `owner` is a name, not necessarily another entry: the person accountable for an
 agent may hold no key themselves, and requiring one would be this file inventing

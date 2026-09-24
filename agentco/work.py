@@ -2144,8 +2144,38 @@ class Queue:
                 )
             executor = (item.metadata or {}).get("lease_report", {}).get("reported_by")
             submitting_party, executing_party = self.party_of(submitted_by), self.party_of(executor)
-            if gate.get("kind") != "deterministic" and submitting_party == executing_party \
-                    and executor is not None:
+
+            # A DECLARED HUMAN answering a human gate compares actors.
+            # Everything else compares parties.
+            #
+            # Two questions, not one rule with an exception. A judged gate buys
+            # an independent ROUTE, and one party's two agents are one route:
+            # fold to the party, or a second agent is a way around the rule
+            # rather than a second opinion.
+            #
+            # A human gate buys a PERSON'S JUDGEMENT on the work, and the person
+            # it names is the one most likely to have run the tool that did the
+            # work. Folding to the party there refuses precisely the
+            # human-in-the-loop case the gate exists for: an owner may not sign
+            # off their own agent's step. Found on a live registry where one
+            # declared human owns every agent — declaring that ownership
+            # honestly would have made every human gate unanswerable, so the
+            # honest table and the working registry were mutually exclusive.
+            #
+            # Narrowed to DECLARED humans on purpose. `AGENTCO_HUMANS` is a
+            # deploy-time act by the operator, and it is what separates "a
+            # person signs off their tool's work" from "an agent is named as a
+            # human and signs off its sibling's". A registry that declares no
+            # humans keeps the party comparison exactly as it was — an empty
+            # humans list already cost this project one incident (2026-09-07,
+            # nobody could satisfy a human gate), and it must not now start
+            # silently granting what it used to refuse.
+            speaking_as_a_person = (
+                gate.get("kind") == "human" and submitted_by in self.humans
+            )
+            compare = submitted_by == executor if speaking_as_a_person \
+                else submitting_party == executing_party
+            if gate.get("kind") != "deterministic" and compare and executor is not None:
                 same_actor = submitted_by == executor
                 raise Refusal(
                     code=gates.ATTESTATION_INVALID,
