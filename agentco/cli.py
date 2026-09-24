@@ -1033,6 +1033,72 @@ def cmd_keygen(args) -> int:
     return 0
 
 
+def cmd_keycheck(args) -> int:
+    """What will the registry ACTUALLY load from this key file?
+
+    Written after nearly taking a live registry down. The plan was to declare
+    ownership on the beta key table; the deployed image predates owner-binding,
+    and its parser drops a value it does not recognise instead of refusing it.
+    A test against the running image showed a two-entry table loading as one —
+    no error, no warning, the agent simply gone. Installed for real, that is
+    three actors getting 401s with nothing anywhere saying why.
+
+    The parser still drops rather than raises, and that is the right trade for a
+    file re-read on every request: a typo made live through `kubectl replace`
+    would otherwise take the whole registry down instead of one actor. The fix
+    is to make the drop VISIBLE BEFORE it is installed, which is what this is.
+
+    Never prints a secret. It prints what an operator needs to see — who is in
+    the table, who answers for them, and what got dropped on the floor.
+    """
+    from agentco import auth as _auth
+
+    path = Path(args.file)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"cannot read {path}: {exc}", file=sys.stderr)
+        return 1
+    if not isinstance(raw, dict):
+        print(f"{path} is not an actor -> entry object", file=sys.stderr)
+        return 1
+
+    try:
+        identities = _auth.load_identities(path)
+    except Exception as exc:                       # AmbiguousIdentityError and friends
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"{path}: {len(raw)} entr(y/ies) in the file, {len(identities)} will load")
+    for name in raw:
+        ident = identities.get(name)
+        if ident is None:
+            continue
+        owner = ident.owner or "— (its own party)"
+        print(f"  {name:<24} owner={owner:<20} label={ident.label or '—'}")
+
+    dropped = [name for name in raw if name not in identities]
+    for name in dropped:
+        print(f"  {name:<24} DROPPED — no usable secret; this actor will not authenticate",
+              file=sys.stderr)
+
+    if dropped:
+        print(
+            f"\n{len(dropped)} entr(y/ies) would be silently discarded. An entry the "
+            f"parser does not recognise is not an error at load — it is an actor that "
+            f"quietly stops working. Fix these before installing the file.",
+            file=sys.stderr,
+        )
+        return 1
+
+    unowned = [n for n, i in identities.items() if not i.owner]
+    if unowned and args.expect_owners:
+        print(f"\n{len(unowned)} identit(y/ies) declare no owner: {', '.join(sorted(unowned))}",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentco",
@@ -1242,6 +1308,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_pulse.add_argument("--json", action="store_true", help="machine-readable output")
     p_pulse.set_defaults(func=cmd_pulse)
+
+    p_check = sub.add_parser("keycheck",
+                             help="what the registry will actually load from a key file")
+    p_check.add_argument("file")
+    p_check.add_argument("--expect-owners", action="store_true",
+                         help="also fail if any identity declares no owner")
+    p_check.set_defaults(func=cmd_keycheck)
 
     p_key = sub.add_parser("keygen", help="mint a shared secret for one actor")
     p_key.add_argument("actor")

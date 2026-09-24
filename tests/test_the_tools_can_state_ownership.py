@@ -156,3 +156,77 @@ def test_the_server_and_the_command_line_resolve_it_identically(monkeypatch):
     monkeypatch.setenv(app_module.OPERATOR_ENV_VAR, "whoever")
     assert app_module.resolve_operator(None) == "whoever"
     assert app_module.resolve_operator("explicit") == "explicit"
+
+
+# --------------------------------------------------------------------------- #
+# what the registry will actually load
+# --------------------------------------------------------------------------- #
+
+
+def written(tmp_path, table) -> str:
+    path = tmp_path / "keys.json"
+    path.write_text(json.dumps(table))
+    path.chmod(0o600)
+    auth._KEY_CACHE.clear()
+    return str(path)
+
+
+def test_an_entry_the_parser_drops_is_reported_and_fails(tmp_path, capsys):
+    """The live near-miss, as a test.
+
+    The deployed image parses a value it does not recognise by skipping it, so
+    a two-entry table loads as one with no error anywhere. Installed for real
+    that is an actor getting 401s and nothing to explain why. The parser still
+    drops — raising would turn one typo made live into a whole-registry outage
+    — so the drop is made visible before the file is installed.
+    """
+    path = written(tmp_path, {
+        "alice": "s1",
+        "typo-bot": {"secrets": "s2"},        # the key is `secret`
+        "empty-bot": "",
+    })
+    assert cli.main(["keycheck", path]) == 1
+    captured = capsys.readouterr()
+    assert "typo-bot" in captured.err and "DROPPED" in captured.err
+    assert "empty-bot" in captured.err
+    assert "3 entr(y/ies) in the file, 1 will load" in captured.out
+
+
+def test_a_clean_table_passes_and_prints_the_ownership(tmp_path, capsys):
+    path = written(tmp_path, {
+        "alice": {"secret": "s1", "label": "laptop"},
+        "alice-codex-01": {"secret": "s2", "owner": "alice", "label": "codex"},
+        "build-bot": "s3",
+    })
+    assert cli.main(["keycheck", path]) == 0
+    out = capsys.readouterr().out
+    assert "owner=alice" in out
+    assert "its own party" in out
+
+
+def test_it_never_prints_a_secret(tmp_path, capsys):
+    """An operator runs this on the file they are about to install, wherever
+    they happen to be. It must be safe to paste the output."""
+    path = written(tmp_path, {"alice": "super-secret-value",
+                              "a-codex": {"secret": "another-secret", "owner": "alice"}})
+    cli.main(["keycheck", path])
+    captured = capsys.readouterr()
+    assert "super-secret-value" not in captured.out + captured.err
+    assert "another-secret" not in captured.out + captured.err
+
+
+def test_a_table_auth_refuses_is_refused_here_too(tmp_path, capsys):
+    """Two spellings of one name. `auth` raises; this must not swallow it and
+    report a clean file."""
+    path = written(tmp_path, {"Dana": "s1", "dana": "s2"})
+    assert cli.main(["keycheck", path]) == 1
+    assert "differ only by case" in capsys.readouterr().err
+
+
+def test_expect_owners_fails_on_the_shape_the_live_registry_had(tmp_path, capsys):
+    """Five flat strings, no owner anywhere. Opt-in, because a service identity
+    with nobody behind it is a legitimate entry."""
+    path = written(tmp_path, {"operator": "s1", "leeloo": "s2", "panacea": "s3"})
+    assert cli.main(["keycheck", path]) == 0
+    assert cli.main(["keycheck", path, "--expect-owners"]) == 1
+    assert "declare no owner" in capsys.readouterr().err

@@ -223,6 +223,20 @@ in this shape, so merging is a paste rather than an edit:
 }
 ```
 
+**Check the file before you install it.**
+
+```bash
+python3 -m agentco keycheck /path/to/keys.json     # exits non-zero if anything drops
+```
+
+An entry the parser does not recognise — a typo in `secret`, a value that is
+not a string or an object — is **skipped, not refused**. That is the right
+trade for a file re-read on every request, since raising would turn one typo
+made live into a whole-registry outage instead of one actor. But it means a
+table can load as fewer identities than it contains, with nothing anywhere
+saying so, and the symptom is somebody's agent getting 401s. `keycheck` prints
+what will actually load, and what will not. It never prints a secret.
+
 `keygen` prints and deliberately writes nothing — a tool that writes secrets to a
 path it guessed is how a secret reaches a git repository. Merging is the
 operator's act, into the file `$AGENTCO_REGISTRY_KEYS` names, mode `600`.
