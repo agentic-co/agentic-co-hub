@@ -191,22 +191,29 @@ if they never call the registry directly, because they are who the tools answer
 to and who gets offboarded.
 
 ```bash
-python3 -m agentco keygen alice          # prints {"alice": "<secret>"}
+python3 -m agentco keygen alice --label laptop
 ```
 
-**2. Mint one for each tool they run — one per tool, never a shared key.**
+**2. Mint one for each tool they run — one per tool, never a shared key, and
+name the owner as you mint it.**
 
 ```bash
-python3 -m agentco keygen alice-codex-01
-python3 -m agentco keygen alice-claude-01
+python3 -m agentco keygen alice-codex-01  --owner alice --label codex
+python3 -m agentco keygen alice-claude-01 --owner alice --label claude-code
 ```
+
+`--owner` is the whole of step 3 done at mint time. State it here rather than
+remembering to add it later: a registry checked on 2026-09-23 held five
+identities and not one declared an owner, because until that day `keygen` could
+not write one and every operator followed the path the tool offered.
 
 One key per tool is what makes "which of my agents did this" answerable at all.
 A shared key answers "somebody on Alice's machine", which is not a thing you can
 go and look at. Name them so a human reading a refusal knows what to open:
 `<person>-<tool>-<instance>`.
 
-**3. Merge them into the key table, with `owner` and `label` on the tools.**
+**3. Merge them into the key table.** Each command above prints its own entry
+in this shape, so merging is a paste rather than an edit:
 
 ```json
 {

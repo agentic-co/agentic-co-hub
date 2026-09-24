@@ -336,7 +336,7 @@ def cmd_hook_uninstall(args) -> int:
 
 def cmd_gate1(args) -> int:
     conn = _conn(args)
-    status = metrics.gate1_status(conn, operator=args.operator)
+    status = metrics.gate1_status(conn, operator=app_module.resolve_operator(args.operator))
     if args.json:
         print(json.dumps(status, indent=2))
         return 0 if status["met"] else 1
@@ -359,7 +359,7 @@ def cmd_gate1(args) -> int:
 def cmd_metrics(args) -> int:
     conn = _conn(args)
     report = {
-        "gate1": metrics.gate1_status(conn, operator=args.operator),
+        "gate1": metrics.gate1_status(conn, operator=app_module.resolve_operator(args.operator)),
         "latency": metrics.verb_latency(conn),
         "timeToFirstEvent": metrics.time_to_first_event(conn),
         "conflictPrecision": metrics.conflict_precision(conn),
@@ -961,20 +961,75 @@ def cmd_pulse(args) -> int:
 
 
 def cmd_keygen(args) -> int:
-    """Mint a shared secret for one actor and print the key-file line.
+    """Mint a shared secret for one actor and print the key-file entry.
 
     Never writes the key file itself. The operator decides where secrets live
     (`~/.claude/.env` is this repo's canonical store), and a tool that writes
     secrets to a path it guessed is how a secret ends up in a git repo.
+
+    **`--owner` exists because the documentation described a shape this command
+    could not produce.** The key table has taken an object form since
+    owner-binding landed, two documents explain why it matters, and `keygen`
+    emitted a bare string — so the path of least resistance produced the
+    pre-ownership form every time. Checked on the live registry on 2026-09-23:
+    five identities, all flat strings, not one owner declared, on the only
+    deployment anyone uses. That is not an operator's oversight. It is the
+    only output the tool had.
+
+    An actor with no owner is still valid and still means "this answers to
+    nobody but itself" — a service identity legitimately has no person behind
+    it. The flag makes the fact statable, not mandatory.
     """
+    owner = (args.owner or "").strip() or None
+    label = (args.label or "").strip() or None
+
+    # Refused HERE rather than at load. `auth._parse_identities` raises on both
+    # of these, and the difference between a refusal now and a refusal later is
+    # that a refusal later arrives after the secret has been sent to somebody.
+    if owner is not None and owner == args.actor:
+        print(
+            f"{args.actor!r} cannot own itself — an identity that answers for "
+            f"itself is what having no owner already means. Drop --owner, or "
+            f"name the person who is accountable for this actor.",
+            file=sys.stderr,
+        )
+        return 2
+
     secret = secrets.token_urlsafe(32)
-    print(json.dumps({args.actor: secret}, indent=2))
-    print(
+    if owner is None and label is None:
+        entry = secret
+    else:
+        entry = {"secret": secret}
+        if owner is not None:
+            entry["owner"] = owner
+        if label is not None:
+            entry["label"] = label
+
+    print(json.dumps({args.actor: entry}, indent=2))
+
+    advice = (
         f"\nMerge that into the JSON file $AGENTCO_REGISTRY_KEYS points at "
         f"(mode 600, never committed), and give {args.actor} the secret over a "
-        f"channel you would send a password over.",
-        file=sys.stderr,
+        f"channel you would send a password over."
     )
+    if owner is None:
+        advice += (
+            f"\n\nNo owner declared, so {args.actor!r} counts as its own party. "
+            f"If a person runs this, say so with --owner <person>: it is what "
+            f"makes `revoke <person> --owner` one act instead of a hunt, and what "
+            f"stops the adoption gate counting one person's agents as several "
+            f"publishers. A service identity with nobody behind it is the case "
+            f"where leaving it out is the right answer."
+        )
+    else:
+        advice += (
+            f"\n\n{args.actor!r} answers to {owner!r}. Two consequences worth "
+            f"knowing before you send it: revoking {owner!r} revokes this too, and "
+            f"this actor can no longer verify work executed by anything else "
+            f"answering to {owner!r} — same party, and a judged gate exists to "
+            f"put a second party on the work."
+        )
+    print(advice, file=sys.stderr)
     return 0
 
 
@@ -1190,6 +1245,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_key = sub.add_parser("keygen", help="mint a shared secret for one actor")
     p_key.add_argument("actor")
+    p_key.add_argument("--owner", default=None,
+                       help="the PERSON accountable for this actor. Makes offboarding one act "
+                            "and makes the adoption gate count people. Omit for a service "
+                            "identity that answers to nobody")
+    p_key.add_argument("--label", default=None,
+                       help="which tool this is (codex, claude-code, laptop) — for whoever "
+                            "reads the table later")
     p_key.set_defaults(func=cmd_keygen)
 
     return parser

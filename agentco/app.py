@@ -137,6 +137,24 @@ def resolve_db_path(path: Optional[str] = None) -> str:
     return resolve_registry_db(path, DB_ENV_VAR, DEFAULT_DB)
 
 
+def resolve_operator(operator: Optional[str] = None) -> str:
+    """Argument, then the environment, then the default — in ONE place.
+
+    The server resolved it and the CLI did not. `agentco gate1` passed
+    `args.operator` straight through, defaulting to `None`, while its own help
+    text promised `(default: $AGENTCO_REGISTRY_OPERATOR)`. The result was a
+    report that read the same and counted differently: on a registry with the
+    variable set, the HTTP report excluded the operator and the command-line
+    report credited him as one of the publishers his own gate is meant to
+    discount. Found on the live registry, where it turned a streak of 0 into a
+    longest-ever of 1.
+
+    Two resolutions of one setting is a class of bug, not an instance, so this
+    is the only one.
+    """
+    return operator or os.environ.get(OPERATOR_ENV_VAR) or DEFAULT_OPERATOR
+
+
 VIA_HEADER = "x-agentco-via"
 VIA_OUTBOX = "outbox"
 VIA_DIRECT = "direct"
@@ -278,7 +296,7 @@ def create_app(
     )
     app.state.conn = conn
     app.state.keys = keys
-    app.state.operator = operator or os.environ.get(OPERATOR_ENV_VAR) or DEFAULT_OPERATOR
+    app.state.operator = resolve_operator(operator)
 
     async def _handle(
         request: Request,
