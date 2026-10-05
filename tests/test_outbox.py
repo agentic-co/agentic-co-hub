@@ -536,6 +536,7 @@ def test_a_gate_can_be_answered_through_the_zero_config_floor(tmp_path):
                 "exit_status": 0,
                 "environment": "reviewer laptop",
                 "at": "2026-09-01T15:00:00+00:00",
+                "verdict": {"passed": True, "reason": "the rollback was exercised and the reviewer saw it"},
             },
         },
         agent_label="aider",
@@ -589,6 +590,7 @@ def test_a_judged_gate_cannot_be_closed_from_the_machine_that_executed_it(tmp_pa
         "attestation": {
             "check": gate["check"], "exit_status": 0,
             "environment": "same laptop", "at": "2026-09-01T15:00:00+00:00",
+            "verdict": {"passed": True, "reason": "the executor checked its own rollback"},
         },
     })
     result = drain(box, registry_publisher(LoopbackRegistry("bigmac", client, via="outbox")))

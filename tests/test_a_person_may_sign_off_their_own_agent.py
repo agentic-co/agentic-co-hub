@@ -44,7 +44,9 @@ def reported(queue, executor, gate):
 
 def attestation(submitted_by, check="the owner reads it"):
     return {"check": check, "exit_status": 0, "environment": "local",
-            "at": "2026-09-23T10:00:00Z", "submitted_by": submitted_by}
+            "at": "2026-09-23T10:00:00Z", "submitted_by": submitted_by,
+            # ASOP 0.4: a human attestation carries the signer's finding.
+            "verdict": {"passed": True, "reason": "the owner read it and signs it off"}}
 
 
 def owned_queue(tmp_path, **kw):
