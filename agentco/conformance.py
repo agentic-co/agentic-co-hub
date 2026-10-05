@@ -199,9 +199,19 @@ def _repurposed(steps: list, purpose: str) -> list:
     return out
 
 
-def _attestation(check: str, exit_status: int = 0) -> dict:
-    return {"check": check, "exit_status": exit_status, "environment": "conformance",
-            "at": "2026-09-02T15:00:00+00:00"}
+def _attestation(check: str, exit_status: int = 0, *, judged: bool = False) -> dict:
+    """A well-formed attestation. A judged or human gate also needs a verdict.
+
+    ASOP 0.4 (§5.3) refuses a judged/human attestation without
+    `verdict: {passed: bool, reason: nonblank}`; a deterministic one carries
+    none, so only the judged scenarios ask for it. `passed` follows the exit
+    status here because these scenarios exercise routing, not disagreement.
+    """
+    record = {"check": check, "exit_status": exit_status, "environment": "conformance",
+              "at": "2026-09-02T15:00:00+00:00"}
+    if judged:
+        record["verdict"] = {"passed": exit_status == 0, "reason": "the reviewer read the diff"}
+    return record
 
 
 DEV_STEPS = [
@@ -248,9 +258,9 @@ SCENARIOS: dict[str, dict] = {
             step("operator", "work_create", save="g1", title="migrate the schema", verify=JUDGED),
             step("alice", "work_pull", save="pull1", capabilities=[]),
             step("alice", "work_report", item="@g1", attempt="@pull1.attempt", status="done"),
-            step("alice", "attest", item="@g1", attestation=_attestation(JUDGED["check"]), capabilities=["verify"]),
-            step("bob", "attest", item="w-deadbeef", attestation=_attestation(JUDGED["check"]), capabilities=["verify"]),
-            step("bob", "attest", item="@g1", attestation=_attestation(JUDGED["check"]), capabilities=["verify"],
+            step("alice", "attest", item="@g1", attestation=_attestation(JUDGED["check"], judged=True), capabilities=["verify"]),
+            step("bob", "attest", item="w-deadbeef", attestation=_attestation(JUDGED["check"], judged=True), capabilities=["verify"]),
+            step("bob", "attest", item="@g1", attestation=_attestation(JUDGED["check"], judged=True), capabilities=["verify"],
                  adjudication={"verdict": "good", "evidence": "step 2 was redundant"}),
             step("carol", "adjudicate", item="@g1", verdict="bad", evidence="a second opinion"),
             step("carol", "adjudicate", item="w-deadbeef", verdict="bad", evidence="nothing"),
@@ -458,8 +468,8 @@ SCENARIOS: dict[str, dict] = {
             step("operator", "work_create", save="g1", title="review me", verify=JUDGED),
             step("alice", "work_pull", save="pull1"),
             step("alice", "work_report", item="@g1", attempt="@pull1.attempt", status="done"),
-            step("carol", "attest", item="@g1", attestation=_attestation(JUDGED["check"]), capabilities=["verify"]),
-            step("bob", "attest", item="@g1", attestation=_attestation(JUDGED["check"]), capabilities=["verify"]),
+            step("carol", "attest", item="@g1", attestation=_attestation(JUDGED["check"], judged=True), capabilities=["verify"]),
+            step("bob", "attest", item="@g1", attestation=_attestation(JUDGED["check"], judged=True), capabilities=["verify"]),
         ],
     },
 }

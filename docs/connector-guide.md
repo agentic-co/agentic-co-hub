@@ -125,8 +125,11 @@ Observed on a judged gate with `on_timeout: escalate, max_park_seconds: 60`:
    landed `done`, `attestation.submitted_by` naming the attester.
 
 A deterministic gate wants the attestation on the report itself; judged and
-human gates refuse one from the executor. Once the operator declares
-`AGENTCO_VERIFIERS`, `verify` counts only for those actors.
+human gates refuse one from the executor, and require the attester's finding in
+the attestation: `"verdict": {"passed": true, "reason": "…"}` (`reason` nonblank;
+`asop-spec` 0.4+). A `passed: false` verdict fails the gate even at exit 0.
+Once the operator declares `AGENTCO_VERIFIERS`, `verify` counts only for those
+actors.
 
 ## Procedures: what a bead tells you about the ASOP it came from
 

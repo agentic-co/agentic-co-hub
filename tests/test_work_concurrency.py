@@ -428,6 +428,8 @@ def _attestation(check: str, exit_status: int = 0) -> dict:
         "exit_status": exit_status,
         "environment": "spawned-worker",
         "at": "2026-09-01T12:00:00+00:00",
+        # ASOP 0.4: a judged attestation carries the verifier's finding.
+        "verdict": {"passed": exit_status == 0, "reason": "the reviewer read the diff and judged the result"},
     }
 
 

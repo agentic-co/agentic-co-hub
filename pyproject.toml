@@ -26,7 +26,7 @@ classifiers = [
 # repository (github.com/mabidoli/asop) and arrive here by version, like they
 # do for every other implementation. `agentco/gates.py`, `agentco/errors.py`
 # and `agentco/sop.py` are thin shims over it — see docs/architecture.md.
-dependencies = ["asop-spec>=0.1.0"]
+dependencies = ["asop-spec>=0.4.0"]
 
 [project.optional-dependencies]
 server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]

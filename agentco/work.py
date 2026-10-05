@@ -428,8 +428,8 @@ def _ladder_outstanding(
 
     `asop.gates.validate_attestation` already refuses evidence that cannot say
     which rung it climbed. What it cannot do is say whether the LADDER was
-    climbed — `attestation_passes` is `exit_status == 0` about one record. So a
-    staged gate answered from a single record completes on whichever rung the
+    climbed — `attestation_passes` (exit 0, and a positive verdict when one is
+    present) speaks about one record. So a staged gate answered from a single record completes on whichever rung the
     executor chose to run, and the expensive one at the top is never required.
     ASOP.md §2.2: a ladder takes one attestation per rung, each pinned to its
     index, and is answered only when every rung is present and passing.
