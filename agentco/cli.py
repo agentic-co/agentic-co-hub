@@ -1049,7 +1049,8 @@ def cmd_keycheck(args) -> int:
     is to make the drop VISIBLE BEFORE it is installed, which is what this is.
 
     Never prints a secret. It prints what an operator needs to see — who is in
-    the table, who answers for them, and what got dropped on the floor.
+    the table, who answers for them, what got dropped on the floor, and each
+    secret's fingerprint, which a harness's `whoami` reports for comparison.
     """
     from agentco import auth as _auth
 
@@ -1075,7 +1076,8 @@ def cmd_keycheck(args) -> int:
         if ident is None:
             continue
         owner = ident.owner or "— (its own party)"
-        print(f"  {name:<24} owner={owner:<20} label={ident.label or '—'}")
+        print(f"  {name:<24} owner={owner:<20} label={ident.label or '—':<16} "
+              f"fingerprint={_auth.secret_fingerprint(ident.secret)}")
 
     dropped = [name for name in raw if name not in identities]
     for name in dropped:

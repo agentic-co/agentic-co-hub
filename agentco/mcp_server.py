@@ -132,6 +132,34 @@ def resolve_registry_url(base_url: Optional[str] = None) -> Optional[str]:
     return base_url or os.environ.get(REGISTRY_URL_ENV_VAR) or None
 
 
+def access_steps(actor: str, fingerprint: str) -> list[str]:
+    """How a harness the registry refused gets in. Returned by `whoami`, read by a model.
+
+    Step 1 exists because of what a model does when it reads "unauthenticated"
+    next to a tool called `keygen`: it mints itself a key. That key is valid,
+    well-formed, and unknown to the registry, so the 401s continue and now
+    there are two secrets to untangle. Access is granted by the operator, who
+    holds the key table; the harness's only part is to carry the secret it is
+    given.
+    """
+    return [
+        f"Access is granted by the registry's operator, not by this harness. Do NOT "
+        f"run `agentco keygen` here: a key minted on this machine is one the "
+        f"registry has never seen, and the refusals will continue.",
+        f"Ask the operator for the secret minted for actor {actor!r}. If one was "
+        f"already issued, ask them for its fingerprint from `agentco keycheck` and "
+        f"compare it with secretFingerprint here ({fingerprint}): different means "
+        f"this harness holds the wrong secret; equal means the operator's table "
+        f"has not picked it up yet (a mounted Secret can take a minute or two).",
+        f"Put it in {SECRET_ENV_VAR} in the environment this server is launched "
+        f"with, and keep it there only — never in a file inside a repository.",
+        "Restart the harness, not just the MCP connection: the server reads its "
+        "environment once, at start.",
+        "Call `whoami` again. `auth.status` must read `ok` before claiming or "
+        "pulling work.",
+    ]
+
+
 def resolve_secret(secret: Optional[str] = None) -> Optional[str]:
     return secret or os.environ.get(SECRET_ENV_VAR) or None
 
@@ -330,6 +358,41 @@ class _RemoteBackend:
     def describe(self) -> dict:
         return {"mode": "remote", "registryUrl": self.registry.base_url}
 
+    def auth_check(self) -> dict:
+        """One signed, read-only request, so `whoami` reports whether the key WORKS.
+
+        Without it, `whoami` answered from configuration alone and said
+        `mode: remote` to a harness whose every signed call was about to be
+        refused — found live: an agent whose secret the registry had never seen
+        read a clean `whoami` as "connected" and spent a session theorising
+        about why `events` and `sop_get` did not work.
+        """
+        fingerprint = auth.secret_fingerprint(self.registry.secret)
+        try:
+            self.registry.events(limit=1)
+        except RegistryError as exc:
+            if exc.status is None:
+                return {
+                    "status": "unreachable",
+                    "detail": str(exc),
+                    "secretFingerprint": fingerprint,
+                    "access": [
+                        f"Nothing answered at {self.registry.base_url}. Check "
+                        f"{REGISTRY_URL_ENV_VAR} and that this machine can reach it; "
+                        "the key itself was not tested.",
+                    ],
+                }
+            payload = exc.payload if isinstance(exc.payload, dict) else {}
+            if exc.status == 401:
+                return {
+                    "status": "rejected",
+                    "detail": payload.get("message") or str(exc),
+                    "secretFingerprint": fingerprint,
+                    "access": access_steps(self.actor, fingerprint),
+                }
+            return {"status": "error", "detail": str(exc), "secretFingerprint": fingerprint}
+        return {"status": "ok", "secretFingerprint": fingerprint}
+
 
 def create_server(
     db_path: Optional[str] = None,
@@ -369,9 +432,11 @@ def create_server(
                 code="secret_required",
                 message=f"{REGISTRY_URL_ENV_VAR} is set but no shared secret is",
                 remediation=(
-                    f"Set {SECRET_ENV_VAR} to the secret minted for {who!r} "
-                    f"(`python3 -m agentco keygen {who}`), or unset "
-                    f"{REGISTRY_URL_ENV_VAR} to use local stores."
+                    f"Set {SECRET_ENV_VAR} to the secret the registry's operator "
+                    f"minted for {who!r} and installed in its key table, or unset "
+                    f"{REGISTRY_URL_ENV_VAR} to use local stores. Do not run "
+                    f"`agentco keygen` yourself: a key you mint is one the "
+                    f"registry has never seen."
                 ),
                 http_status=400,
             )
@@ -683,18 +748,20 @@ def create_server(
 
     @mcp.tool(name="whoami")
     def whoami() -> dict:
-        """What this actor is identified as, and which registry or stores this server is pointed at.
+        """Call first. Who you are, where your stores are, and whether your key works.
 
-        There is no RBAC yet — every actor can call every tool (stage 2, gated
-        on the adoption gate: docs/roadmap.md) — so this exists for a harness's
-        first call to confirm its own `.mcp.json` configuration landed on the
-        identity and stores it expects, before it stakes a claim or files work
-        under the wrong name.
+        Read `mode` first: a harness that thinks it is on a shared registry but
+        writes local files sees an always-empty queue, which looks like no error.
 
-        `mode` is the field to read first. A harness that believes it is on a
-        shared registry while quietly writing to a local file sees a queue that
-        is simply always empty, and nothing about that looks like an error.
+        In remote mode read `auth.status`; it comes from one signed read. If it
+        is not `ok`, follow `auth.access`. Never mint a key yourself.
         """
+        # Why this exists at all: there is no RBAC yet (stage 2, gated on the
+        # adoption gate: docs/roadmap.md), so the risk is not a forbidden call
+        # but a harness staking claims or filing work under the wrong name or
+        # into the wrong store. `auth` was added after an agent read a clean
+        # `whoami` as "connected" while every signed call got a 401 — its secret
+        # was one it had minted itself, which the registry had never seen.
         return {
             "actor": backend.actor,
             "enforcement": "advisory",
@@ -706,6 +773,7 @@ def create_server(
             # operator's declared verifiers, or self-asserted.
             "verifiers": sorted(policy.verifiers_from_env()) or "undeclared (verify is self-asserted)",
             **backend.describe(),
+            **({"auth": backend.auth_check()} if backend.remote else {}),
             "scope": {"minSegments": scope.MIN_SEGMENTS, "intents": list(scope.INTENTS)},
             "eventKinds": list(events_module.KINDS),
         }

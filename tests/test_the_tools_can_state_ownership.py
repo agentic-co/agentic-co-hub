@@ -215,6 +215,14 @@ def test_it_never_prints_a_secret(tmp_path, capsys):
     assert "another-secret" not in captured.out + captured.err
 
 
+def test_it_prints_the_fingerprint_whoami_reports(tmp_path, capsys):
+    """The operator's half of "do we hold the same key?" — the harness's half is
+    `whoami`'s `auth.secretFingerprint`, and the two must be the same function."""
+    path = written(tmp_path, {"a-claude": {"secret": "vm-secret", "owner": "alice"}})
+    assert cli.main(["keycheck", path]) == 0
+    assert f"fingerprint={auth.secret_fingerprint('vm-secret')}" in capsys.readouterr().out
+
+
 def test_a_table_auth_refuses_is_refused_here_too(tmp_path, capsys):
     """Two spellings of one name. `auth` raises; this must not swallow it and
     report a clean file."""
