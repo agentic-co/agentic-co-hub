@@ -18,15 +18,25 @@ X-AgentCo-Signature: hex(HMAC-SHA256(secret, "{METHOD}\n{path}\n{timestamp}\n{sh
 Content-Type:        application/json
 ```
 
-- `path` is signed **without** the query string (`GET /events?limit=1` signs `/events`).
+- `path` is the decoded path without the query string. When the request has a
+  query, its canonical form is appended as a fifth line: parameters sorted and
+  percent-encoded (`GET /events?since=x&limit=1` signs `/events`, then
+  `limit=1&since=x`). Registries still accept the four-line form until the
+  operator sets `ASOP_REQUIRE_SIGNED_QUERY=1`; sign the query anyway.
 - An empty body hashes as the sha256 of zero bytes. Send no body on `GET`.
 - The actor is whatever the signature authenticates. A payload that names an
   `actor` is refused (`400`); a harness that wants to say which tool it is uses
   `agentLabel`, which travels as unverified.
 - Unauthenticated → `401`. That is also the health check: a `200` with no
   credentials means the key file failed open.
-- Secrets come from `agentco keygen your-harness`, merged by the operator into
-  the JSON file `AGENTCO_REGISTRY_KEYS` points at. The reference signer is
+- Your secret comes **from the registry's operator**, who mints it with
+  `agentco keygen your-harness` and installs it in the key table
+  (`AGENTCO_REGISTRY_KEYS`). Running `keygen` yourself gets you a well-formed key
+  the registry has never seen, and the `401`s continue. To check that you and the
+  operator hold the same key without either of you saying it, compare
+  fingerprints: `agentco keycheck` prints one per actor on the operator's side,
+  and an MCP harness's `whoami` reports `auth.secretFingerprint` on yours (the
+  first 12 hex characters of `sha256(secret)`). The reference signer is
   `agentco/publish.py::_sign`, thirty lines of standard library.
 
 ## Wire casing

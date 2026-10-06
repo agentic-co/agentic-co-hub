@@ -53,6 +53,18 @@ MAX_SKEW_S = 300
 KEYS_ENV_VAR = "AGENTCO_REGISTRY_KEYS"
 
 
+def secret_fingerprint(secret: str) -> str:
+    """A short, non-reversible name for a secret, so two parties can compare keys.
+
+    The operator reads it from `agentco keycheck`; the harness reads it from
+    `whoami`. Equal means both hold the same key without either one having to
+    say it. Twelve hex characters of SHA-256 reveal nothing usable about a
+    `keygen` secret (256 random bits); a short human-chosen string is another
+    matter, which is one more reason not to hand-write secrets into the table.
+    """
+    return hashlib.sha256(secret.encode()).hexdigest()[:12]
+
+
 def _unauthenticated(message: str, remediation: str) -> Unauthenticated:
     return Unauthenticated(
         code="unauthenticated",
