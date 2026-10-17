@@ -207,6 +207,23 @@ Two registries, both following the same shape:
   the reaper's in-lock liveness re-check and `assigned_agent` enforcement are
   single-process tested only (see below).
 
+### Hub network — planned, not built
+
+Accepted as a design in [`decisions/0007-hub-network-graph-and-channels.md`](decisions/0007-hub-network-graph-and-channels.md),
+extending the built push-only digest of [0005](decisions/0005-federated-hub-topology.md):
+
+- Many connections per hub instead of one parent URL; cycle protection for
+  forwarded work.
+- Declared channels per connection (work, answers, memory, notices), enforced
+  on both ends.
+- Signed per-owner clearance that only narrows per hop; the existing digest
+  filtered by it.
+- Pull-based work: stimulus by age and priority, thresholds, a Decline verb,
+  evidence pointers, WIP limits, random audit, a level-skipping alert path.
+- Harness-to-human binding through an external identity provider, after a
+  review of delegated-authentication patterns (this is the "identity beyond
+  HMAC" item above, given a shape).
+
 ## Later — review delivery
 
 The routing spine: named owners, shared queues, offers with claim deadlines, explicit

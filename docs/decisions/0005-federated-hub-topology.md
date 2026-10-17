@@ -4,6 +4,11 @@
 cross-vendor review — GPT-5.4 via codex and Gemini 3.1 Pro via agy — found real
 defects in the first pass; see Consequences)
 
+> **Extended 2026-10-16 by [`0007`](0007-hub-network-graph-and-channels.md)**
+> (accepted, not built): connections become a graph with declared channels,
+> replacing the push-only and one-upstream limits below. Everything below
+> describes what is built today.
+
 > A decision with no revisit condition is doctrine. Every record here carries one.
 
 ## Context
