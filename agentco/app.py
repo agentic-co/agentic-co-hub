@@ -62,9 +62,10 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, chains, db, digests, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, chains, clearance as clearance_module, db, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
+from agentco.memory import open_memory_store
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
 from agentco.refusals import classify
 from agentco.sop import (
@@ -216,6 +217,11 @@ def create_app(
     verifiers: Optional[Iterable[str]] = None,
     adjudicators: Optional[Iterable[str]] = None,
     federated_children: Optional[Iterable[str]] = None,
+    memory_store: Optional[str] = None,
+    hub_id: Optional[str] = None,
+    hub_clearance: Optional[dict] = None,
+    clearances: Optional[dict] = None,
+    memory_levels: Optional[Iterable[str]] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -240,6 +246,10 @@ def create_app(
     # restriction lifts, which is most of why the backend exists.
     queue = open_queue(work_store)
     library = open_sop_library(sop_store)
+    # Shared memory (ADR 0006): the store, and the two clearances every read
+    # and write of it is gated by — this hub's and the calling actor's.
+    memory = open_memory_store(memory_store, hub_id=hub_id)
+    walls = clearance_module.build(hub_clearance, clearances, memory_levels)
     # Every write these two perform goes on the change feed, wired ONCE here
     # rather than at each handler. A harness following `GET /events?since=`
     # learns about new procedures and new work without asking the library or
@@ -1075,6 +1085,102 @@ def create_app(
             }
 
         return await _handle(request, "sop_get", work)
+
+    # -- shared memory (ADR 0006, agentco/memory.py) ------------------------
+    #
+    # Every handler passes the caller's EFFECTIVE clearance (this hub's ∧ the
+    # actor's) into the store, which applies it before anything else. No
+    # handler filters on its own; a route that forgot would still be walled.
+
+    def _memory_view(item) -> dict:
+        return item.to_dict()
+
+    def _optional_version(payload: dict) -> Optional[int]:
+        raw = payload.get("expected_version")
+        return None if raw is None else _int(payload, "expected_version", -1)
+
+    @app.post("/memory")
+    async def post_memory(request: Request) -> JSONResponse:
+        """Write an authoritative item at a label you and this hub are cleared for."""
+
+        def work(actor: str, payload: dict) -> dict:
+            label = payload.get("label") or {}
+            if not isinstance(label, dict):
+                label = {}
+            fields = {k: v for k, v in payload.items() if k not in ("label", "layer", "agentLabel")}
+            item = memory.create(
+                actor=actor, clearance=walls.effective(actor),
+                owner=label.get("owner"), level=label.get("level"), layer=payload.get("layer"),
+                **fields,
+            )
+            return {"state": "accepted", "item": _memory_view(item)}
+
+        return await _handle(request, "memory_create", work)
+
+    @app.get("/memory")
+    async def get_memory_list(request: Request) -> JSONResponse:
+        """The items you are cleared for, optionally by `?layer=` / `?kind=`."""
+
+        def work(actor: str, payload: dict) -> dict:
+            params = request.query_params
+            items = memory.list(
+                walls.effective(actor), layer=params.get("layer"), kind=params.get("kind"),
+                include_retired=params.get("retired") in ("1", "true"),
+            )
+            return {"state": "accepted", "items": [_memory_view(i) for i in items], "count": len(items)}
+
+        return await _handle(request, "memory_list", work)
+
+    @app.get("/memory/{item_id}")
+    async def get_memory_item(item_id: str, request: Request) -> JSONResponse:
+        def work(actor: str, payload: dict) -> dict:
+            return {"state": "accepted", "item": _memory_view(memory.get(item_id, walls.effective(actor)))}
+
+        return await _handle(request, "memory_get", work)
+
+    @app.get("/memory/{item_id}/history")
+    async def get_memory_history(item_id: str, request: Request) -> JSONResponse:
+        def work(actor: str, payload: dict) -> dict:
+            return {"state": "accepted", "history": memory.history(item_id, walls.effective(actor))}
+
+        return await _handle(request, "memory_history", work)
+
+    @app.post("/memory/{item_id}/revise")
+    async def post_memory_revise(item_id: str, request: Request) -> JSONResponse:
+        def work(actor: str, payload: dict) -> dict:
+            changes = {k: v for k, v in payload.items() if k not in ("expected_version", "agentLabel")}
+            item = memory.revise(item_id, actor=actor, clearance=walls.effective(actor),
+                                 expected_version=_optional_version(payload), **changes)
+            return {"state": "accepted", "item": _memory_view(item)}
+
+        return await _handle(request, "memory_revise", work)
+
+    @app.post("/memory/{item_id}/pin")
+    async def post_memory_pin(item_id: str, request: Request) -> JSONResponse:
+        """Pin with a calendar review date, or unpin (`pinned: false`). Human-only."""
+
+        def work(actor: str, payload: dict) -> dict:
+            item = memory.set_pinned(
+                item_id, actor=actor, human=policy.kind_of(actor, declared_humans) == policy.HUMAN,
+                clearance=walls.effective(actor), pinned=payload.get("pinned", True) is not False,
+                review_by=payload.get("review_by"), expected_version=_optional_version(payload),
+            )
+            return {"state": "accepted", "item": _memory_view(item)}
+
+        return await _handle(request, "memory_pin", work)
+
+    @app.post("/memory/{item_id}/retire")
+    async def post_memory_retire(item_id: str, request: Request) -> JSONResponse:
+        """Hide from retrieval, keep for audit. Human-only; nothing is deleted."""
+
+        def work(actor: str, payload: dict) -> dict:
+            item = memory.retire(
+                item_id, actor=actor, human=policy.kind_of(actor, declared_humans) == policy.HUMAN,
+                clearance=walls.effective(actor), expected_version=_optional_version(payload),
+            )
+            return {"state": "accepted", "item": _memory_view(item)}
+
+        return await _handle(request, "memory_retire", work)
 
     # -- ASOP v3.6 chain records (agentco/chains.py) ------------------------
 

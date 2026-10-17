@@ -725,6 +725,58 @@ _0012: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0013 — shared memory items (ADR 0006 §1, agentco/memory.py).
+#
+# One row per item, the CURRENT version, in `memory_items`; every write also
+# appends the whole record to `memory_versions`, which is the audit and the
+# version history at once. Nothing deletes from either table: retiring is a
+# status, decay is a later column set, and ADR 0006 says decay never deletes.
+#
+# The label is two columns rather than one string so that a clearance filter
+# is a comparison on `owner` and never a parse. `authority` is the hub that
+# owns the item; a row whose authority is not this hub is a read-only replica.
+# --------------------------------------------------------------------------- #
+
+_0013: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS memory_items (
+        item_id     TEXT PRIMARY KEY,
+        owner       TEXT NOT NULL,
+        level       TEXT NOT NULL,
+        layer       TEXT NOT NULL,
+        authority   TEXT NOT NULL,
+        version     INTEGER NOT NULL,
+        kind        TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        provenance  TEXT NOT NULL,
+        tags        TEXT NOT NULL DEFAULT '[]',
+        applies_to  TEXT,
+        pinned      INTEGER NOT NULL DEFAULT 0,
+        review_by   TEXT,
+        status      TEXT NOT NULL,
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_by  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_memory_items_owner ON memory_items(owner, level)",
+    """
+    CREATE TABLE IF NOT EXISTS memory_versions (
+        item_id  TEXT NOT NULL,
+        version  INTEGER NOT NULL,
+        action   TEXT NOT NULL,
+        actor    TEXT NOT NULL,
+        at       TEXT NOT NULL,
+        record   TEXT NOT NULL,
+        PRIMARY KEY (item_id, version)
+    )
+    """,
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -738,6 +790,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(10, "calls-daily-rollup", _0010),
     Migration(11, "asop-chaining-fields", _0011),
     Migration(12, "chain-manifests-adoptions-approvals", _0012),
+    Migration(13, "memory-items", _0013),
 )
 
 
