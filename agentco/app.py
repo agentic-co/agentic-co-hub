@@ -62,7 +62,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, db, digests, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, chains, db, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
@@ -882,12 +882,20 @@ def create_app(
                 )
             version = payload.get("version")
             try:
+                version = int(version) if version is not None else None
+                # A run IN a pinned chain files at the version the chain's
+                # current manifest pins, and nowhere else (v3.6 §3.10) — not the
+                # active one, and not one the caller names that it does not pin.
+                chain_pin = None
+                if payload.get("chain") is not None:
+                    version, chain_pin = chains.pin_for_run(conn, str(payload["chain"]), sop_id, version)
                 run = library.run(
                     sop_id,
                     queue,
                     inputs=payload.get("inputs") or {},
                     bindings=payload.get("bindings") or {},
-                    version=int(version) if version is not None else None,
+                    version=version,
+                    chain_pin=chain_pin,
                     title=payload.get("title"),
                     metadata=payload.get("metadata"),
                     requires=payload.get("requires") or (),
@@ -1057,9 +1065,122 @@ def create_app(
                         http_status=400,
                     ) from None
             sop = library.get(sop_id, version=version)
-            return {"state": "accepted", "sop": json.loads(sop.to_json()) if sop else None}
+            # `digest` is this store's digest of the version (ASOP v3.6 §3.10:
+            # "a member's digest is the store's") — what a chain manifest must
+            # pin it by. Absent on a contract older than 0.6.0, which has none.
+            return {
+                "state": "accepted",
+                "sop": json.loads(sop.to_json()) if sop else None,
+                **({"digest": chains.store_digest(sop)} if sop and chains.SUPPORTED else {}),
+            }
 
         return await _handle(request, "sop_get", work)
+
+    # -- ASOP v3.6 chain records (agentco/chains.py) ------------------------
+
+    @app.post("/chains/manifests")
+    async def post_chain_manifest(request: Request) -> JSONResponse:
+        """Record a chain manifest. Any authenticated engine may: the record is
+        checked against THIS store's versions and digests, and the first one
+        for a chain is what it starts under. Moving it later is a person's."""
+
+        def work(actor: str, payload: dict) -> dict:
+            return chains.record_manifest(
+                conn, library, actor=actor, doc=payload.get("manifest"),
+                agent_label=payload.get("agentLabel"),
+            )
+
+        return await _handle(request, "chain_manifest", work)
+
+    @app.get("/chains/{chain}")
+    async def get_chain(chain: str, request: Request) -> JSONResponse:
+        """The manifest a chain runs under now, every manifest recorded for it,
+        and its adoptions. `chain: null` with 200 for a chain nobody pinned,
+        for the reason `GET /sops/{id}` answers a miss that way."""
+
+        def work(actor: str, payload: dict) -> dict:
+            return {"state": "accepted", "chain": chains.chain_view(conn, chain)}
+
+        return await _handle(request, "chain_get", work)
+
+    @app.get("/chains/{chain}/impact")
+    async def get_chain_impact(chain: str, request: Request) -> JSONResponse:
+        """What adopting `?to=<manifest digest>` would change, computed. Read it
+        before recording the adoption; anyone may, an agent proposing one too."""
+
+        def work(actor: str, payload: dict) -> dict:
+            return {"state": "accepted",
+                    **chains.impact(conn, chain, request.query_params.get("to") or "")}
+
+        return await _handle(request, "chain_impact", work)
+
+    @app.post("/chains/{chain}/adoptions")
+    async def post_chain_adoption(chain: str, request: Request) -> JSONResponse:
+        """A declared human moves the chain to manifest `to`. The impact is
+        computed here; a body carrying one, or naming who adopted, is refused."""
+
+        def work(actor: str, payload: dict) -> dict:
+            named = sorted({"impact", "adopted_by", "adopted_at", "from"} & set(payload))
+            if named:
+                raise Refusal(
+                    code="author_from_signature",
+                    message=f"the body names {named}; the plane computes or signs each of them",
+                    remediation=(
+                        "Send only `to` (and `reason`). Who adopted is the signature, when "
+                        "is the clock, `from` is what the chain runs under now, and the "
+                        "impact is computed from the two manifests — never typed."
+                    ),
+                    http_status=400,
+                )
+            return chains.adopt(
+                conn, chain=chain, to=payload.get("to") or "", actor=actor,
+                humans=declared_humans, reason=payload.get("reason"),
+                agent_label=payload.get("agentLabel"),
+            )
+
+        return await _handle(request, "chain_adopt", work)
+
+    @app.post("/approvals")
+    async def post_approval(request: Request) -> JSONResponse:
+        """A declared human approves an artefact at a digest, optionally only a
+        subset of its subjects (`asop.approval/1`)."""
+
+        def work(actor: str, payload: dict) -> dict:
+            named = sorted({"approved_by", "approved_at"} & set(payload))
+            if named:
+                raise Refusal(
+                    code="author_from_signature",
+                    message=f"the body names {named}; the signature and the clock already did",
+                    remediation="Send `artefact`, `digest` and, to approve part of it, `subset`.",
+                    http_status=400,
+                )
+            return chains.record_approval(
+                conn, actor=actor, humans=declared_humans,
+                artefact=payload.get("artefact"), digest=payload.get("digest"),
+                subset=payload.get("subset"), agent_label=payload.get("agentLabel"),
+            )
+
+        return await _handle(request, "approval_record", work)
+
+    @app.get("/approvals")
+    async def get_approvals(request: Request) -> JSONResponse:
+        """Every approval of `?artefact=`; with `&digest=`, whether the latest
+        binds that digest."""
+
+        def work(actor: str, payload: dict) -> dict:
+            params = request.query_params
+            artefact = params.get("artefact")
+            if not artefact:
+                raise Refusal(
+                    code="invalid_request",
+                    message="?artefact= is required",
+                    remediation="Name the artefact, by the name a `requires` or a fan-out uses.",
+                    http_status=400,
+                )
+            return {"state": "accepted",
+                    **chains.approvals_of(conn, artefact, params.get("digest"))}
+
+        return await _handle(request, "approval_get", work)
 
     @app.get("/metrics")
     async def get_metrics(request: Request) -> JSONResponse:

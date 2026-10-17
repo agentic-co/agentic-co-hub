@@ -415,6 +415,11 @@ RESERVED_METADATA_KEYS = frozenset({
     # fact by `run_get`/`promote`. A caller who could set it could claim a run
     # was bound to a validator that never saw it.
     "sop_run",
+    # The chain a run was filed in and the manifest digest it resolved from
+    # (ASOP v3.6 §3.10, agentco/chains.py). Written only by `SopLibrary.run`
+    # after the plane resolved the pin. A caller who could set it could claim a
+    # run was pinned by a manifest it never resolved from.
+    "sop_chain",
 })
 PLAN_KEY = "sop_plan"
 PLAN_VS_ACTUAL_KEY = "plan_vs_actual"

@@ -658,6 +658,73 @@ _0011: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0012 — chain manifests, adoptions and approvals (ASOP v3.6, agentco/chains.py).
+#
+# Registry tables rather than columns on `asops`, because none of the three is
+# a property of a procedure version: a manifest pins MANY versions for one
+# chain, an adoption moves a chain, an approval binds an artefact's digest.
+#
+# `chains` holds the one fact that changes — which manifest a chain runs under
+# now — so an adoption is a compare-and-set on one row (`current_digest`), and
+# `adoptions` doubles as the next ordinal for `chain_adoptions`. Everything
+# else is append-only: a manifest is identified by its digest and never
+# rewritten, an adoption is history, and an approval of an artefact never
+# replaces an earlier one (a stale build is judged against what was approved
+# WHEN, ASOP.md §5.7).
+#
+# Every key is a natural one and every insert races safely: `ON CONFLICT DO
+# NOTHING` on the digest and on the chain is the same statement on both
+# backends, and the first manifest recorded for a chain is the one it starts
+# under because the second `chains` insert does nothing.
+# --------------------------------------------------------------------------- #
+
+_0012: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS chain_manifests (
+        digest       TEXT PRIMARY KEY,
+        chain        TEXT NOT NULL,
+        doc          TEXT NOT NULL,
+        recorded_by  TEXT NOT NULL,
+        recorded_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_chain_manifests_chain ON chain_manifests(chain)",
+    """
+    CREATE TABLE IF NOT EXISTS chains (
+        chain           TEXT PRIMARY KEY,
+        start_digest    TEXT NOT NULL,
+        current_digest  TEXT NOT NULL,
+        adoptions       INTEGER NOT NULL DEFAULT 0,
+        started_at      TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS chain_adoptions (
+        chain        TEXT NOT NULL,
+        ordinal      INTEGER NOT NULL,
+        from_digest  TEXT NOT NULL,
+        to_digest    TEXT NOT NULL,
+        doc          TEXT NOT NULL,
+        adopted_by   TEXT NOT NULL,
+        adopted_at   TEXT NOT NULL,
+        PRIMARY KEY (chain, ordinal)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approvals (
+        uid          TEXT PRIMARY KEY,
+        artefact     TEXT NOT NULL,
+        digest       TEXT NOT NULL,
+        doc          TEXT NOT NULL,
+        approved_by  TEXT NOT NULL,
+        approved_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_approvals_artefact ON approvals(artefact, approved_at)",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -670,6 +737,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(9, "asop-v3-records", _0009, backfill=_backfill_legacy_sops),
     Migration(10, "calls-daily-rollup", _0010),
     Migration(11, "asop-chaining-fields", _0011),
+    Migration(12, "chain-manifests-adoptions-approvals", _0012),
 )
 
 

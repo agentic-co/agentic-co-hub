@@ -51,6 +51,29 @@ How that is kept true:
   instruction, and the one thing an operator running more than one plane process
   has to sequence.
 
-What 0.6.0 adds beyond the record (the chain manifest, adoption, approval,
-journal and chain-outcome records of §3.10 and §5.6–§5.8) is not yet stored by
-the plane; `docs/roadmap.md` tracks it.
+## Chain manifests, adoptions and approvals (v3.6, `agentco/chains.py`)
+
+Three v3.6 records name a person or name the store, so the plane holds them:
+it is the store whose digests a manifest pins, and it holds the operator's
+declared humans. All three need asop-spec 0.6.0; on an older contract every
+route below refuses `contract_unsupported` (501) rather than storing a record
+it cannot validate.
+
+| Route | Who | What |
+|---|---|---|
+| `GET /sops/{id}?version=` | anyone | now also returns `digest`: this store's `sha256:` over the version's validated body — what a manifest member must carry (§3.10, "a member's digest is the store's") |
+| `POST /chains/manifests` `{manifest}` | any authenticated engine | `asop.chain-manifest/1`, checked by the contract; every member must be a non-draft version this store holds, at this store's digest. Idempotent on the manifest digest. The FIRST manifest for a chain is the one it starts under; later ones take effect only by adoption |
+| `GET /chains/{chain}` | anyone | the manifest in force, every manifest recorded, the adoptions in order; `chain: null` for a chain nobody pinned |
+| `GET /chains/{chain}/impact?to=` | anyone | the computed impact (`adoption_impact`) of moving to manifest `to` — what a person reads before adopting, and what an agent cites when proposing |
+| `POST /chains/{chain}/adoptions` `{to, reason?}` | declared human only | `asop.adoption/1`. `adopted_by` is the signature, `from` is the manifest in force, the impact is computed; a body naming any of them is refused. Compare-and-set on the manifest in force, so two concurrent adoptions cannot fork a chain |
+| `POST /approvals` `{artefact, digest, subset?}` | declared human only | `asop.approval/1`, append-only. `approved_by` / `approved_at` are the signature and the clock |
+| `GET /approvals?artefact=&digest=` | anyone | the history, the latest, and with `digest`, whether the latest binds it (`current`) — the check `human_approved.binds_digest` makes |
+| `POST /sops/{id}/run` `{chain, ...}` | as before | a run IN a pinned chain files at the version the chain's manifest pins — not the active one — and a version or procedure the manifest does not pin is refused `adoption_required`. The run records `chain: {chain, manifest}` under a reserved key |
+
+Feed kinds: `ChainManifestRecorded`, `ChainAdopted`, `ArtefactApproved`.
+
+**Not stored, on purpose: the chain outcome record (§5.8) and the step journal
+(§5.6).** The outcome is "computed from the ledger, never typed", and the plane
+holds no ledger of a runtime's runs; accepting a typed outcome would store
+exactly what the spec forbids. Both arrive with journal ingest (§7.2: "a
+journal is what a non-owning plane receives"), tracked in `docs/roadmap.md`.
