@@ -29,8 +29,8 @@ that range. What it can store and serve depends on which one is installed:
 | `asop-spec` | Spec | What the plane stores | Status |
 |---|---|---|---|
 | 0.4.0 / 0.4.1 | v3.4 | the v3 record: steps, gates, roles, constraints | supported, CI-tested |
-| 0.5.0 | v3.5 | plus the chaining fields `outcomes`, `outputs`, `handoffs`, `on_escalate`, `requires` (§3.7) | supported, the locked version, CI-tested |
-| 0.6.0 | v3.6 | plus `entry_gates` and `rework` (§3.8, §3.9), and the v3.6 fields that live inside existing ones: hand-off `preflight`, `subject_from.order_by` / `concurrency` / `approved_subset`, gate `on_timeout: proceed_on_default` with `default`, `cannot_evaluate_exit`, `min_cases`, and `human_approved.binds_digest` | supported, CI-tested from the spec's source until it is on PyPI |
+| 0.5.0 | v3.5 | plus the chaining fields `outcomes`, `outputs`, `handoffs`, `on_escalate`, `requires` (§3.7) | supported, CI-tested |
+| 0.6.0 | v3.6 | plus `entry_gates` and `rework` (§3.8, §3.9), and the v3.6 fields that live inside existing ones: hand-off `preflight`, `subject_from.order_by` / `concurrency` / `approved_subset`, gate `on_timeout: proceed_on_default` with `default`, `cannot_evaluate_exit`, `min_cases`, and `human_approved.binds_digest` | supported, the locked version, CI-tested (on PyPI since 2026-10-17) |
 
 How that is kept true:
 
