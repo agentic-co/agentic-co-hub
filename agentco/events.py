@@ -105,6 +105,23 @@ KINDS = (
     # this can repeat for one item id. Harmless by construction: no clock starts
     # on it, unlike `WorkParked`, so a repeat cannot restart one.
     "WorkFiled",
+    # ------------------------------------------------------------------ #
+    # ASOP v3.6 chain records (agentco/chains.py). A harness running a chain
+    # needs to know when the manifest it resolves from has moved — that is an
+    # adoption, and a run filed after it must resolve from the new pin — and
+    # when an artefact it fans out over has been approved. Polling a chain or
+    # an artefact for either would be the scan these kinds exist to remove.
+    #
+    # `ChainManifestRecorded` — a manifest is stored; `starts` says whether it
+    # is the one the chain starts under (the first) or a candidate for adoption.
+    "ChainManifestRecorded",
+    # `ChainAdopted` — a person moved a chain to another manifest. In-flight
+    # runs finish under their pin; runs filed after this resolve from `to`.
+    "ChainAdopted",
+    # `ArtefactApproved` — a person approved an artefact at a digest, possibly
+    # a subset of its subjects. A fan-out waiting on `approved_subset` and a
+    # `requires: human_approved` both read this.
+    "ArtefactApproved",
 )
 
 # Events the PLANE observes rather than an actor performing. A reserved name
