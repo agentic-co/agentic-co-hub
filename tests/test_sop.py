@@ -364,7 +364,9 @@ def test_an_empty_common_mistakes_list_is_refused(library):
 
 def test_common_mistakes_is_capped(library):
     body = feature_dev_body()
-    body["steps"][0]["common_mistakes"] = ["a", "b", "c", "d"]
+    # One past the INSTALLED contract's cap: 0.4.0 caps at three, 0.4.1 and
+    # later at five, and the plane supports both (docs/asop.md).
+    body["steps"][0]["common_mistakes"] = [f"m{i}" for i in range(MAX_COMMON_MISTAKES + 1)]
     with pytest.raises(SopContractError) as exc:
         library.create("triage", **body)
     assert f"cap is {MAX_COMMON_MISTAKES}" in str(exc.value)

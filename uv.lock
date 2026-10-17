@@ -37,7 +37,7 @@ server = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asop-spec", specifier = ">=0.4.0" },
+    { name = "asop-spec", specifier = ">=0.4.0,<1" },
     { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.110" },
     { name = "litellm", marker = "extra == 'eval'", specifier = ">=1.70" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = "<2" },
@@ -221,11 +221,11 @@ wheels = [
 
 [[package]]
 name = "asop-spec"
-version = "0.4.0"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/20/ae/ac0b83c8c86c48364856001dd810e8ad1789b495d06eb727c14865697539/asop_spec-0.4.0.tar.gz", hash = "sha256:c01bbe70bca726b3489797add21b6b4497bc5ce363aca00bd6de755047d29209", size = 102027, upload-time = "2026-09-10T11:04:01.077Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/91/1c/bfdbe2e15fcb0d4d28ae13b14fb2167404e2c28fc1baee0500f85a189aee/asop_spec-0.5.0.tar.gz", hash = "sha256:5b883f919d705b057fa9cfcb1dcf04ab4d409537635b73939db3e7b89f17d446", size = 154959, upload-time = "2026-10-11T01:07:31.134Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/fe/12e00d0af02c51a7c86933d2edb5305f9178a70d3f007d79cb8f6f95a964/asop_spec-0.4.0-py3-none-any.whl", hash = "sha256:42115533e245c6163b243147f1444f96622c89aff91bd1ea7b2a7c002cd25adf", size = 83650, upload-time = "2026-09-10T11:04:02.155Z" },
+    { url = "https://files.pythonhosted.org/packages/55/ff/39ff6ae05ee80da9e44a294303dc38ed2081932bf79ccce3aa910e70bc2f/asop_spec-0.5.0-py3-none-any.whl", hash = "sha256:0de6300042928a31b0e7206d58408ba0c399fbfde4368dbf27e1435b3474f665", size = 112703, upload-time = "2026-10-11T01:07:29.653Z" },
 ]
 
 [[package]]

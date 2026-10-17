@@ -50,7 +50,7 @@ import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
@@ -88,6 +88,14 @@ from asop.sop import (
     validate_asop,
     validate_step,
 )
+
+# The record's chaining fields (v3.5: §3.7; v3.6: §3.8, §3.9), as the INSTALLED
+# contract declares them. asop-spec 0.4.0 has no `asop.chain` and therefore no
+# chaining fields; the plane supports it, so this is detected, not required.
+try:
+    from asop.chain import CHAIN_FIELDS
+except ImportError:  # asop-spec 0.4.x
+    CHAIN_FIELDS: tuple[str, ...] = ()
 
 __all__ = [
     "ASOP",
@@ -206,6 +214,11 @@ def asop_payload(asop: ASOP) -> dict:
         "constraints": [dict(c) for c in asop.constraints or []],
         "steps": [step_payload(s) for s in asop.steps],
         **({"proposals": list(asop.proposals)} if asop.proposals else {}),
+        # Carried forward like everything else. Leaving them out made `revise`
+        # write the next version WITHOUT its hand-offs, entry gates and rework
+        # bounds — a change to `purpose` silently unchaining the procedure.
+        **{k: getattr(asop, k) for k in CHAIN_FIELDS
+           if getattr(asop, k, None) not in (None, [], {})},
     }
 
 
@@ -289,6 +302,19 @@ def read_record(line: str) -> ASOP:
     """One stored line as an ASOP, whichever generation wrote it."""
     raw = json.loads(line)
     if "asop_id" in raw:
+        # `ASOP.from_json` drops keys its dataclass does not declare. A line a
+        # newer contract wrote with an entry gate or a rework bound would read
+        # back without it, and the next authoring call — which rewrites the
+        # file — would persist the loss. Refuse instead: the caller quarantines
+        # the line verbatim and `revise()` stops, as `sqlstore` does per row.
+        declared = {f.name for f in fields(ASOP)}
+        unmodelled = sorted(k for k, v in raw.items()
+                            if k not in declared and v not in (None, [], {}, ""))
+        if unmodelled:
+            raise ValueError(
+                f"ASOP {raw.get('asop_id')} v{raw.get('version')} carries "
+                f"{unmodelled}, which the installed asop-spec does not model."
+            )
         return ASOP.from_json(line)
     if "sop_id" in raw:
         return upgrade_legacy(SOP.from_json(line))
@@ -298,6 +324,11 @@ def read_record(line: str) -> ASOP:
 # --------------------------------------------------------------------------- #
 # the store
 # --------------------------------------------------------------------------- #
+
+# Where a chain run's pin is written (`agentco/chains.py`). Reserved in
+# `agentco/work.py` for the reason `sop_ref` is: a caller who could set it
+# could claim a run was filed under a manifest it never resolved from.
+CHAIN_KEY = "sop_chain"
 
 
 def _version_payload(asop) -> dict:
@@ -781,6 +812,7 @@ class SopLibrary:
         version: Optional[int] = None,
         title: Optional[str] = None,
         metadata: Optional[dict] = None,
+        chain_pin: Optional[dict] = None,
         **work_kwargs,
     ) -> dict:
         """File one execution of one ASOP version as a TREE (ASOP.md §5.1).
@@ -802,6 +834,11 @@ class SopLibrary:
 
         Every refusal fires before anything is filed, so a refused run leaves
         the queue byte-identical.
+
+        `chain_pin` is `{chain, manifest}` when the run belongs to a pinned
+        chain (v3.6 §3.10). The caller — the HTTP route — has already resolved
+        `version` from that manifest (`agentco.chains.pin_for_run`); this only
+        records it, under a key no filer can set.
         """
         if "verify" in work_kwargs:
             raise SopError(
@@ -826,6 +863,8 @@ class SopLibrary:
             "inputs": supplied,
             "bindings": bound,
         }
+        if chain_pin is not None:
+            parent_metadata[CHAIN_KEY] = dict(chain_pin)
         parent_metadata[PLAN_KEY] = {
             "title": asop.title,
             **{k: getattr(asop, k) for k in ASOP_TEXT_FIELDS if getattr(asop, k)},
@@ -864,6 +903,7 @@ class SopLibrary:
             "version": asop.version,
             "inputs": supplied,
             "bindings": bound,
+            "chain": dict(chain_pin) if chain_pin is not None else None,
             "steps": self._file(plan, queue, parent.id),
         }
 
@@ -1173,6 +1213,10 @@ class SopLibrary:
             "bindings": record.get("bindings") or {},
             "drifted": bool(active and active.version != ref.get("version")),
             "activeVersion": active.version if active else None,
+            # `{chain, manifest}` for a run filed in a pinned chain, else None.
+            # In a chain, `drifted` compares against the ACTIVE version, which
+            # the chain deliberately does not follow — the manifest is the pin.
+            "chain": (parent.metadata or {}).get(CHAIN_KEY),
             "steps": self._step_views(parent.id, index),
         }
 
