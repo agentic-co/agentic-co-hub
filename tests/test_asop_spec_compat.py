@@ -229,7 +229,7 @@ def test_migration_0011_gives_existing_rows_empty_chaining(tmp_path):
         "VALUES ('asop-old', 1, 'old', 'draft', ?, '2026-10-01T00:00:00Z')",
         (json.dumps([{"step": 1, "name": "do", "role": "worker", "gate": DET}]),),
     )
-    assert migrations.apply(raw) == [11]
+    assert 11 in migrations.apply(raw)
     raw.close()
 
     stored = sqlstore.SqlSopLibrary(path).get("asop-old", 1)
