@@ -112,6 +112,15 @@ by the access layer inside a single hub, and it was measured rather than
 assumed. Reach for federation when a team should own its own plane, not when
 you are worried about load.
 
+What exists today is one direction: a digest goes up, nothing comes down. The
+accepted next shape is a graph — a person's own hub connected to their
+company's hub and to two clients' hubs at once — where each connection
+declares what it carries (work down, answers and notices up, procedures by
+subscription), with a clearance per data owner that can only narrow from hop
+to hop. The hub becomes a board that runtimes pick work from, rather than a
+scheduler that hands it out. Designed, not built —
+[`decisions/0007-hub-network-graph-and-channels.md`](decisions/0007-hub-network-graph-and-channels.md).
+
 ## What success actually looks like
 
 Not a request rate. The adoption gate is **two publishers other than the

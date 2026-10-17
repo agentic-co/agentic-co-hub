@@ -103,6 +103,17 @@ A queue with a **fenced lease protocol**: compare-and-swap claim plus a fencing 
 a worker whose lease expired cannot report results over the work that replaced it. One
 uniqueness rule on the ingest path, so no source can invent its own idempotency mechanism.
 
+### Hub network *(planned)*
+
+Today a hub has at most one upstream and sends it a digest, nothing more
+([0005](decisions/0005-federated-hub-topology.md)). The accepted design is a graph:
+any number of connections per hub, each opening a declared subset of four
+channels — work, answers, memory, notices — under a signed per-owner clearance
+that only narrows per hop and gates before routing. Work is pulled, not
+assigned: the hub is a stigmergic board of leases and pointers, runtimes
+self-select, may decline with a reason, and unclaimed work escalates to a human.
+Full record: [`decisions/0007-hub-network-graph-and-channels.md`](decisions/0007-hub-network-graph-and-channels.md).
+
 ## Storage
 
 Three backends, one set of interfaces. JSONL under an advisory file lock is the default;
