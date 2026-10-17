@@ -255,7 +255,7 @@ def create_app(
     # learns about new procedures and new work without asking the library or
     # the queue for everything they hold — which is what both of them do when
     # asked, and what a fleet of a hundred pollers cannot afford.
-    queue.announce = library.announce = events.announcer(conn)
+    queue.announce = library.announce = memory.announce = events.announcer(conn)
     # Who answers for each actor, read from the SAME key table that decides
     # whether they may sign at all. Passed as a callable so an offboarding has
     # one answer rather than two: the table is edited while this process runs,
@@ -504,6 +504,7 @@ def create_app(
                 since=params.get("since"),
                 limit=int(params.get("limit") or events.DEFAULT_LIMIT),
                 kind=params.get("kind"),
+                viewer=walls.effective(actor),
             )
 
         return await _handle(request, "events", work)
@@ -1130,6 +1131,27 @@ def create_app(
             return {"state": "accepted", "items": [_memory_view(i) for i in items], "count": len(items)}
 
         return await _handle(request, "memory_list", work)
+
+    @app.get("/memory/search")
+    async def get_memory_search(request: Request) -> JSONResponse:
+        """`?q=words` over the items you are cleared for — the wall first, then the match."""
+
+        def work(actor: str, payload: dict) -> dict:
+            items = memory.search(walls.effective(actor), request.query_params.get("q") or "")
+            return {"state": "accepted", "items": [_memory_view(i) for i in items], "count": len(items)}
+
+        return await _handle(request, "memory_search", work)
+
+    @app.get("/memory/clearance")
+    async def get_memory_clearance(request: Request) -> JSONResponse:
+        """Your effective clearance here: what a harness partitions its sessions by
+        (ADR 0006 §2: one partition and one session per owner)."""
+
+        def work(actor: str, payload: dict) -> dict:
+            return {"state": "accepted", "clearance": walls.effective(actor).as_dict(),
+                    "levels": list(walls.levels)}
+
+        return await _handle(request, "memory_clearance", work)
 
     @app.get("/memory/{item_id}")
     async def get_memory_item(item_id: str, request: Request) -> JSONResponse:

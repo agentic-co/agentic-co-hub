@@ -49,12 +49,49 @@ The effective clearance is their per-owner minimum. **Unstated is not cleared**:
 with no clearance reads only `public`. Levels are `AGENTCO_MEMORY_LEVELS`, low to high, default
 `all,internal,confidential,private` — a choice, not a finding; the ADR gives no order.
 
-This slice applies clearance to the memory routes above. The wall across every other read path
-(the change feed, digests, MCP, export) is the next slice; until it lands, memory writes emit
-**no** change-feed events, so nothing about an item reaches those paths.
+## Built: the wall on every read path (M2)
+
+Clearance is applied **in code, before** anything ranks, searches, filters or counts. Every path
+below is tried by an under-cleared actor in `tests/test_memory_wall.py`.
+
+| Read path | How it is walled |
+|---|---|
+| `GET /memory`, `GET /memory/{id}`, `/history` | the store's read methods take the effective clearance; counts exclude what it does not open |
+| `GET /memory/search?q=` | the candidate set is the cleared list; match, order and count never see a walled item |
+| `/revise`, `/pin`, `/retire` on an item you cannot see | the same `memory_unknown` 404, same body, as an id that does not exist |
+| `GET /events` (HTTP) and the MCP `events` tool | `MemoryChanged` events carry the label, never content; `events.read` drops any the reader's clearance does not open, from the page and the count |
+| internal feed readers: write-back, conformance, anything calling `events.read` with no viewer | no viewer → no memory events at all |
+| the divergence digest | built from snapshots; it never reads memory |
+| the pulse | its published event count excludes memory events |
+| hub level | the hub's clearance narrows every actor's: lowering it hides items already stored |
+
+`GET /memory/clearance` returns the caller's effective clearance — what a harness partitions by.
+
+**Connector requirement (ADR 0006 §2).** An agent cleared for two owners can carry one owner's
+content into the other's work through its own memory, and the hub cannot see that. A harness
+cleared for more than one owner must run **one partition and one session per owner**, and open
+each session only with the items that owner's clearance returns. This is the harness's to enforce.
+
+### Known limits — open, documented, not claimed closed
+
+The ADR walls **content**. These leak metadata, timing or existence and stay open; each one that a
+test can observe has a test pinning the current behaviour, so closing it flips a test.
+
+1. **Feed sequence gaps.** A reader does not see a walled event, but the `seq` numbers it sees
+   skip over it and `nextCursor` moves past it: it learns that something it cannot read happened.
+   (`test_known_limit_a_feed_sequence_gap_…`)
+2. **Per-verb call metrics.** `/metrics` reports latency and counts per verb, `memory_create`
+   included, to any authenticated reader. (`test_known_limit_metrics_…`)
+3. **Metadata to the cleared.** A reader cleared for a label sees who wrote each version
+   (`history`), the authority and the version numbers.
+4. **Timing.** Response time is not equalised between a walled item and a missing one, and a write
+   to a label changes nothing a reader can time today but is not designed against.
+5. **Pulse liveness.** The pulse's per-actor "last seen" includes memory writes: that an actor was
+   active, not what it wrote.
+6. **Agent memory.** Whatever a cleared agent's harness does with an item after it is read.
 
 ## Not built yet
 
-The wall on every read path and its known limits (M2); the usefulness and decay engine (M3);
+The usefulness and decay engine (M3);
 the residuals pipeline (M4); MCP tools, CLI, capture and the lesson → ASOP hand-off (M5); the
 memory channel between hubs (ADR 0007).

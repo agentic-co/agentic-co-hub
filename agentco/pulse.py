@@ -249,8 +249,11 @@ def check_plane(conn: sqlite3.Connection, *, now: datetime) -> tuple[dict, list[
         ))
 
     row = conn.execute(
-        "SELECT COUNT(*) AS n, MAX(occurred_at) AS last FROM events WHERE kind != ?",
-        (EVENT_KIND,),
+        # Walled kinds are not counted: this count is published on the feed in
+        # the pulse's own event, and a count is a leak (docs/memory.md).
+        "SELECT COUNT(*) AS n, MAX(occurred_at) AS last FROM events "
+        "WHERE kind != ? AND kind != ?",
+        (EVENT_KIND, "MemoryChanged"),
     ).fetchone()
     last = _parse(row["last"])
     facts = {
