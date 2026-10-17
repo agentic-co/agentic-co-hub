@@ -325,6 +325,11 @@ def read_record(line: str) -> ASOP:
 # the store
 # --------------------------------------------------------------------------- #
 
+# Where a chain run's pin is written (`agentco/chains.py`). Reserved in
+# `agentco/work.py` for the reason `sop_ref` is: a caller who could set it
+# could claim a run was filed under a manifest it never resolved from.
+CHAIN_KEY = "sop_chain"
+
 
 def _version_payload(asop) -> dict:
     """What a subscriber needs to decide whether to fetch the version itself.
@@ -807,6 +812,7 @@ class SopLibrary:
         version: Optional[int] = None,
         title: Optional[str] = None,
         metadata: Optional[dict] = None,
+        chain_pin: Optional[dict] = None,
         **work_kwargs,
     ) -> dict:
         """File one execution of one ASOP version as a TREE (ASOP.md §5.1).
@@ -828,6 +834,11 @@ class SopLibrary:
 
         Every refusal fires before anything is filed, so a refused run leaves
         the queue byte-identical.
+
+        `chain_pin` is `{chain, manifest}` when the run belongs to a pinned
+        chain (v3.6 §3.10). The caller — the HTTP route — has already resolved
+        `version` from that manifest (`agentco.chains.pin_for_run`); this only
+        records it, under a key no filer can set.
         """
         if "verify" in work_kwargs:
             raise SopError(
@@ -852,6 +863,8 @@ class SopLibrary:
             "inputs": supplied,
             "bindings": bound,
         }
+        if chain_pin is not None:
+            parent_metadata[CHAIN_KEY] = dict(chain_pin)
         parent_metadata[PLAN_KEY] = {
             "title": asop.title,
             **{k: getattr(asop, k) for k in ASOP_TEXT_FIELDS if getattr(asop, k)},
@@ -890,6 +903,7 @@ class SopLibrary:
             "version": asop.version,
             "inputs": supplied,
             "bindings": bound,
+            "chain": dict(chain_pin) if chain_pin is not None else None,
             "steps": self._file(plan, queue, parent.id),
         }
 
@@ -1199,6 +1213,10 @@ class SopLibrary:
             "bindings": record.get("bindings") or {},
             "drifted": bool(active and active.version != ref.get("version")),
             "activeVersion": active.version if active else None,
+            # `{chain, manifest}` for a run filed in a pinned chain, else None.
+            # In a chain, `drifted` compares against the ACTIVE version, which
+            # the chain deliberately does not follow — the manifest is the pin.
+            "chain": (parent.metadata or {}).get(CHAIN_KEY),
             "steps": self._step_views(parent.id, index),
         }
 
