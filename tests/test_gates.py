@@ -203,6 +203,10 @@ def test_a_stored_gate_is_normalised(queue):
         rubric=None,
         judge_route=None,
         schema_version=1,
+        # Fields a later contract added (0.6.0: `default`, `cannot_evaluate_exit`,
+        # `min_cases`) are present and None too. Read from the installed
+        # contract, since the plane supports more than one (docs/asop.md).
+        **{f: None for f in ("default", "cannot_evaluate_exit", "min_cases") if f in gates.GATE_FIELDS},
     )
     assert queue.get(item.id).verify == item.verify
     assert item.is_gated

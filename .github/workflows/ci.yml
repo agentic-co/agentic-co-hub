@@ -51,6 +51,35 @@ jobs:
       # workspace member of this repo. It now lives in github.com/mabidoli/asop
       # and is tested there, against every implementation rather than this one.
 
+  contract:
+    # The plane supports every `asop-spec` in its pin (`>=0.4.0,<1`), and the
+    # job above only ever tests the LOCKED one. Before this job the plane
+    # stopped importing on 0.5.0 — the SQL column guard fired — and nothing
+    # here could have said so, because nothing here installed 0.5.0.
+    #
+    # The floor and the newest. 0.6.0 is built from the spec's source at a
+    # pinned commit until it is on PyPI; replace that line with
+    # `asop-spec==0.6.0` the day it is. One Python: this is a contract
+    # question, and the matrix above answers the language one.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        contract:
+          - "asop-spec==0.4.0"
+          - "asop-spec @ git+https://github.com/mabidoli/asop@7c32c77acc190f7f99b4ed870bc328431232d07d"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --extra dev --extra server --extra mcp --python 3.12
+      - run: uv pip install --python .venv/bin/python "${{ matrix.contract }}"
+      - name: The installed contract is the one asked for
+        run: .venv/bin/python -c "import importlib.metadata as m; print('asop-spec', m.version('asop-spec'))"
+      - run: uv run --no-sync pytest -q
+
   postgres:
     # The Postgres backend, as a GATE rather than as something a developer may
     # remember to run. `conftest` adds the `postgres` fixture parameter only

@@ -50,7 +50,7 @@ import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
@@ -88,6 +88,14 @@ from asop.sop import (
     validate_asop,
     validate_step,
 )
+
+# The record's chaining fields (v3.5: §3.7; v3.6: §3.8, §3.9), as the INSTALLED
+# contract declares them. asop-spec 0.4.0 has no `asop.chain` and therefore no
+# chaining fields; the plane supports it, so this is detected, not required.
+try:
+    from asop.chain import CHAIN_FIELDS
+except ImportError:  # asop-spec 0.4.x
+    CHAIN_FIELDS: tuple[str, ...] = ()
 
 __all__ = [
     "ASOP",
@@ -206,6 +214,11 @@ def asop_payload(asop: ASOP) -> dict:
         "constraints": [dict(c) for c in asop.constraints or []],
         "steps": [step_payload(s) for s in asop.steps],
         **({"proposals": list(asop.proposals)} if asop.proposals else {}),
+        # Carried forward like everything else. Leaving them out made `revise`
+        # write the next version WITHOUT its hand-offs, entry gates and rework
+        # bounds — a change to `purpose` silently unchaining the procedure.
+        **{k: getattr(asop, k) for k in CHAIN_FIELDS
+           if getattr(asop, k, None) not in (None, [], {})},
     }
 
 
@@ -289,6 +302,19 @@ def read_record(line: str) -> ASOP:
     """One stored line as an ASOP, whichever generation wrote it."""
     raw = json.loads(line)
     if "asop_id" in raw:
+        # `ASOP.from_json` drops keys its dataclass does not declare. A line a
+        # newer contract wrote with an entry gate or a rework bound would read
+        # back without it, and the next authoring call — which rewrites the
+        # file — would persist the loss. Refuse instead: the caller quarantines
+        # the line verbatim and `revise()` stops, as `sqlstore` does per row.
+        declared = {f.name for f in fields(ASOP)}
+        unmodelled = sorted(k for k, v in raw.items()
+                            if k not in declared and v not in (None, [], {}, ""))
+        if unmodelled:
+            raise ValueError(
+                f"ASOP {raw.get('asop_id')} v{raw.get('version')} carries "
+                f"{unmodelled}, which the installed asop-spec does not model."
+            )
         return ASOP.from_json(line)
     if "sop_id" in raw:
         return upgrade_legacy(SOP.from_json(line))
