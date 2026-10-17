@@ -100,6 +100,18 @@ deliberate setup, and deliberately not everyone.
 The floor is the point. You get value before you configure anything, which is
 the only way the tenth person joins.
 
+## Shared memory, and what it is for
+
+An agent's own recall stays its runtime's business. What the hub adds is the
+lesson one agent learned that the next one, in a different runtime and owned by
+somebody else, should not have to learn again — without it carrying one
+client's specifics into another client's work. Every item is labeled with the
+data owner it belongs to, the label is enforced by code before anything is
+retrieved, and a lesson earns its place by being *used* in work that was
+verified, not by being retrieved. A lesson that keeps proving itself ends up
+where lessons belong: inside the ASOP it improves. Designed, not built —
+[`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md).
+
 ## Federation, and what it is for
 
 A hub can also be a worker to another hub. A team runs its own, files its

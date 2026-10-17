@@ -39,8 +39,10 @@ repo depends on it like any other consumer; see
 It sits **above** agent memory and context stores — an agent's own recall is its
 harness's business (that layer is well served by projects like
 [OpenViking](https://github.com/volcengine/OpenViking)); AgentCo coordinates what
-happens **between** agents and the people who own them. Likewise it is not a personal-AI
-framework: projects like [LifeOS](https://github.com/danielmiessler/LifeOS) run *one*
+happens **between** agents and the people who own them. Lessons shared between
+agents belong to that "between" — owner-labeled, judged by use, planned and not
+built ([`docs/decisions/0006-hub-memory-design.md`](docs/decisions/0006-hub-memory-design.md)).
+Likewise it is not a personal-AI framework: projects like [LifeOS](https://github.com/danielmiessler/LifeOS) run *one*
 principal's assistant superbly — AgentCo is the layer they plug into the moment an
 organisation runs more than one.
 

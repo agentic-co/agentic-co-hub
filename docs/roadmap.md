@@ -212,6 +212,26 @@ defer reasons, escalation, and a terminal `Undeliverable` state. Capacity modell
 as **measurement** — observed and published — and throttles nothing until there is real
 data to throttle on.
 
+### Shared memory — planned, not built
+
+Accepted as a design in [`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md);
+none of it exists yet. In dependency order:
+
+- An owner-labeled memory item, stored beside the ASOP store, with one
+  authoritative hub per item.
+- Label enforcement in retrieval, before ranking, tested to fail on bypass.
+- Per-owner partition and session isolation as a connector requirement.
+- Action-trace reporting from harnesses, bound to a three-valued verified outcome.
+- Exposure clock, power-law decay with an activation floor, a pinned class with
+  calendar review; cold storage with demand-pull revival, periodic replay and
+  probation.
+- The residuals path: owner categories, never-leave list, mechanical checker,
+  blind validator, per-owner aggregate check, batch approval, reversible
+  category graduation.
+- The lesson-to-ASOP-revision hand-off through the existing improvement loop.
+- A primary-source spot-check of the research behind the design, before any
+  parameter is claimed.
+
 ### Borrowed candidates (from the 2026-08-31 OpenViking review)
 
 Three patterns from [OpenViking](https://github.com/volcengine/OpenViking) worth weighing

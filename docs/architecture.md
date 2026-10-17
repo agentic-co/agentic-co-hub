@@ -346,6 +346,17 @@ offer expires and returns.
 
 A cross-boundary handoff into the void is the failure this exists to close.
 
+### Shared memory *(planned)*
+
+Lessons and ASOPs are one memory system. Every item carries an owner label
+`(owner, level)`, has exactly one authoritative hub (others hold versioned
+replicas and propose changes upward), and is retrieved only after deterministic
+label enforcement — a gate before ranking, never a weight. Usefulness is judged
+by use against an externally verified outcome; decay is power-law on an exposure
+clock with a pinned exempt class, and never deletes. Proven lessons graduate into
+ASOP revisions. Session and episodic memory stay in the harness. Full record:
+[`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md).
+
 ## Integration surface
 
 Two encodings over **one semantic core**: plain HTTP, and MCP for harnesses that speak it.
