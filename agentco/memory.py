@@ -49,6 +49,7 @@ from agentco.clearance import PUBLIC, Clearance, not_cleared
 from agentco.errors import Refusal
 from agentco.events import now_iso
 from agentco.filelock import lock_exclusive, unlock
+from agentco import memory_engine as engine
 
 LAYERS = ("session", "episodic", "personal", "shared", "public")
 HELD_LAYERS = ("personal", "shared", "public")
@@ -243,6 +244,9 @@ class MemoryStore:
         self.hub_id = resolve_hub_id(hub_id)
         self.quarantined: list[bytes] = []
         self.announce = None
+        self.params = engine.Params.from_env()
+        self.state_path = self.path.with_suffix(self.path.suffix + ".state")
+        self.credits_path = self.path.with_suffix(self.path.suffix + ".credits")
 
     # -- storage primitives (JSONL) --------------------------------------
 
@@ -308,6 +312,56 @@ class MemoryStore:
                 out.append(entry)
         return out
 
+    def _states(self) -> dict[str, engine.State]:
+        if not self.state_path.exists():
+            return {}
+        out = {}
+        for line in self.state_path.read_text(encoding="utf-8").splitlines():
+            try:
+                state = engine.State.from_dict(json.loads(line))
+            except (ValueError, TypeError):
+                continue
+            out[state.item_id] = state
+        return out
+
+    def _put_states(self, states: Sequence[engine.State]) -> None:
+        merged = {**self._states(), **{s.item_id: s for s in states}}
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                for item_id in sorted(merged):
+                    handle.write(json.dumps(merged[item_id].to_dict(), sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.state_path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+    def _ledger(self) -> list[dict]:
+        if not self.credits_path.exists():
+            return []
+        out = []
+        for line in self.credits_path.read_text(encoding="utf-8").splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
+
+    def _trace_seen(self, trace_id: str) -> bool:
+        return any(row.get("trace_id") == trace_id for row in self._ledger())
+
+    def _add_credits(self, rows: Sequence[dict]) -> None:
+        with open(self.credits_path, "a", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _credits(self, item_id: str) -> list[dict]:
+        return [row for row in self._ledger() if row.get("item_id") == item_id]
+
     # -- the rules -------------------------------------------------------
 
     def _record(self, item: MemoryItem, action: str, actor: str) -> None:
@@ -372,14 +426,20 @@ class MemoryStore:
         return item
 
     def list(self, clearance: Clearance, *, layer: Optional[str] = None, kind: Optional[str] = None,
-             include_retired: bool = False) -> list[MemoryItem]:
+             include_retired: bool = False, include_cold: bool = False) -> list[MemoryItem]:
         """The cleared subset, filtered. The wall is applied FIRST — the filters
-        and any ranking a caller adds only ever see what it let through."""
+        and any ranking a caller adds only ever see what it let through.
+
+        Cold items (ADR 0006 §4) are kept and auditable but not offered by
+        default: `include_cold` is how a demand pull finds them."""
         out = []
+        cold = set() if include_cold else {i for i, st in self._states().items() if st.cold and not st.pinned}
         for item in self._all():
             if not clearance.allows(item.owner, item.level):
                 continue
             if item.status == "retired" and not include_retired:
+                continue
+            if item.item_id in cold:
                 continue
             if layer is not None and item.layer != layer:
                 continue
@@ -388,7 +448,8 @@ class MemoryStore:
             out.append(item)
         return sorted(out, key=lambda i: i.item_id)
 
-    def search(self, clearance: Clearance, query: str, *, limit: int = 50) -> list[MemoryItem]:
+    def search(self, clearance: Clearance, query: str, *, limit: int = 50,
+               include_cold: bool = False) -> list[MemoryItem]:
         """Items whose title, body or tags contain every word of `query`,
         case-insensitively, ranked by how many times they match.
 
@@ -402,7 +463,7 @@ class MemoryStore:
         if not words:
             return []
         scored = []
-        for item in self.list(clearance):
+        for item in self.list(clearance, include_cold=include_cold):
             text = " ".join([item.title, item.body, *item.tags]).lower()
             if all(w in text for w in words):
                 scored.append((-sum(text.count(w) for w in words), item.item_id, item))
@@ -411,6 +472,121 @@ class MemoryStore:
     def history(self, item_id: str, clearance: Clearance) -> list[dict]:
         self.get(item_id, clearance)
         return sorted(self._audits(item_id), key=lambda e: e["version"])
+
+    # -- usefulness and decay (ADR 0006 §4-§5, agentco/memory_engine.py) ---
+
+    def _state_for(self, item: MemoryItem, states: Mapping[str, engine.State]) -> engine.State:
+        """The item's engine state, created on first use and kept in step with
+        its pinned flag: a pinned item is never cold."""
+        state = states.get(item.item_id) or engine.initial(item.item_id, self.params, pinned=item.pinned)
+        if state.pinned != item.pinned:
+            state = engine.State.from_dict({**state.to_dict(), "pinned": item.pinned,
+                                            "cold": False if item.pinned else state.cold})
+        return state
+
+    def state(self, item_id: str, clearance: Clearance) -> dict:
+        item = self.get(item_id, clearance)
+        state = self._state_for(item, self._states())
+        return {"state": state.to_dict(), "activation": engine.activation(state, self.params),
+                "credits": self._credits(item_id), "params": self.params.describe()}
+
+    def record_trace(self, *, actor: str, clearance: Clearance, trace_id: str, outcome: str,
+                     invoked: Sequence[str], retrieved: Sequence[str] = ()) -> dict:
+        """Apply one run's trace. Idempotent on `trace_id`: a trace delivered
+        twice is credited once.
+
+        `outcome` is the plane's verdict, never the reporter's — the HTTP route
+        derives it from the work item's gate (see `app.py`). Every id must be
+        one the reporter can see; one it cannot is refused exactly like an id
+        that does not exist, and nothing is applied.
+        """
+        if outcome not in engine.OUTCOMES:
+            raise _invalid(f"outcome must be one of {list(engine.OUTCOMES)}")
+        for name, ids in (("invoked", invoked), ("retrieved", retrieved)):
+            if isinstance(ids, (str, dict)) or not isinstance(ids, (list, tuple, set, frozenset)):
+                raise _invalid(f"'{name}' is a list of memory item ids")
+        with self._locked():
+            if self._trace_seen(trace_id):
+                return {"state": "unchanged", "traceId": trace_id, "credits": []}
+            items = {}
+            for item_id in sorted(set(invoked) | set(retrieved)):
+                item = self._load(str(item_id))
+                if not self._visible(item, clearance):
+                    raise unknown_item(str(item_id))
+                if item.status == "active":
+                    items[item.item_id] = item
+            held = self._states()
+            before = {i: self._state_for(item, held) for i, item in items.items()}
+            after, credits = engine.apply_trace(
+                before, engine.Trace(trace_id, outcome, frozenset(invoked) & set(items),
+                                     frozenset(retrieved) & set(items)), self.params)
+            at = now_iso()
+            rows = [{**asdict(c), "actor": actor, "recorded_at": at} for c in credits]
+            if not rows:
+                # Still recorded, so a redelivery stays a no-op.
+                rows = [{"trace_id": trace_id, "item_id": "", "invoked": False, "outcome": outcome,
+                         "effect": "none", "actor": actor, "recorded_at": at}]
+            self._put_states(list(after.values()))
+            self._add_credits(rows)
+        return {"state": "accepted", "traceId": trace_id,
+                "credits": [r for r in rows if r["item_id"]]}
+
+    def rate(self, item_id: str, *, actor: str, human: bool, clearance: Clearance, up: bool) -> dict:
+        """The owner's rating: the strong event. Human-only."""
+        if not human:
+            raise _human_only("rate a memory item")
+        with self._locked():
+            item = self.get(item_id, clearance)
+            state = engine.rate(self._state_for(item, self._states()), up, self.params)
+            self._put_states([state])
+            self._add_credits([{"trace_id": f"rating:{now_iso()}:{actor}", "item_id": item_id,
+                                "invoked": False, "outcome": "rating",
+                                "effect": "rating-up" if up else "rating-down",
+                                "actor": actor, "recorded_at": now_iso()}])
+        return {"state": state.to_dict(), "activation": engine.activation(state, self.params)}
+
+    def revive(self, item_id: str, *, actor: str, clearance: Clearance, how: str = "demand") -> dict:
+        """Demand pull: bring one cold item back, on probation."""
+        with self._locked():
+            item = self.get(item_id, clearance)
+            state = self._state_for(item, self._states())
+            was_cold = state.cold
+            state = engine.revive(state, self.params)
+            if was_cold:
+                self._put_states([state])
+                self._add_credits([{"trace_id": f"revive:{how}:{now_iso()}", "item_id": item_id,
+                                    "invoked": False, "outcome": "revival", "effect": f"revived-{how}",
+                                    "actor": actor, "recorded_at": now_iso()}])
+        return {"revived": was_cold, "state": state.to_dict(),
+                "activation": engine.activation(state, self.params)}
+
+    def replay(self, *, actor: str, human: bool, clearance: Clearance) -> dict:
+        """Periodic replay: revive the coldest cold items this caller can see,
+        `replay_batch` of them, on probation. Human-only until it runs on the
+        pulse cadence."""
+        if not human:
+            raise _human_only("run a memory replay pass")
+        visible = {i.item_id: i for i in self.list(clearance, include_cold=True)}
+        held = self._states()
+        states = [self._state_for(item, held) for item in visible.values()]
+        chosen = engine.replay_candidates(states, self.params)
+        for item_id in chosen:
+            self.revive(item_id, actor=actor, clearance=clearance, how="replay")
+        return {"revived": chosen}
+
+    def reconsolidated(self, item_id: str, *, actor: str, clearance: Clearance) -> dict:
+        """A cleared reader confirms a revived or down-rated item still stands."""
+        with self._locked():
+            item = self.get(item_id, clearance)
+            state = engine.reconsolidated(self._state_for(item, self._states()))
+            self._put_states([state])
+        return {"state": state.to_dict()}
+
+    def reviews_due(self, clearance: Clearance, today: date) -> list[MemoryItem]:
+        """Pinned items whose calendar review date has come. Calendar, not
+        exposure: use is the wrong signal for this class (§5)."""
+        return [i for i in self.list(clearance) if i.pinned and i.review_by
+                and date.fromisoformat(i.review_by) <= today]
 
     def _authoritative(self, item_id: str, clearance: Clearance) -> MemoryItem:
         item = self._load(item_id)
@@ -453,6 +629,10 @@ class MemoryStore:
             for key, value in clean.items():
                 setattr(item, key, value)
             self._record(item, "revise", actor)
+            # A revision IS the re-check a revived or down-rated item waits for.
+            state = self._states().get(item_id)
+            if state is not None and state.reconsolidate:
+                self._put_states([engine.reconsolidated(state)])
         return item
 
     def set_pinned(self, item_id: str, *, actor: str, human: bool, clearance: Clearance,
@@ -569,6 +749,7 @@ class SqlMemoryStore(MemoryStore):
         self.hub_id = resolve_hub_id(hub_id)
         self.quarantined = []
         self.announce = None
+        self.params = engine.Params.from_env()
         self._in_tx = False
 
     @contextmanager
@@ -622,6 +803,39 @@ class SqlMemoryStore(MemoryStore):
             "WHERE item_id = ? ORDER BY version", (item_id,))
         return [{"item_id": r["item_id"], "version": r["version"], "action": r["action"],
                  "actor": r["actor"], "at": r["at"], "record": json.loads(r["record"])} for r in rows]
+
+
+    def _states(self) -> dict[str, engine.State]:
+        rows = self._query("SELECT item_id, state FROM memory_state")
+        return {r["item_id"]: engine.State.from_dict(json.loads(r["state"])) for r in rows}
+
+    def _put_states(self, states: Sequence[engine.State]) -> None:
+        for state in states:
+            self._conn().execute(
+                "INSERT INTO memory_state (item_id, state) VALUES (?, ?) "
+                "ON CONFLICT (item_id) DO UPDATE SET state = excluded.state",
+                (state.item_id, json.dumps(state.to_dict(), sort_keys=True)),
+            )
+
+    def _trace_seen(self, trace_id: str) -> bool:
+        return bool(self._query("SELECT 1 FROM memory_credits WHERE trace_id = ? LIMIT 1", (trace_id,)))
+
+    def _add_credits(self, rows: Sequence[dict]) -> None:
+        for row in rows:
+            self._conn().execute(
+                "INSERT INTO memory_credits (trace_id, item_id, invoked, outcome, effect, actor, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (row["trace_id"], row["item_id"], 1 if row["invoked"] else 0, row["outcome"],
+                 row["effect"], row["actor"], row["recorded_at"]),
+            )
+
+    def _credits(self, item_id: str) -> list[dict]:
+        rows = self._query(
+            "SELECT trace_id, item_id, invoked, outcome, effect, actor, recorded_at FROM memory_credits "
+            "WHERE item_id = ? ORDER BY recorded_at, trace_id", (item_id,))
+        return [{"trace_id": r["trace_id"], "item_id": r["item_id"], "invoked": bool(r["invoked"]),
+                 "outcome": r["outcome"], "effect": r["effect"], "actor": r["actor"],
+                 "recorded_at": r["recorded_at"]} for r in rows]
 
 
 def open_memory_store(memory_store: Optional[str] = None, *, db: Optional[str] = None,
