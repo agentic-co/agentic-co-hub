@@ -221,11 +221,11 @@ wheels = [
 
 [[package]]
 name = "asop-spec"
-version = "0.5.0"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/91/1c/bfdbe2e15fcb0d4d28ae13b14fb2167404e2c28fc1baee0500f85a189aee/asop_spec-0.5.0.tar.gz", hash = "sha256:5b883f919d705b057fa9cfcb1dcf04ab4d409537635b73939db3e7b89f17d446", size = 154959, upload-time = "2026-10-11T01:07:31.134Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/97/9ed02482edd30898434494a36b4134f6ee4b06ca54addaf698597d8dd811/asop_spec-0.6.0.tar.gz", hash = "sha256:5bafc6cf8a932d008bd2343668ae393127688d7197de195fd1326bdbdff44a99", size = 214963, upload-time = "2026-10-17T08:30:06.546Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/ff/39ff6ae05ee80da9e44a294303dc38ed2081932bf79ccce3aa910e70bc2f/asop_spec-0.5.0-py3-none-any.whl", hash = "sha256:0de6300042928a31b0e7206d58408ba0c399fbfde4368dbf27e1435b3474f665", size = 112703, upload-time = "2026-10-11T01:07:29.653Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/01/bdd1b077f897e9a4bee55b7b4c1426b0a278ec3b83d6598f0b467c0c6041/asop_spec-0.6.0-py3-none-any.whl", hash = "sha256:b093bbf450a63857c71fb16e4b355f1694ec9246d831d07f8fb7becb3ce39d17", size = 151987, upload-time = "2026-10-17T08:30:04.896Z" },
 ]
 
 [[package]]
@@ -1569,14 +1569,14 @@ wheels = [
 
 [[package]]
 name = "psycopg-pool"
-version = "3.3.2"
+version = "3.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/7f/1e54512e817442017efa6f7b4c663bc769abd3ff2b62adb910190fc4731d/psycopg_pool-3.3.2.tar.gz", hash = "sha256:0c70903c7f50cd7173ef0f6364bb7c9271fa3810f5746e058449a77afe579f49", size = 31912, upload-time = "2026-09-18T13:22:59.127Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/74/5e/c0664b968b102ff68b811d999c728546c48d5c1eec03e3bbaf88c0cb4472/psycopg_pool-3.3.3.tar.gz", hash = "sha256:df87b5d9d0ad7db37f6cdad4fa8ce113d250f5997f6db38e9a99192fb67f9e1d", size = 32006, upload-time = "2026-09-22T15:53:24.947Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/39/7dd00f3570b8847b20da54c98c9388b166967625723bc36dd01e1ab1d64f/psycopg_pool-3.3.2-py3-none-any.whl", hash = "sha256:96971f245eee54f1632d8eaae0de5bb6e9c624c1effdd42d8d6843e534f56e07", size = 40224, upload-time = "2026-09-18T13:22:53.384Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/b4/452c6607a0f479465cd8a9b0d9956919fcb150050c1f83f9f11e6b8ee8dc/psycopg_pool-3.3.3-py3-none-any.whl", hash = "sha256:9b9cd6a4fcec47a410f7e82d408540e7f77b478509e91b44c1a5457a13e5ff37", size = 40304, upload-time = "2026-09-22T15:53:23.712Z" },
 ]
 
 [[package]]

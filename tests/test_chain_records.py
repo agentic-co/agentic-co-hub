@@ -208,7 +208,7 @@ def test_only_a_declared_human_adopts(client, chain):
     to = _second_manifest(client, chain)
     preview = get(client, "/chains/C1/impact", "kofi", f"?to={to}").json()["impact"]
     refused = post(client, "/chains/C1/adoptions", "kofi", {"to": to})
-    assert refused.status_code == 403 and refused.json()["code"] == "capability_mismatch"
+    assert refused.status_code == 403 and refused.json()["code"] == "human_required"
     assert get(client, "/chains/C1", "kofi").json()["chain"]["currentDigest"] == chain["receipt"]["digest"]
 
     adopted = post(client, "/chains/C1/adoptions", "dana", {"to": to, "reason": "extract v2 fixes the parser"})
@@ -312,7 +312,7 @@ def test_a_person_approves_a_subset_at_a_digest(client):
 @needs_v36
 def test_an_agent_cannot_approve(client):
     response = post(client, "/approvals", "kofi", {"artefact": "plan-approval", "digest": "sha256:aa"})
-    assert response.status_code == 403 and response.json()["code"] == "capability_mismatch"
+    assert response.status_code == 403 and response.json()["code"] == "human_required"
     assert get(client, "/approvals", "kofi", "?artefact=plan-approval").json()["latest"] is None
 
 
