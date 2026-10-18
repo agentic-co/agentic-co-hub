@@ -777,6 +777,40 @@ _0013: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0014 — memory usefulness and decay (ADR 0006 §4-§5, agentco/memory_engine.py).
+#
+# `memory_state` is one row per item: the engine's state as one JSON document,
+# because the engine owns its shape and a column per counter would make every
+# new parameter a migration. `memory_credits` is the credit history, append-
+# only: what each trace, rating and revival did to each item. Its key is
+# (trace_id, item_id), which is what makes a redelivered trace a no-op.
+# Nothing here is ever deleted; a cold item is a flag in its state.
+# --------------------------------------------------------------------------- #
+
+_0014: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS memory_state (
+        item_id  TEXT PRIMARY KEY,
+        state    TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memory_credits (
+        trace_id     TEXT NOT NULL,
+        item_id      TEXT NOT NULL,
+        invoked      INTEGER NOT NULL,
+        outcome      TEXT NOT NULL,
+        effect       TEXT NOT NULL,
+        actor        TEXT NOT NULL,
+        recorded_at  TEXT NOT NULL,
+        PRIMARY KEY (trace_id, item_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_memory_credits_item ON memory_credits(item_id)",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -791,6 +825,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(11, "asop-chaining-fields", _0011),
     Migration(12, "chain-manifests-adoptions-approvals", _0012),
     Migration(13, "memory-items", _0013),
+    Migration(14, "memory-usefulness-and-decay", _0014),
 )
 
 

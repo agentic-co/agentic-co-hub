@@ -171,3 +171,15 @@ def test_off_the_feed_never_carries_a_memory_event(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTCO_HUB_CLEARANCE", "acme:private")
     local = _LocalBackend(conn, None, None, "dana", str(tmp_path / "api.sqlite3"))
     assert [e for e in local.events(limit=500)["events"] if e["kind"] == "MemoryChanged"] == []
+
+
+def test_off_the_usefulness_routes_are_refused_and_nothing_is_credited(tmp_path):
+    """M3's family: traces, replay, rate, revive, reconsolidate, state, reviews."""
+    client = make(tmp_path)
+    for method, path, body in (("POST", "/memory/traces", {"workItemId": "w-1", "invoked": []}),
+                               ("POST", "/memory/replay", {}), ("GET", "/memory/reviews", None),
+                               ("GET", "/memory/mem-000000000000/state", None),
+                               ("POST", "/memory/mem-000000000000/rate", {"rating": "up"})):
+        response = call(client, method, path, body)
+        assert response.status_code == 404 and response.json()["code"] == "memory_disabled", path
+    assert not (tmp_path / "memory.jsonl.credits").exists()

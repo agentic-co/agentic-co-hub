@@ -109,8 +109,54 @@ test can observe has a test pinning the current behaviour, so closing it flips a
    active, not what it wrote.
 6. **Agent memory.** Whatever a cleared agent's harness does with an item after it is read.
 
+## Built: usefulness and decay (M3)
+
+`agentco/memory_engine.py` is pure and deterministic: no I/O, no wall clock, no randomness. The
+store persists its state (`memory_state`) and an append-only credit history (`memory_credits`,
+migration 0014; `<store>.state` / `<store>.credits` for JSONL).
+
+- **The clock is exposure.** An item ages only when a run retrieved it and did not invoke it.
+- **Credit only what was invoked, against a verified outcome.** `POST /memory/traces
+  {workItemId, invoked, retrieved}` is reported once per work item, by the actor that executed it.
+  The **plane derives the outcome** from that item's gate: done through a gate = verified success,
+  `verify_failed` = verified failure, anything ungated or self-reported failed = unverified. An
+  `outcome` in the body is ignored. Success raises strength and resets age; failure resets age, is
+  counted, and does not raise strength; unverified changes nothing.
+- **The owner's rating is the strong event**: `POST /memory/{id}/rate {rating: up|down}`, human-only.
+- **Power-law decay with an activation floor**: `activation = max(floor, strength · (1 + age/age_scale)^−d)`.
+- **Decay never deletes.** At `cold_threshold` an item goes cold: kept, auditable (`GET
+  /memory/{id}/state`), out of default retrieval (`?cold=1` shows it). It returns by **demand
+  pull** (`POST /memory/{id}/revive`) or **periodic replay** (`POST /memory/replay`, human-only
+  until it runs on the pulse), **on probation** and flagged for **reconsolidation** (cleared by a
+  revision or `POST /memory/{id}/reconsolidate`). A verified failure on probation sends it back.
+- **Pinned items** take no decay and no reinforcement; `GET /memory/reviews` lists those whose
+  calendar `review_by` has come.
+
+### Parameters — none is validated
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `decay_exponent` | 0.5 | the power law's exponent |
+| `age_scale` | 10 | exposures per unit of age |
+| `floor` | 0.05 | activation never goes below this |
+| `cold_threshold` | 0.1 | at or below this, an item goes cold |
+| `initial_strength` | 1.0 | a new item's strength |
+| `success_gain` | 0.5 | per verified success |
+| `rating_gain` / `rating_down_factor` | 2.0 / 0.5 | the owner's rating |
+| `revive_strength` | 0.5 | strength on revival |
+| `probation_successes` | 3 | verified successes that end probation |
+| `replay_batch` | 5 | items one replay pass revives |
+| `pinned_review_days` | 90 | suggested calendar review interval |
+
+**Origin: engineering defaults chosen for this implementation, from no measurement.** ADR 0006
+says no parameter is validated, and these are not. Override with `AGENTCO_MEMORY_PARAMS` (JSON)
+and record where any value you set came from. One thing the tests already show: the power law's
+tail is long. With these defaults an item at strength 1.0 goes cold after 990 unused exposures,
+and one at strength 4.0 after about 16,000. Whether that is right is a measurement, not a
+judgement this page can make.
+
 ## Not built yet
 
-The usefulness and decay engine (M3);
+Admission by surprise (a capture-time novelty check);
 the residuals pipeline (M4); MCP tools, CLI, capture and the lesson → ASOP hand-off (M5); the
 memory channel between hubs (ADR 0007).
