@@ -224,6 +224,56 @@ extending the built push-only digest of [0005](decisions/0005-federated-hub-topo
   review of delegated-authentication patterns (this is the "identity beyond
   HMAC" item above, given a shape).
 
+### A dedicated `cannot_evaluate` status — designed, not built (option B)
+
+**Today (option A, 2026-10-18):** a could-not-evaluate gate result lands `verify_failed` with
+`metadata.verify_cannot_evaluate.pending`, is not charged, and is re-run (`docs/asop.md`, "Could not
+evaluate"). **Option B** gives it its own stored work-item status, `cannot_evaluate` — the name the
+spec's §5.2 table already uses for the bead.
+
+**Why it is cleaner.** The case becomes a fact of the status rather than a flag a reader must know to
+look for: `?status=cannot_evaluate` filters it, every consumer that switches on status handles it by
+construction, and "failed" stops meaning two different things depending on a metadata key. A runtime
+or second implementation reading the plane's items would not need this plane's flag to tell a failed
+check from a check that could not run.
+
+**What it would touch** — the reason it is deferred:
+- `WorkStatus` (work.py) and `releases_blockers` (must stay DONE-only), `TERMINAL`, the verify-state
+  guard in `report_result`, `attest` (the transition out), `ready()` / `claim()` / `rerun_pending`;
+- `SqlQueue._ready_candidates` (its `status IN (...)` list) and `idx_work_status`; there are **no** SQL
+  `CHECK` constraints on `status` on SQLite or Postgres today, so no constraint migration — but every
+  backend's readers matter (below);
+- `verifiers`: `route_open_gates`, `sweep_park_clocks`, `sweep_quarantine`, `quarantine_digest`,
+  `verifier_status`;
+- the pulse: housekeeping facts, `check_stranded_steps`, `close_finished_runs`;
+- the digest and write-back texts, and the feed kinds that announce verify states;
+- `SopLibrary.outcomes_by_version` (the `cannotEvaluate` column would read the status), run and step
+  views;
+- `metrics.py` wherever it groups by status;
+- the HTTP API: `parse_terminal_status`, `GET /work?status=` (its `unknown_status` refusal lists the
+  legal set — a strict client validating against that enum sees a new value);
+- the MCP tools' descriptions and the remote relay, which pass statuses through;
+- `agentco conform` scenarios and `conformance.py`'s status expectations.
+
+**Compatibility for old clients and old binaries.** An older plane reading a row with a status value it
+cannot model **quarantines** it (work.py, "a newer writer's unknown status value") — safe, but the item
+disappears from that reader's queue. A strict client that validates `status` against today's enum
+breaks on the new value. So: readers first, writers later, and the flag kept.
+
+**Migration plan.**
+1. Release N: every reader understands `cannot_evaluate` (treats it exactly as option A treats
+   `verify_failed` + `pending`); nothing writes it. Option A's flag stays authoritative.
+2. Release N+1, behind a setting: writers land `cannot_evaluate`, and still write
+   `verify_cannot_evaluate` with `pending: true`, so a client reading only the flag keeps working.
+3. Additive data migration: `verify_failed` with `pending: true` → `cannot_evaluate` (SQL `UPDATE`
+   in a numbered migration; JSONL on the next write), with the reverse statement recorded for rollback.
+4. A later major may drop the flag's `pending` field once no supported client reads it.
+
+**Revisit condition.** When a runtime or a second implementation needs to tell "failed" from "could not
+evaluate" without reading this plane's metadata flag; when the spec's conformance suite asserts the bead
+status `cannot_evaluate`; or when a status-keyed consumer is found mishandling `verify_failed` +
+`pending` — whichever comes first.
+
 ## Later — review delivery
 
 The routing spine: named owners, shared queues, offers with claim deadlines, explicit

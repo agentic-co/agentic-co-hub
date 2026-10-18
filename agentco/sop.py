@@ -67,6 +67,7 @@ from agentco.work import (
     WorkStatus,
     pin_of,
     reject_reserved,
+    rerun_pending,
     self_verifying_gate,
 )
 from asop.gates import GATE_FIELDS
@@ -1561,7 +1562,9 @@ class SopLibrary:
         not a failure, and not the same thing as one nobody has started — and
         `verifyFailed` in particular is the single most informative number
         here, because it says the work claimed the step's own definition of
-        done and the gate disagreed.
+        done and the gate disagreed. `cannotEvaluate` is the item whose check
+        could not judge it (v3.6): held, re-run, and never part of
+        `verifyFailed`, because nothing disagreed with the work.
 
         The per-step rows are what v3 adds, and they are the reason the grain
         changed: "did the rewrite of step 2 help?" is a comparison of two
@@ -1577,6 +1580,7 @@ class SopLibrary:
                 "failed": 0,
                 "awaitingVerify": 0,
                 "verifyFailed": 0,
+                "cannotEvaluate": 0,
                 "inFlight": 0,
                 "successRate": None,
                 "steps": [
@@ -1588,6 +1592,7 @@ class SopLibrary:
                         "failed": 0,
                         "awaitingVerify": 0,
                         "verifyFailed": 0,
+                        "cannotEvaluate": 0,
                         "inFlight": 0,
                         "successRate": None,
                     }
@@ -1603,6 +1608,10 @@ class SopLibrary:
                 row["failed"] += 1
             elif item.status == WorkStatus.AWAITING_VERIFY:
                 row["awaitingVerify"] += 1
+            elif rerun_pending(item):
+                # Could not evaluate (spec v3.6 §3.3): not a failure of the
+                # step, and not counted as one — its own column, unresolved.
+                row["cannotEvaluate"] += 1
             elif item.status == WorkStatus.VERIFY_FAILED:
                 row["verifyFailed"] += 1
             else:
@@ -1633,7 +1642,8 @@ class SopLibrary:
                 # whole picture. Say how much is still unresolved, in the same
                 # row, rather than leaving the reader to add three columns.
                 scope["unresolved"] = (
-                    scope["awaitingVerify"] + scope["verifyFailed"] + scope["inFlight"]
+                    scope["awaitingVerify"] + scope["verifyFailed"] + scope["cannotEvaluate"]
+                    + scope["inFlight"]
                 )
                 del total
         return [by_version[v] for v in sorted(by_version)]

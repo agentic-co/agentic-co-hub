@@ -63,7 +63,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Optional
 
 from agentco import events, migrations, verifiers
-from agentco.work import WorkStatus, executors_of, pin_of
+from agentco.work import WorkStatus, executors_of, pin_of, rerun_pending
 
 EVENT_KIND = "PulseObserved"
 
@@ -388,6 +388,10 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
         "quarantine": {"quarantined": len(quarantine.get("quarantined", []))},
         "strandedRuns": {("closed" if apply else "wouldClose"): len(stranded)},
         "stuck": stuck["count"],
+        # Items whose check could not judge them (v3.6), offered for a re-run
+        # and not charged. Counted so a check that keeps failing to evaluate is
+        # visible: its re-runs consume nothing, so nothing else would say so.
+        "cannotEvaluate": sum(1 for i in queue.list(WorkStatus.VERIFY_FAILED) if rerun_pending(i)),
         "verifier": {"configured": status.get("configured"), "warning": status.get("warning")},
     }
     return facts, findings
