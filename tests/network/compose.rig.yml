@@ -1,0 +1,146 @@
+# The multi-hub rig: real hubs from the real image on one Docker network.
+#
+# Never started by hand and never by the main suite. `tests/network/rig.py`
+# brings it up under a unique compose project name per run, so nothing here can
+# collide with a deployment's containers (no `container_name:` on purpose) and
+# `down -v` removes exactly what this run created. Every value below that is a
+# secret or a path comes from the rig's environment; synthetic data only.
+#
+#   hub-a   the parent: memory ON, the run-ownership admin, declares hub-b as
+#           its one federated child (ADR 0005: push-only, one upstream)
+#   hub-b   a child that pushes digests to hub-a; memory OFF (the default)
+#   hub-c   holds a valid key on hub-a but is NOT a declared child; memory
+#           switched OFF explicitly
+#   chain-sqlite / chain-pg
+#           the automated live chain proof, one per durable backend
+#
+# Host ports are ephemeral on loopback ("127.0.0.1::8787"); the rig asks
+# compose which port each hub got. Addresses on the rig network are fixed, in a
+# subnet the rig picks per run: a partitioned hub rejoins at its own address.
+# Left to Docker, a hub restarted during the partition can take the absent
+# hub's address, and the absent hub's published port then forwards to it —
+# seen on the first run, where a request to hub-b's port reached hub-a.
+
+x-hub: &hub
+  image: ${RIG_IMAGE:?set by tests/network/rig.py}
+  ports:
+    - "127.0.0.1::8787"
+  security_opt:
+    - no-new-privileges:true
+  mem_limit: 512m
+
+services:
+  hub-a:
+    <<: *hub
+    networks:
+      rig:
+        ipv4_address: ${RIG_NET:?}.11
+    volumes:
+      - hub-a-state:/var/lib/agentco
+      - ${RIG_KEYS:?}/hub-a:/run/secrets/rig:ro
+    environment:
+      AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      AGENTCO_REGISTRY_OPERATOR: operator
+      AGENTCO_HUB_ID: hub-a
+      AGENTCO_HUMANS: dana
+      AGENTCO_ADMINS: dana
+      ASOP_ADMINISTRATORS: dana
+      AGENTCO_STORES: runtime-a=rt-agent
+      ASOP_FEDERATED_CHILDREN: hub-b
+      AGENTCO_MEMORY: "on"
+      AGENTCO_HUB_CLEARANCE: acme:confidential
+
+  hub-b:
+    <<: *hub
+    networks:
+      rig:
+        ipv4_address: ${RIG_NET:?}.12
+    volumes:
+      - hub-b-state:/var/lib/agentco
+      - ${RIG_KEYS:?}/hub-b:/run/secrets/rig:ro
+    environment:
+      AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      AGENTCO_HUB_ID: hub-b
+      AGENTCO_PARENT_HUB_URL: http://hub-a:8787
+      AGENTCO_PARENT_HUB_ACTOR: hub-b
+      AGENTCO_PARENT_HUB_SECRET: ${RIG_HUB_B_SECRET:?}
+      ASOP_SNAPSHOT_SCHEMES: file
+      ASOP_SNAPSHOT_FILE_ROOTS: /var/lib/agentco/artifacts
+
+  hub-c:
+    <<: *hub
+    networks:
+      rig:
+        ipv4_address: ${RIG_NET:?}.13
+    volumes:
+      - hub-c-state:/var/lib/agentco
+      - ${RIG_KEYS:?}/hub-c:/run/secrets/rig:ro
+    environment:
+      AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      AGENTCO_HUB_ID: hub-c
+      AGENTCO_PARENT_HUB_URL: http://hub-a:8787
+      AGENTCO_PARENT_HUB_ACTOR: hub-c
+      AGENTCO_PARENT_HUB_SECRET: ${RIG_HUB_C_SECRET:?}
+      AGENTCO_MEMORY: "off"
+
+  chain-sqlite:
+    <<: *hub
+    networks:
+      rig:
+        ipv4_address: ${RIG_NET:?}.14
+    volumes:
+      - chain-sqlite-state:/var/lib/agentco
+      - ${RIG_KEYS:?}/chain-sqlite:/run/secrets/rig:ro
+    environment:
+      AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      AGENTCO_REGISTRY_OPERATOR: operator
+      AGENTCO_HUMANS: dana
+      AGENTCO_DB: /var/lib/agentco/hub.sqlite3
+
+  chain-pg:
+    <<: *hub
+    networks:
+      rig:
+        ipv4_address: ${RIG_NET:?}.15
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - chain-pg-state:/var/lib/agentco
+      - ${RIG_KEYS:?}/chain-pg:/run/secrets/rig:ro
+    environment:
+      AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      AGENTCO_REGISTRY_OPERATOR: operator
+      AGENTCO_HUMANS: dana
+      AGENTCO_DB: postgresql://agentco:${RIG_PG_PASSWORD:?}@postgres:5432/agentco
+
+  postgres:
+    image: postgres:16-alpine
+    networks:
+      rig:
+        ipv4_address: ${RIG_NET:?}.16
+    volumes:
+      - pg-state:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: agentco
+      POSTGRES_PASSWORD: ${RIG_PG_PASSWORD:?}
+      POSTGRES_DB: agentco
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentco"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+networks:
+  rig:
+    ipam:
+      config:
+        - subnet: ${RIG_NET:?}.0/24
+
+volumes:
+  hub-a-state:
+  hub-b-state:
+  hub-c-state:
+  chain-sqlite-state:
+  chain-pg-state:
+  pg-state:

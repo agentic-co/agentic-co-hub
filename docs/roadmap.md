@@ -378,6 +378,21 @@ tests asserted the exact property their code lacked, by testing the half that
 held. A test that cannot fail when the mechanism it guards is removed proves
 nothing, and looks identical in the summary line to one that can.
 
+**Run across real hubs, on a schedule.** `tests/network/` brings up five hubs
+from the real image and a Postgres on one Docker network. It checks federation
+as built (ADR 0005, push-only), including a wrong secret, an undeclared child, a
+`docker network disconnect` partition with a parent restart during it, and the
+rejoin. A feed reader on the parent resumes on its cursor and sees every digest
+exactly once. The rig also covers the memory switch on and off in different
+hubs, with the wall holding over the wire and across a restart. It runs a run
+ownership transfer across a key revoked by the real `agentco revoke`, and the
+live chain proof (22 checks) on SQLite and on Postgres. It is not in the main
+suite. `.github/workflows/network.yml` runs it on a path filter (the package,
+the image, the lock, the rig), nightly, and on demand. Locally:
+`AGENTCO_RIG=1 uv run --extra dev --extra server --extra mcp pytest tests/network -v`.
+Its first run found that memory switched on in the image could not write its
+store.
+
 **Tested but not proven:** the rest. Most of the suite remains hermetic and
 single-process, and much of it is still written by the same author as the code.
 
