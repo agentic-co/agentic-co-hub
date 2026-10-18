@@ -10,6 +10,12 @@ record, proposed alongside this one) for the memory channel between hubs
 It fixes the shape the implementation has to take, and it says which parts of that
 shape are still guesses.
 
+> **Status of the points the owner reviewed (decision 8, 2026-10-18):** the
+> three-valued verified outcome (§4) and holding shared-layer records in full (§1)
+> are **confirmed**. Every parameter value is **open** (What is NOT claimed). The
+> identity mechanism and credit across hubs are open in
+> [0007](0007-hub-network-graph-and-channels.md). Each point below carries its line.
+>
 > **Implementation status (updated as slices land):** being built in slices behind
 > `AGENTCO_MEMORY`, **off by default**; what is built, and what is not, is
 > [`docs/memory.md`](../memory.md). The decision below is unchanged by it.
@@ -110,6 +116,10 @@ same class of object as an ASOP it already stores. Session and episodic memory
 stay in the harness. Source material stays where it lives, referenced by
 pointer, never copied.
 
+**Status: confirmed by the owner 2026-10-18** (decision 8, option a), as built. The hub holds shared-layer records **in full** — the same class of record
+as the ASOPs it already stores — not only pointers to them; source material is
+still referenced by pointer.
+
 ### 2. The wall, and clearance per data owner at hub and agent level
 
 Every hub connection and every registering agent declares a clearance **per
@@ -169,6 +179,7 @@ Usefulness cannot be known at write time, so it is judged by later use.
   closed-and-not-reopened work item) and takes one of three values:
   verified success, verified failure, unverified. A lesson invoked in a
   verified failure is evidence too; unverified outcomes credit nothing.
+  **Status: confirmed by the owner 2026-10-18** (decision 8, option a), as built.
 - **The owner's rating is the strong event.** An explicit rating by the owner
   outweighs any number of automatic credits.
 - **The clock is exposure, not the calendar.** An item ages when it was
@@ -208,6 +219,10 @@ competing for context as a separate item.
   choices to be measured, each labeled by origin when it is set. The *structure*
   of the wall (two layers of tolerance) is adopted from the models; no number
   is.
+  **Status: open** (owner, 2026-10-18). Every value shipped is an engineering
+  default from no measurement (`docs/memory.md`, "Parameters — none is
+  validated"). *Revisit when* real action traces from harnesses measure them —
+  each value is then set from that measurement and its origin recorded.
 - **Metadata, timing and existence leaks stay open.** The wall in §2 covers
   content. That an item exists, when it was written, and how its replicas
   change can still reveal something. This record does not close those.
