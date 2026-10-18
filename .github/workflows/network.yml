@@ -1,0 +1,79 @@
+name: Network rig
+
+# The multi-hub rig (tests/network/): five hubs from the real image and a
+# Postgres on one Docker network: federation, partition and rejoin, the memory
+# switch, run-ownership transfer and the live chain proof. It takes minutes, so
+# it is NOT part of CI's main suite (tests/network/conftest.py makes the
+# directory collect nothing unless AGENTCO_RIG=1). It runs:
+#
+#   * on a pull request or a push to main that touches what a deployed hub is
+#     made of: the package, the image, the dependency lock, or the rig itself;
+#   * nightly, so a regression that arrives some other way (a base image, a
+#     dependency resolved fresh) is caught within a day;
+#   * on demand (workflow_dispatch).
+
+on:
+  pull_request:
+    paths:
+      - "agentco/**"
+      - "tools/docker/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "tests/network/**"
+      - ".github/workflows/network.yml"
+  push:
+    branches: [main]
+    paths:
+      - "agentco/**"
+      - "tools/docker/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "tests/network/**"
+      - ".github/workflows/network.yml"
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: network-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rig:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AGENTCO_RIG: "1"
+      # `runner.temp` is not available at job level; this path is the same on
+      # every hosted runner and only lives for the job.
+      AGENTCO_RIG_REPORT: /tmp/agentco-rig-report
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      # The host side only signs requests and drives docker; `mcp` is for the
+      # proof's remote-relay checks (D6, D8). The hubs run the image's own install.
+      - run: uv run --extra dev --extra server --extra mcp --python 3.12 pytest tests/network -v
+      - name: Chain proof evidence
+        if: always()
+        run: |
+          for f in "$AGENTCO_RIG_REPORT"/*.json; do
+            [ -e "$f" ] || { echo "no evidence written"; break; }
+            echo "== $(basename "$f")"
+            python3 -c "import json,sys; [print(('PASS' if r['pass'] else 'FAIL'), f\"[{r['check']}]\", r['name']) for r in json.load(open(sys.argv[1]))]" "$f"
+          done
+      - name: Nothing left behind
+        if: always()
+        run: |
+          left=$(docker ps -aq --filter "label=com.docker.compose.project" | wc -l)
+          docker ps -a --format '{{.Names}}'
+          test "$left" -eq 0
