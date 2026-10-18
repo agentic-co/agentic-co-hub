@@ -34,6 +34,7 @@ in exactly the place it should have, the connectors.
 | Legacy v2 records upgraded, never dropped | 🆕 | ✅ | Migration 0009 adds `asops` and copies every `sops` row forward as a one-step ASOP, leaving `sops` byte-identical; the JSONL store applies the same upgrade on read. A v2 record had no gate, so the upgrade fails CLOSED to a `human` gate |
 | ASOP contract package (`asop-spec`, `asop-spec`) | 🆕 | ✅ | The gate schema, `Refusal`, and the SOP record shape split out of `agentco/gates.py` \| `errors.py` \| `sop.py` into a standalone package a harness can depend on without depending on this plane; `agentco/{gates,errors,sop}.py` are now thin shims over it. Merges this plane's park-clock gate fields with the AgentCo Harness's staged-check/runtime-hint fields into one normalised schema. Floor is `asop-spec>=0.4.0`: from 0.4 a judged or human attestation must carry `verdict: {passed, reason}` and a negative verdict fails the gate even at exit 0 |
 | `asop-spec` 0.4 → 0.6 compatibility (spec v3.5, v3.6) | 🆕 | ✅ | The pin is `>=0.4.0,<1` and the lock is 0.5.0. Migration 0011 adds the seven chaining columns; the store reads only what the installed contract models and quarantines what it cannot. Before this the plane did not import on 0.5.0 (the column guard fired), and `revise` on the JSONL store silently dropped every chaining field. Matrix: [`docs/asop.md`](asop.md#contract-compatibility). |
+| Request bodies: strict and lenient routes, field provenance, weekly asop-spec watch | 🆕 | ✅ | Unknown keys refused `422 unknown_field` where a dropped key can remove a safety property, reported as `ignored` (and counted in `/metrics`) everywhere else; every route declared, pinned by a test. Messages name the closest key and whether a newer released asop-spec has the field, from a bundled generated table (`tools/asop_fields.py`). A weekly job opens one issue when PyPI has a release adding fields the hub does not forward: [`docs/wire.md`](wire.md) |
 | Chain manifests, adoptions, approvals (spec v3.6 §3.7, §3.10) | 🆕 | ✅ | `agentco/chains.py`, migration 0012. A manifest's members are checked against this store's versions and digests (`GET /sops/{id}` serves `digest`); adoptions and approvals are declared-human only, signed, and the adoption impact is computed. A chain run files at its pinned version or is refused `adoption_required`. Needs asop-spec 0.6.0. Not built: the chain outcome record and step journal, which need journal ingest — see [`docs/asop.md`](asop.md#chain-manifests-adoptions-and-approvals-v36-agentcochainspy) |
 | Shared memory: item store (ADR 0006 §1, slice M1) | 🆕 | ✅ | `agentco/memory.py`, `agentco/clearance.py`, migration 0013. Owner-labeled items in held layers, one authoritative hub each, read-only replicas, required provenance, pinned class, audit, nothing deleted; JSONL/SQLite/Postgres. Clearance per data owner (hub ∧ actor) on the memory routes. The wall on every other read path, decay and residuals are later slices: [`docs/memory.md`](memory.md) |
 | Durable storage backend (SQLite) | 🆕 | ✅ | Opt-in via `AGENTCO_DB`; same interfaces, conformance-tested against the JSONL default |
@@ -224,6 +225,56 @@ extending the built push-only digest of [0005](decisions/0005-federated-hub-topo
 - Harness-to-human binding through an external identity provider, after a
   review of delegated-authentication patterns (this is the "identity beyond
   HMAC" item above, given a shape).
+
+### A dedicated `cannot_evaluate` status — designed, not built (option B)
+
+**Today (option A, 2026-10-18):** a could-not-evaluate gate result lands `verify_failed` with
+`metadata.verify_cannot_evaluate.pending`, is not charged, and is re-run (`docs/asop.md`, "Could not
+evaluate"). **Option B** gives it its own stored work-item status, `cannot_evaluate` — the name the
+spec's §5.2 table already uses for the bead.
+
+**Why it is cleaner.** The case becomes a fact of the status rather than a flag a reader must know to
+look for: `?status=cannot_evaluate` filters it, every consumer that switches on status handles it by
+construction, and "failed" stops meaning two different things depending on a metadata key. A runtime
+or second implementation reading the plane's items would not need this plane's flag to tell a failed
+check from a check that could not run.
+
+**What it would touch** — the reason it is deferred:
+- `WorkStatus` (work.py) and `releases_blockers` (must stay DONE-only), `TERMINAL`, the verify-state
+  guard in `report_result`, `attest` (the transition out), `ready()` / `claim()` / `rerun_pending`;
+- `SqlQueue._ready_candidates` (its `status IN (...)` list) and `idx_work_status`; there are **no** SQL
+  `CHECK` constraints on `status` on SQLite or Postgres today, so no constraint migration — but every
+  backend's readers matter (below);
+- `verifiers`: `route_open_gates`, `sweep_park_clocks`, `sweep_quarantine`, `quarantine_digest`,
+  `verifier_status`;
+- the pulse: housekeeping facts, `check_stranded_steps`, `close_finished_runs`;
+- the digest and write-back texts, and the feed kinds that announce verify states;
+- `SopLibrary.outcomes_by_version` (the `cannotEvaluate` column would read the status), run and step
+  views;
+- `metrics.py` wherever it groups by status;
+- the HTTP API: `parse_terminal_status`, `GET /work?status=` (its `unknown_status` refusal lists the
+  legal set — a strict client validating against that enum sees a new value);
+- the MCP tools' descriptions and the remote relay, which pass statuses through;
+- `agentco conform` scenarios and `conformance.py`'s status expectations.
+
+**Compatibility for old clients and old binaries.** An older plane reading a row with a status value it
+cannot model **quarantines** it (work.py, "a newer writer's unknown status value") — safe, but the item
+disappears from that reader's queue. A strict client that validates `status` against today's enum
+breaks on the new value. So: readers first, writers later, and the flag kept.
+
+**Migration plan.**
+1. Release N: every reader understands `cannot_evaluate` (treats it exactly as option A treats
+   `verify_failed` + `pending`); nothing writes it. Option A's flag stays authoritative.
+2. Release N+1, behind a setting: writers land `cannot_evaluate`, and still write
+   `verify_cannot_evaluate` with `pending: true`, so a client reading only the flag keeps working.
+3. Additive data migration: `verify_failed` with `pending: true` → `cannot_evaluate` (SQL `UPDATE`
+   in a numbered migration; JSONL on the next write), with the reverse statement recorded for rollback.
+4. A later major may drop the flag's `pending` field once no supported client reads it.
+
+**Revisit condition.** When a runtime or a second implementation needs to tell "failed" from "could not
+evaluate" without reading this plane's metadata flag; when the spec's conformance suite asserts the bead
+status `cannot_evaluate`; or when a status-keyed consumer is found mishandling `verify_failed` +
+`pending` — whichever comes first.
 
 ## Later — review delivery
 

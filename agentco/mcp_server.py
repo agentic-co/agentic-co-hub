@@ -297,10 +297,10 @@ class _RemoteBackend:
         return self.registry.release_scope(lease_uid, action)
 
     def snapshot(self, artifact_uri: str, purpose: str, ttl_days=None) -> dict:
-        return self.registry.snapshot(artifact_uri, purpose)
+        return self.registry.snapshot(artifact_uri, purpose, ttl_days=ttl_days)
 
     def events(self, since=None, limit=events_module.DEFAULT_LIMIT, kind=None) -> dict:
-        return self.registry.events(since=since, limit=limit)
+        return self.registry.events(since=since, limit=limit, kind=kind)
 
     def work_pull(self, agent: str, capabilities, ttl_seconds: int) -> Optional[dict]:
         pulled = self.registry.work_pull(capabilities=capabilities, ttl_seconds=ttl_seconds)
