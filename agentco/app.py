@@ -180,7 +180,7 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
         ("pinned", "review_by", "expected_version"), "the pinned class and its calendar review"),
     ("POST", "/memory/{item_id}/retire"): wire.strict(("expected_version",), "the version it was read at"),
     **{("GET", path): wire.lenient() for path in (
-        "/memory", "/memory/{item_id}", "/memory/{item_id}/history")},
+        "/memory", "/memory/search", "/memory/clearance", "/memory/{item_id}", "/memory/{item_id}/history")},
     # Reads take no body. Lenient, so a stray body never fails a read.
     **{("GET", path): wire.lenient() for path in (
         "/events", "/work", "/sops/{sop_id}/outcomes", "/runs", "/runs/{run_id}",
@@ -351,7 +351,11 @@ def create_app(
     # learns about new procedures and new work without asking the library or
     # the queue for everything they hold — which is what both of them do when
     # asked, and what a fleet of a hundred pollers cannot afford.
-    queue.announce = library.announce = memory.announce = events.announcer(conn)
+    queue.announce = library.announce = events.announcer(conn)
+    if memory is not None:
+        # Off (AGENTCO_MEMORY), there is no store, so nothing can announce a
+        # memory event: the feed never carries one.
+        memory.announce = queue.announce
     # Who answers for each actor, read from the SAME key table that decides
     # whether they may sign at all. Passed as a callable so an offboarding has
     # one answer rather than two: the table is edited while this process runs,
@@ -612,7 +616,9 @@ def create_app(
                 since=params.get("since"),
                 limit=int(params.get("limit") or events.DEFAULT_LIMIT),
                 kind=params.get("kind"),
-                viewer=walls.effective(actor),
+                # Memory off: no viewer, so no walled event is ever shown (and
+                # none exists, since no store was opened to announce one).
+                viewer=walls.effective(actor) if walls is not None else None,
             )
 
         return await _handle(request, "events", work)

@@ -153,3 +153,21 @@ def test_live_wire_both_ways(tmp_path, enabled):
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+def test_off_the_feed_never_carries_a_memory_event(tmp_path, monkeypatch):
+    """M2's walled feed kind: with the switch off there is no store to announce
+    one, so neither HTTP nor the local MCP backend can ever show it."""
+    from agentco import db, events
+    from agentco.mcp_server import _LocalBackend
+
+    client = make(tmp_path)
+    call(client, "POST", "/memory", {"label": {"owner": "acme", "level": "all"}, "layer": "shared",
+                                      "title": "t", "body": "b", "provenance": {"kind": "run", "ref": "r"}})
+    page = call(client, "GET", "/events").json()
+    assert [e for e in page["events"] if e["kind"] in events.WALLED_KINDS] == []
+    conn = db.connect(tmp_path / "api.sqlite3")
+    assert conn.execute("SELECT COUNT(*) AS n FROM events WHERE kind = 'MemoryChanged'").fetchone()["n"] == 0
+    monkeypatch.setenv("AGENTCO_HUB_CLEARANCE", "acme:private")
+    local = _LocalBackend(conn, None, None, "dana", str(tmp_path / "api.sqlite3"))
+    assert [e for e in local.events(limit=500)["events"] if e["kind"] == "MemoryChanged"] == []
