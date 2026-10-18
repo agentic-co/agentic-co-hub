@@ -42,8 +42,8 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY agentco/__init__.py agentco/__init__.py
 # `postgres` too: docker-compose.yml's `pg` profile points this same image at
-# Postgres through AGENTCO_DB, and without the driver the registry crash-loops
-# on start (`psycopg` is not installed) — found by a live run of that profile.
+# a Postgres DSN, and without the driver the registry crash-loops on start
+# (`psycopg` is not installed) — found by a live run of that profile.
 RUN pip install --no-cache-dir ".[server,mcp,postgres]"
 
 COPY agentco ./agentco
