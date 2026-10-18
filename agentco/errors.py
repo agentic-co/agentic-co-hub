@@ -20,12 +20,13 @@ a scope claim is).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from asop.errors import Refusal
 
 __all__ = [
-    "AliasedRefusal", "HUMAN_REQUIRED", "MANIFEST_UNKNOWN", "Refusal", "Unauthenticated",
-    "human_required", "manifest_unknown", "scope_too_broad",
+    "AliasedRefusal", "HUMAN_REQUIRED", "MANIFEST_UNKNOWN", "RENAMED", "Refusal", "TRANSFER_REFUSED",
+    "Unauthenticated", "human_required", "manifest_unknown", "scope_too_broad", "transfer_refused",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -65,6 +66,29 @@ class AliasedRefusal(Refusal):
 def human_required(message: str, remediation: str, http_status: int = 403) -> AliasedRefusal:
     """A non-human actor attempted a human-only verb. Formerly `capability_mismatch`."""
     return AliasedRefusal(HUMAN_REQUIRED, message, remediation, http_status, aliases=("capability_mismatch",))
+
+
+TRANSFER_REFUSED = "transfer_refused"
+
+#: Every rename this hub carries an alias for: (new code, the old code a client
+#: may have branched on). The spec's `asop.refusals.LEGACY_USES` lists the same
+#: pairs; `tests/test_refusal_codes.py` checks they agree. Readers accept the old
+#: code through v3.7 (the spec's `LEGACY_UNTIL`).
+RENAMED: tuple[tuple[str, str], ...] = (
+    (HUMAN_REQUIRED, "capability_mismatch"),
+    (MANIFEST_UNKNOWN, "manifest_member_unknown"),
+    (f"{TRANSFER_REFUSED}:administrator", "capability_mismatch"),
+    (f"{TRANSFER_REFUSED}:reason", "transfer_invalid"),
+    (f"{TRANSFER_REFUSED}:same_owner", "transfer_invalid"),
+)
+
+
+def transfer_refused(rule: str, message: str, remediation: str, *, alias: Optional[str] = None,
+                     http_status: int = 400) -> AliasedRefusal:
+    """`transfer_refused:<rule>` (spec 0.6.1 §7.2/§10): malformed, administrator, reason,
+    stale or same_owner. `alias` is the code the hub raised for the case before."""
+    return AliasedRefusal(f"{TRANSFER_REFUSED}:{rule}", message, remediation, http_status,
+                          aliases=(alias,) if alias else ())
 
 
 def manifest_unknown(message: str, remediation: str, http_status: int = 404) -> AliasedRefusal:

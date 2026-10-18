@@ -140,7 +140,8 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
 |---|---|
 | `AGENTCO_HUB_ID` | this hub's store id (default `local`); hub-filed runs are owned by it |
 | `AGENTCO_STORES` | external stores and the actors that speak for them: `runtime-a=actor-1\|actor-2,…` or JSON |
-| `AGENTCO_ADMINS` | actors who may transfer a run; each must ALSO be in `AGENTCO_HUMANS`. **New** — there was no admin set before. Unset = nobody (fails closed) |
+| `ASOP_ADMINISTRATORS` | actors who may transfer a run (spec 0.6.1 §9); each must ALSO be a declared human. Unset = nobody (fails closed) |
+| `AGENTCO_ADMINS` | **deprecated** fallback for the same, read only when `ASOP_ADMINISTRATORS` is unset (presence, not truthiness: declaring the standard name empty means nobody). Remove after one minor |
 
 - **At filing.** A run is owned by this hub, unless the filer speaks for a registered store and sends
   `ownerStore` (`POST /sops/{id}/run`); a filer who does not is refused `not_the_owner` before anything
@@ -179,8 +180,10 @@ exception, the hub is non-conforming in exactly these places: the `POST /runs/{i
 kind, and the orphan finding's remedy text. Ownership at filing, `not_the_owner`, the epoch and the
 pack reference do not depend on it.
 
-**Compatibility note (refusal codes, owner decision 9).** Human-only verbs now refuse a non-human with
-`human_required` (formerly `capability_mismatch`), and an unrecorded target manifest is
-`manifest_unknown` (formerly `manifest_member_unknown`). For one minor the payload also carries the old
-code in a deprecated `aliases` list. Details and the remaining divergence from the spec's 0.6.1 draft:
-[`docs/wire.md`](wire.md#renamed-refusal-codes-owner-decision-9-2026-10-18).
+**Compatibility note (refusal codes, owner decision 9; spec 0.6.1 §10).** `chain_adopt`, `approve` and
+`run_transfer` refuse a non-human with `human_required` (formerly `capability_mismatch`); a transfer is
+refused `transfer_refused:administrator` / `:reason` / `:same_owner` / `:malformed` (formerly
+`capability_mismatch` / `transfer_invalid`); an unrecorded target manifest is `manifest_unknown` (formerly
+`manifest_member_unknown`). Every other human-only verb keeps its code. For one minor the payload also
+carries the old code in a deprecated `aliases` list; readers should accept the old code through v3.7.
+Details: [`docs/wire.md`](wire.md#renamed-refusal-codes-owner-decision-9-2026-10-18-spec-061-10).
