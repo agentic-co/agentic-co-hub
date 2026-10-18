@@ -624,6 +624,193 @@ _0010: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0011 — the ASOP chaining fields: v3.5 (asop-spec 0.5.0) and v3.6 (0.6.0).
+#
+# v3.5 added `outcomes`, `outputs`, `handoffs`, `on_escalate` and `requires` to
+# the record (spec §3.7); v3.6 added `entry_gates` and `rework` (§3.8, §3.9).
+# Every other v3.6 addition lives INSIDE a column that already exists — hand-off
+# `preflight` and `subject_from.order_by/concurrency/approved_subset` in
+# `handoffs`, `proceed_on_default`, `cannot_evaluate_exit`, `min_cases` and
+# `human_approved.binds_digest` in the step gates inside `steps` — so these
+# seven columns are the whole schema change for both releases.
+#
+# All seven arrive together even on a plane whose installed contract is 0.5.0.
+# The column set is the TABLE's, and a table that grew a column per contract
+# upgrade would need a migration the day someone upgrades the package, which is
+# precisely the day nobody remembers one is needed. `sqlstore` reads and writes
+# only the columns the installed contract models, and quarantines a row that
+# uses one it does not.
+#
+# NOT NULL DEFAULT '[]' for the reason `steps` was in 0009: every pre-existing
+# row reads back as "no chaining", which is what it was. `on_escalate` is the
+# exception — one optional record, NULL when absent, as in the dataclass.
+# --------------------------------------------------------------------------- #
+
+_0011: tuple[str, ...] = (
+    "ALTER TABLE asops ADD COLUMN outcomes TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE asops ADD COLUMN outputs TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE asops ADD COLUMN handoffs TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE asops ADD COLUMN on_escalate TEXT",
+    'ALTER TABLE asops ADD COLUMN "requires" TEXT NOT NULL DEFAULT \'[]\'',
+    "ALTER TABLE asops ADD COLUMN entry_gates TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE asops ADD COLUMN rework TEXT NOT NULL DEFAULT '[]'",
+)
+
+
+# --------------------------------------------------------------------------- #
+# 0012 — chain manifests, adoptions and approvals (ASOP v3.6, agentco/chains.py).
+#
+# Registry tables rather than columns on `asops`, because none of the three is
+# a property of a procedure version: a manifest pins MANY versions for one
+# chain, an adoption moves a chain, an approval binds an artefact's digest.
+#
+# `chains` holds the one fact that changes — which manifest a chain runs under
+# now — so an adoption is a compare-and-set on one row (`current_digest`), and
+# `adoptions` doubles as the next ordinal for `chain_adoptions`. Everything
+# else is append-only: a manifest is identified by its digest and never
+# rewritten, an adoption is history, and an approval of an artefact never
+# replaces an earlier one (a stale build is judged against what was approved
+# WHEN, ASOP.md §5.7).
+#
+# Every key is a natural one and every insert races safely: `ON CONFLICT DO
+# NOTHING` on the digest and on the chain is the same statement on both
+# backends, and the first manifest recorded for a chain is the one it starts
+# under because the second `chains` insert does nothing.
+# --------------------------------------------------------------------------- #
+
+_0012: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS chain_manifests (
+        digest       TEXT PRIMARY KEY,
+        chain        TEXT NOT NULL,
+        doc          TEXT NOT NULL,
+        recorded_by  TEXT NOT NULL,
+        recorded_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_chain_manifests_chain ON chain_manifests(chain)",
+    """
+    CREATE TABLE IF NOT EXISTS chains (
+        chain           TEXT PRIMARY KEY,
+        start_digest    TEXT NOT NULL,
+        current_digest  TEXT NOT NULL,
+        adoptions       INTEGER NOT NULL DEFAULT 0,
+        started_at      TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS chain_adoptions (
+        chain        TEXT NOT NULL,
+        ordinal      INTEGER NOT NULL,
+        from_digest  TEXT NOT NULL,
+        to_digest    TEXT NOT NULL,
+        doc          TEXT NOT NULL,
+        adopted_by   TEXT NOT NULL,
+        adopted_at   TEXT NOT NULL,
+        PRIMARY KEY (chain, ordinal)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS approvals (
+        uid          TEXT PRIMARY KEY,
+        artefact     TEXT NOT NULL,
+        digest       TEXT NOT NULL,
+        doc          TEXT NOT NULL,
+        approved_by  TEXT NOT NULL,
+        approved_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_approvals_artefact ON approvals(artefact, approved_at)",
+)
+
+
+# --------------------------------------------------------------------------- #
+# 0013 — shared memory items (ADR 0006 §1, agentco/memory.py).
+#
+# One row per item, the CURRENT version, in `memory_items`; every write also
+# appends the whole record to `memory_versions`, which is the audit and the
+# version history at once. Nothing deletes from either table: retiring is a
+# status, decay is a later column set, and ADR 0006 says decay never deletes.
+#
+# The label is two columns rather than one string so that a clearance filter
+# is a comparison on `owner` and never a parse. `authority` is the hub that
+# owns the item; a row whose authority is not this hub is a read-only replica.
+# --------------------------------------------------------------------------- #
+
+_0013: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS memory_items (
+        item_id     TEXT PRIMARY KEY,
+        owner       TEXT NOT NULL,
+        level       TEXT NOT NULL,
+        layer       TEXT NOT NULL,
+        authority   TEXT NOT NULL,
+        version     INTEGER NOT NULL,
+        kind        TEXT NOT NULL,
+        title       TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        provenance  TEXT NOT NULL,
+        tags        TEXT NOT NULL DEFAULT '[]',
+        applies_to  TEXT,
+        pinned      INTEGER NOT NULL DEFAULT 0,
+        review_by   TEXT,
+        status      TEXT NOT NULL,
+        created_by  TEXT NOT NULL,
+        created_at  TEXT NOT NULL,
+        updated_by  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_memory_items_owner ON memory_items(owner, level)",
+    """
+    CREATE TABLE IF NOT EXISTS memory_versions (
+        item_id  TEXT NOT NULL,
+        version  INTEGER NOT NULL,
+        action   TEXT NOT NULL,
+        actor    TEXT NOT NULL,
+        at       TEXT NOT NULL,
+        record   TEXT NOT NULL,
+        PRIMARY KEY (item_id, version)
+    )
+    """,
+)
+
+
+# --------------------------------------------------------------------------- #
+# 0014 — memory usefulness and decay (ADR 0006 §4-§5, agentco/memory_engine.py).
+#
+# `memory_state` is one row per item: the engine's state as one JSON document,
+# because the engine owns its shape and a column per counter would make every
+# new parameter a migration. `memory_credits` is the credit history, append-
+# only: what each trace, rating and revival did to each item. Its key is
+# (trace_id, item_id), which is what makes a redelivered trace a no-op.
+# Nothing here is ever deleted; a cold item is a flag in its state.
+# --------------------------------------------------------------------------- #
+
+_0014: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS memory_state (
+        item_id  TEXT PRIMARY KEY,
+        state    TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memory_credits (
+        trace_id     TEXT NOT NULL,
+        item_id      TEXT NOT NULL,
+        invoked      INTEGER NOT NULL,
+        outcome      TEXT NOT NULL,
+        effect       TEXT NOT NULL,
+        actor        TEXT NOT NULL,
+        recorded_at  TEXT NOT NULL,
+        PRIMARY KEY (trace_id, item_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_memory_credits_item ON memory_credits(item_id)",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -635,6 +822,10 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(8, "work-items-insertion-order", _0008, pg_statements=_0008_pg),
     Migration(9, "asop-v3-records", _0009, backfill=_backfill_legacy_sops),
     Migration(10, "calls-daily-rollup", _0010),
+    Migration(11, "asop-chaining-fields", _0011),
+    Migration(12, "chain-manifests-adoptions-approvals", _0012),
+    Migration(13, "memory-items", _0013),
+    Migration(14, "memory-usefulness-and-decay", _0014),
 )
 
 

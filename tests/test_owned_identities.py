@@ -138,7 +138,8 @@ def test_one_persons_two_agents_cannot_execute_and_verify_the_same_work(tmp_path
     with pytest.raises(Exception) as caught:
         queue.attest(item.id,
                      {"check": "somebody reads the diff", "exit_status": 0, "environment": "local",
-                      "at": "2026-09-22T10:00:00Z", "submitted_by": "alice-claude-01"},
+                      "at": "2026-09-22T10:00:00Z", "submitted_by": "alice-claude-01",
+                      "verdict": {"passed": True, "reason": "somebody read the diff and judged it sound"}},
                      "alice-claude-01", capabilities=["verify"])
     assert "answer to 'alice'" in str(caught.value)
 
@@ -152,7 +153,8 @@ def test_somebody_elses_agent_can_verify_it(tmp_path):
 
     queue.attest(item.id,
                  {"check": "somebody reads the diff", "exit_status": 0, "environment": "local",
-                  "at": "2026-09-22T10:00:00Z", "submitted_by": "bob-claude-01"},
+                  "at": "2026-09-22T10:00:00Z", "submitted_by": "bob-claude-01",
+                      "verdict": {"passed": True, "reason": "somebody read the diff and judged it sound"}},
                  "bob-claude-01", capabilities=["verify"])
     assert queue.get(item.id).status is WorkStatus.DONE
 
@@ -164,7 +166,8 @@ def test_with_no_ownership_declared_the_old_rule_is_unchanged(tmp_path):
     item = a_reported_item(queue, "dave")
     queue.attest(item.id,
                  {"check": "somebody reads the diff", "exit_status": 0, "environment": "local",
-                  "at": "2026-09-22T10:00:00Z", "submitted_by": "carol"},
+                  "at": "2026-09-22T10:00:00Z", "submitted_by": "carol",
+                      "verdict": {"passed": True, "reason": "somebody read the diff and judged it sound"}},
                  "carol", capabilities=["verify"])
     assert queue.get(item.id).status is WorkStatus.DONE
 
@@ -182,7 +185,8 @@ def test_a_table_that_cannot_be_read_falls_back_to_the_stricter_rule(tmp_path):
     item = a_reported_item(queue, "alice-codex-01")
     queue.attest(item.id,
                  {"check": "somebody reads the diff", "exit_status": 0, "environment": "local",
-                  "at": "2026-09-22T10:00:00Z", "submitted_by": "alice-claude-01"},
+                  "at": "2026-09-22T10:00:00Z", "submitted_by": "alice-claude-01",
+                      "verdict": {"passed": True, "reason": "somebody read the diff and judged it sound"}},
                  "alice-claude-01", capabilities=["verify"])
     assert queue.get(item.id).status is WorkStatus.DONE
 

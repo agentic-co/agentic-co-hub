@@ -437,6 +437,10 @@ def _declare(queue, humans=("carol",), adjudicators=()):
     return queue
 
 
+# ASOP 0.4: a judged or human attestation carries the answerer's finding.
+_VERDICT = {"passed": True, "reason": "the answerer read the step's result and judged it done"}
+
+
 def _finish(queue, item_id, actor="alice", result="did it", verifier="dave"):
     """Take one step bead all the way to `done`, whatever gate it carries.
 
@@ -460,7 +464,8 @@ def _finish(queue, item_id, actor="alice", result="did it", verifier="dave"):
     # A parked gate is answered by whoever it names — the verifier for a human
     # gate, any declared verifier for a judged one — never by the executor.
     answerer = (item.verify or {}).get("verifier") if kind == "human" else verifier
-    queue.attest(item_id, attestation, submitted_by=answerer or verifier,
+    # ASOP 0.4: a judged or human attestation carries the answerer's finding.
+    queue.attest(item_id, {**attestation, "verdict": _VERDICT}, submitted_by=answerer or verifier,
                  capabilities=["verify"])
 
 
@@ -797,7 +802,8 @@ def test_the_attest_rider_reads_the_queues_own_declarations(library, queue, monk
                         submitted_by="alice")
 
     attestation = {"check": item.verify["check"], "exit_status": 0,
-                   "environment": "test", "at": "2026-09-04T00:00:00+00:00"}
+                   "environment": "test", "at": "2026-09-04T00:00:00+00:00",
+                   "verdict": _VERDICT}
     out = queue.attest(judged, attestation, submitted_by="bob", capabilities=["verify"],
                        adjudication={"verdict": "good", "evidence": "the step was redundant"})
     assert out is not None
@@ -885,7 +891,8 @@ def test_a_parked_or_failed_gate_holds_the_run_open(library, queue):
 
     # The verifier answers, and THAT is what closes the run.
     queue.attest(parked, {"check": HUMAN_GATE["check"], "exit_status": 0,
-                          "environment": "test", "at": "2026-09-04T00:00:00+00:00"},
+                          "environment": "test", "at": "2026-09-04T00:00:00+00:00",
+                          "verdict": _VERDICT},
                  submitted_by="carol", capabilities=["verify"])
     assert queue.get(parked).status is WorkStatus.DONE
     assert queue.get(run["runId"]).status is WorkStatus.DONE

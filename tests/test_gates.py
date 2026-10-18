@@ -50,6 +50,15 @@ def attestation(check: str = "pytest -q", exit_status: int = 0) -> dict:
     }
 
 
+def judged_attestation(check: str = "pytest -q", exit_status: int = 0) -> dict:
+    """An attestation for a judged or human gate: ASOP 0.4 requires the verdict
+    (`passed` + a nonblank `reason`) on top of what a deterministic one carries."""
+    return {
+        **attestation(check=check, exit_status=exit_status),
+        "verdict": {"passed": exit_status == 0, "reason": "the reviewer read the diff and judged the result"},
+    }
+
+
 def claim_and_finish(queue, item, agent="worker-a", **kw):
     """Claim, then report DONE — the ordinary path a worker takes."""
     claimed = queue.claim(item.id, agent)
@@ -194,6 +203,10 @@ def test_a_stored_gate_is_normalised(queue):
         rubric=None,
         judge_route=None,
         schema_version=1,
+        # Fields a later contract added (0.6.0: `default`, `cannot_evaluate_exit`,
+        # `min_cases`) are present and None too. Read from the installed
+        # contract, since the plane supports more than one (docs/asop.md).
+        **{f: None for f in ("default", "cannot_evaluate_exit", "min_cases") if f in gates.GATE_FIELDS},
     )
     assert queue.get(item.id).verify == item.verify
     assert item.is_gated
@@ -223,12 +236,12 @@ def test_neither_verify_state_releases_a_dependent_item(queue):
     ) == [upstream.id]
 
     # And once the gate says no, it is still not released.
-    queue.attest(upstream.id, attestation(check=JUDGED["check"], exit_status=1), "reviewer-b", capabilities=["verify"])
+    queue.attest(upstream.id, judged_attestation(check=JUDGED["check"], exit_status=1), "reviewer-b", capabilities=["verify"])
     assert queue.get(upstream.id).status == WorkStatus.VERIFY_FAILED
     assert downstream.id not in {i.id for i in queue.ready()}
 
     # Only the gate passing releases it.
-    queue.attest(upstream.id, attestation(check=JUDGED["check"]), "reviewer-b", capabilities=["verify"])
+    queue.attest(upstream.id, judged_attestation(check=JUDGED["check"]), "reviewer-b", capabilities=["verify"])
     assert queue.get(upstream.id).status == WorkStatus.DONE
     assert downstream.id in {i.id for i in queue.ready()}
 
@@ -298,6 +311,78 @@ def test_a_failing_attestation_lands_verify_failed_and_records_the_policy(queue)
     assert failed.status == WorkStatus.VERIFY_FAILED
     assert failed.verify_failures == 1
     assert failed.metadata["verify_retry"]["decision"] == "fix"
+
+
+# --------------------------------------------------------------------------- #
+# The verdict (asop-spec 0.4, ASOP.md §5.3)
+#
+# A judged or human gate is answered by an opinion, so the opinion has to be on
+# the record: `verdict: {passed: bool, reason: nonblank}`. The exit status
+# alone says a process returned; it does not say anybody judged anything.
+# --------------------------------------------------------------------------- #
+
+
+def _parked_judged(queue):
+    item = queue.create("ship it", verify=JUDGED)
+    claim_and_finish(queue, item, agent="worker-a")
+    return item
+
+
+@pytest.mark.parametrize("verdict", [
+    None,
+    {"passed": True},
+    {"passed": True, "reason": "   "},
+    {"passed": "yes", "reason": "looks fine"},
+    {"passed": True, "reason": "looks fine", "by": "me"},
+], ids=["absent", "no-reason", "blank-reason", "non-boolean-passed", "extra-field"])
+def test_a_judged_attestation_without_a_well_formed_verdict_is_refused(queue, verdict):
+    item = _parked_judged(queue)
+    body = attestation(check=JUDGED["check"])
+    if verdict is not None:
+        body["verdict"] = verdict
+    with pytest.raises(Refusal) as caught:
+        queue.attest(item.id, body, "reviewer-b", capabilities=["verify"])
+    assert caught.value.code == gates.ATTESTATION_INVALID
+    assert "verdict" in caught.value.message
+    assert queue.get(item.id).status == WorkStatus.AWAITING_VERIFY
+
+
+def test_a_negative_verdict_fails_the_gate_even_at_exit_zero(queue):
+    """Dies if `passed` is ignored and the exit status alone decides: a reviewer
+    who wrote down "this is wrong" would release the dependents anyway."""
+    item = _parked_judged(queue)
+    body = judged_attestation(check=JUDGED["check"])
+    body["verdict"] = {"passed": False, "reason": "the rollback was never exercised"}
+    queue.attest(item.id, body, "reviewer-b", capabilities=["verify"])
+    failed = queue.get(item.id)
+    assert failed.status == WorkStatus.VERIFY_FAILED
+    assert failed.verify_failures == 1
+
+
+def test_a_positive_verdict_cannot_override_a_nonzero_exit(queue):
+    item = _parked_judged(queue)
+    body = judged_attestation(check=JUDGED["check"], exit_status=1)
+    body["verdict"] = {"passed": True, "reason": "fine by me"}
+    queue.attest(item.id, body, "reviewer-b", capabilities=["verify"])
+    assert queue.get(item.id).status == WorkStatus.VERIFY_FAILED
+
+
+def test_the_verdict_is_kept_on_the_stored_attestation(queue):
+    item = _parked_judged(queue)
+    queue.attest(item.id, judged_attestation(check=JUDGED["check"]), "reviewer-b", capabilities=["verify"])
+    stored = queue.get(item.id)
+    assert stored.status == WorkStatus.DONE
+    assert stored.attestation["verdict"] == {
+        "passed": True, "reason": "the reviewer read the diff and judged the result",
+    }
+
+
+def test_a_deterministic_attestation_still_needs_no_verdict(queue):
+    """The verdict is a judged/human requirement. Dies if it leaks onto the
+    deterministic gate, where the executor's exit status IS the whole answer."""
+    item = queue.create("ship it", verify=DETERMINISTIC)
+    assert "verdict" not in attestation()
+    assert claim_and_finish(queue, item, attestation=attestation()).status == WorkStatus.DONE
 
 
 def test_the_body_cannot_name_the_submitter(queue):
@@ -504,18 +589,22 @@ def test_the_http_report_and_attest_verbs_ignore_a_gate_in_the_body(tmp_path):
     leased = registry.work_pull()
 
     tampered = {"kind": "deterministic", "check": "true", "max_park_seconds": 1, "on_timeout": "pass"}
-    registry.call_raw(
-        "POST",
-        f"/work/{filed['id']}/report",
-        {
-            "attempt": leased["attempt"],
-            "status": "done",
-            "verify": tampered,
-            "attestation": attestation(),
-        },
-    )
-    stored = registry.work_get(filed["id"])["item"] if hasattr(registry, "work_get") else None
-    del stored
+    # Refused outright now, not merely ignored: the report route is strict about
+    # unknown keys (agentco/wire.py), so a gate in its body never reaches it.
+    from agentco.publish import RegistryError
+
+    with pytest.raises(RegistryError) as refused:
+        registry.call_raw(
+            "POST",
+            f"/work/{filed['id']}/report",
+            {
+                "attempt": leased["attempt"],
+                "status": "done",
+                "verify": tampered,
+                "attestation": attestation(),
+            },
+        )
+    assert refused.value.status == 422 and refused.value.payload["code"] == "unknown_field"
 
     rows = registry.call_raw("GET", "/work", None)["items"]
     [item] = [i for i in rows if i["id"] == filed["id"]]

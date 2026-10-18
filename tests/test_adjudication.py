@@ -53,8 +53,10 @@ def executed(queue, agent="kofi", **fields):
 
 
 def attestation(check="a reviewer reads the diff", exit_status=0):
+    # ASOP 0.4: a judged attestation carries the verifier's finding.
     return {"check": check, "exit_status": exit_status, "environment": "reviewer laptop",
-            "at": "2026-09-02T15:00:00+00:00"}
+            "at": "2026-09-02T15:00:00+00:00",
+            "verdict": {"passed": exit_status == 0, "reason": "the reviewer read the diff and judged the result"},}
 
 
 def _declare(queue, humans=(), adjudicators=()):

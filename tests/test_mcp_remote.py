@@ -115,7 +115,56 @@ def test_a_registry_url_without_a_secret_is_refused_at_construction(monkeypatch)
     with pytest.raises(Refusal) as caught:
         create_server(actor="macbook")
     assert caught.value.code == "secret_required"
-    assert "keygen" in caught.value.remediation
+    # The remediation used to say "run keygen" — which a model then did, minting
+    # a key the registry had never seen. It must point at the operator instead.
+    assert "operator" in caught.value.remediation
+    assert "Do not run `agentco keygen`" in caught.value.remediation
+
+
+# --------------------------------------------------------------------------- #
+# whoami tests the key, not just the configuration
+# --------------------------------------------------------------------------- #
+
+
+def test_whoami_reports_auth_ok_when_the_key_is_accepted(remote):
+    who = tool(remote, "whoami")()
+    assert who["auth"]["status"] == "ok"
+    assert who["auth"]["secretFingerprint"] == auth.secret_fingerprint(KEYS["macbook"])
+    assert "access" not in who["auth"]
+
+
+def test_whoami_with_a_secret_the_registry_never_saw_says_how_to_get_access(client):
+    """The live failure: whoami looked clean while every signed call got a 401."""
+    rogue = LoopbackRegistry("macbook", client)
+    rogue.secret = "minted-on-this-machine"
+    who = tool(create_server(registry=rogue), "whoami")()
+
+    assert who["mode"] == "remote"
+    assert who["auth"]["status"] == "rejected"
+    assert who["auth"]["secretFingerprint"] == auth.secret_fingerprint("minted-on-this-machine")
+    steps = " ".join(who["auth"]["access"])
+    assert "Do NOT run `agentco keygen`" in steps
+    assert "'macbook'" in steps, "the steps must name the actor the operator should look up"
+    assert "AGENTCO_SECRET" in steps
+    assert "Restart the harness" in steps
+    assert "minted-on-this-machine" not in json.dumps(who), "whoami must never echo the secret"
+
+
+def test_whoami_for_an_actor_not_in_the_table_reads_the_same_as_a_wrong_secret(client):
+    """No identity oracle: an unknown actor and a wrong secret are indistinguishable."""
+    stranger = LoopbackRegistry("macbook", client)
+    stranger.actor = "nobody-added-me"
+    who = tool(create_server(registry=stranger), "whoami")()
+    assert who["auth"]["status"] == "rejected"
+    assert "'nobody-added-me'" in " ".join(who["auth"]["access"])
+
+
+def test_whoami_says_unreachable_rather_than_rejected_when_nothing_answers():
+    """A dead URL is a configuration problem, not a key problem; don't send them to the operator for a key."""
+    dead = Registry("macbook", "whatever", "http://127.0.0.1:9", timeout=2)
+    who = tool(create_server(registry=dead), "whoami")()
+    assert who["auth"]["status"] == "unreachable"
+    assert "AGENTCO_REGISTRY_URL" in " ".join(who["auth"]["access"])
 
 
 def test_no_registry_url_still_means_local_files(tmp_path, monkeypatch):

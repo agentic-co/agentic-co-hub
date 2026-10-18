@@ -39,7 +39,9 @@ DETERMINISTIC = {"kind": "deterministic", "check": "pytest -q", "max_park_second
 
 
 def attestation(check, exit_status=0):
-    return {"check": check, "exit_status": exit_status, "environment": "ci", "at": T0.isoformat()}
+    # ASOP 0.4: a judged attestation carries the verifier's finding.
+    return {"check": check, "exit_status": exit_status, "environment": "ci", "at": T0.isoformat(),
+            "verdict": {"passed": exit_status == 0, "reason": "the reviewer read the diff and judged the result"},}
 
 
 def failed_by_the_clock(queue):

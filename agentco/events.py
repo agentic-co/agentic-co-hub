@@ -105,7 +105,40 @@ KINDS = (
     # this can repeat for one item id. Harmless by construction: no clock starts
     # on it, unlike `WorkParked`, so a repeat cannot restart one.
     "WorkFiled",
+    # ------------------------------------------------------------------ #
+    # ASOP v3.6 chain records (agentco/chains.py). A harness running a chain
+    # needs to know when the manifest it resolves from has moved — that is an
+    # adoption, and a run filed after it must resolve from the new pin — and
+    # when an artefact it fans out over has been approved. Polling a chain or
+    # an artefact for either would be the scan these kinds exist to remove.
+    #
+    # `ChainManifestRecorded` — a manifest is stored; `starts` says whether it
+    # is the one the chain starts under (the first) or a candidate for adoption.
+    "ChainManifestRecorded",
+    # `ChainAdopted` — a person moved a chain to another manifest. In-flight
+    # runs finish under their pin; runs filed after this resolve from `to`.
+    "ChainAdopted",
+    # `ArtefactApproved` — a person approved an artefact at a digest, possibly
+    # a subset of its subjects. A fan-out waiting on `approved_subset` and a
+    # `requires: human_approved` both read this.
+    "ArtefactApproved",
+    # ------------------------------------------------------------------ #
+    # Shared memory (ADR 0006, agentco/memory.py). `MemoryChanged` — an item
+    # was created, revised, pinned, unpinned, retired or replicated. The
+    # payload is the item's id, LABEL, layer, version and action, and never its
+    # content. It is WALLED: `read` returns it only to a viewer whose clearance
+    # opens the label, and to nobody when no viewer is given — so the digest,
+    # the write-back and any internal reader of the feed never carry it.
+    "MemoryChanged",
+    # `RunTransferred` — a declared admin moved a run to another owner
+    # (agentco/ownership.py): from, to, the new epoch, the reason, and the leases
+    # it voided. The record of who did it is on the run; this is the notice.
+    "RunTransferred",
 )
+
+#: Kinds whose rows are filtered by the reader's clearance on the way out.
+#: Each carries `payload.label = {owner, level}`.
+WALLED_KINDS = frozenset({"MemoryChanged"})
 
 # Events the PLANE observes rather than an actor performing. A reserved name
 # rather than borrowing whoever happened to run the pass: attributing a
@@ -218,8 +251,19 @@ def read(
     since: Optional[str] = None,
     limit: int = DEFAULT_LIMIT,
     kind: Optional[str] = None,
+    viewer: Any = None,
 ) -> dict:
     """`GET /events?since=` — events strictly after the cursor, plus the next one.
+
+    **Walled kinds are filtered here, in the one function every reader calls**
+    (`WALLED_KINDS`). `viewer` is the reader's effective clearance
+    (`agentco/clearance.py`); an event it does not open is dropped from the
+    page and from `count`, and with no viewer every walled event is dropped.
+    The filter runs after the page is selected, so `nextCursor` still advances
+    past a dropped row — otherwise a page made entirely of rows the reader
+    cannot see would never move. That is a known limit, not an oversight: the
+    gap in `seq` tells a reader that SOMETHING it cannot see happened
+    (`docs/memory.md`, known limits).
 
     `nextCursor` is the seq of the LAST ROW RETURNED, never the highest seq in
     the table. Returning the table maximum would silently skip anything a
@@ -240,6 +284,8 @@ def read(
     args.append(bounded)
 
     rows = conn.execute(sql, args).fetchall()
+    scanned = rows
+    rows = [r for r in rows if _visible(r, viewer)]
     events = [
         {
             "seq": r["seq"],
@@ -254,12 +300,21 @@ def read(
         }
         for r in rows
     ]
-    next_seq = rows[-1]["seq"] if rows else start
+    next_seq = scanned[-1]["seq"] if scanned else start
     return {
         "events": events,
         "nextCursor": encode_cursor(next_seq),
         "count": len(events),
     }
+
+
+def _visible(row, viewer: Any) -> bool:
+    if row["kind"] not in WALLED_KINDS:
+        return True
+    if viewer is None:
+        return False
+    label = (json.loads(row["payload"]) or {}).get("label") or {}
+    return bool(viewer.allows(str(label.get("owner")), str(label.get("level"))))
 
 
 def announcer(conn) -> "Callable[[str, str, dict], None]":

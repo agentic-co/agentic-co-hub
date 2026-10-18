@@ -100,6 +100,18 @@ deliberate setup, and deliberately not everyone.
 The floor is the point. You get value before you configure anything, which is
 the only way the tenth person joins.
 
+## Shared memory, and what it is for
+
+An agent's own recall stays its runtime's business. What the hub adds is the
+lesson one agent learned that the next one, in a different runtime and owned by
+somebody else, should not have to learn again — without it carrying one
+client's specifics into another client's work. Every item is labeled with the
+data owner it belongs to, the label is enforced by code before anything is
+retrieved, and a lesson earns its place by being *used* in work that was
+verified, not by being retrieved. A lesson that keeps proving itself ends up
+where lessons belong: inside the ASOP it improves. Designed, not built —
+[`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md).
+
 ## Federation, and what it is for
 
 A hub can also be a worker to another hub. A team runs its own, files its
@@ -111,6 +123,15 @@ ownership. It is not the answer to connection volume; that question is answered
 by the access layer inside a single hub, and it was measured rather than
 assumed. Reach for federation when a team should own its own plane, not when
 you are worried about load.
+
+What exists today is one direction: a digest goes up, nothing comes down. The
+accepted next shape is a graph — a person's own hub connected to their
+company's hub and to two clients' hubs at once — where each connection
+declares what it carries (work down, answers and notices up, procedures by
+subscription), with a clearance per data owner that can only narrow from hop
+to hop. The hub becomes a board that runtimes pick work from, rather than a
+scheduler that hands it out. Designed, not built —
+[`decisions/0007-hub-network-graph-and-channels.md`](decisions/0007-hub-network-graph-and-channels.md).
 
 ## What success actually looks like
 

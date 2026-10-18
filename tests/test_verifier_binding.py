@@ -31,8 +31,10 @@ JUDGED = {"kind": "judged", "check": "a reviewer reads the diff", "max_park_seco
 
 
 def attestation():
+    # ASOP 0.4: a judged attestation carries the verifier's finding.
     return {"check": JUDGED["check"], "exit_status": 0, "environment": "reviewer laptop",
-            "at": "2026-09-02T15:00:00+00:00"}
+            "at": "2026-09-02T15:00:00+00:00",
+            "verdict": {"passed": True, "reason": "the reviewer read the diff and judged the result"}}
 
 
 def parked(queue):

@@ -128,7 +128,10 @@ _SOP_JSON_COLUMNS = frozenset({"common_mistakes", "tags", "proposals"})
 # still there if a rollback ever needs it — and the assertion below is what
 # keeps this file's description of that table true while it sits there. The
 # row codecs that used it are gone with their callers.
-ASOP_COLUMNS: tuple[str, ...] = (
+#
+# This is every column the TABLE has. The assertion is against it, so a field a
+# future contract adds still fails the import until a migration gives it one.
+ASOP_SCHEMA_COLUMNS: tuple[str, ...] = (
     "asop_id",
     "version",
     "title",
@@ -140,17 +143,43 @@ ASOP_COLUMNS: tuple[str, ...] = (
     "roles",
     "constraints",
     "steps",
+    # Chaining: v3.5 (asop-spec 0.5.0), then v3.6 (0.6.0). Migration 0011.
+    "outcomes",
+    "outputs",
+    "handoffs",
+    "on_escalate",
+    "requires",
+    "entry_gates",
+    "rework",
     "author",
     "author_kind",
     "proposals",
     "superseded_by",
     "created_at",
 )
-_ASOP_JSON_COLUMNS = frozenset({"inputs", "roles", "constraints", "steps", "proposals"})
+# The columns THIS build reads and writes: the table's, narrowed to the fields
+# the installed contract declares. The plane supports every published
+# `asop-spec` from 0.4.0 (docs/asop.md has the matrix), and an older one simply
+# does not model the newest columns. Detected from the dataclass, not from a
+# version string, so what decides is the thing `_check_columns` asserts on.
+_ASOP_DECLARED = frozenset(f.name for f in fields(ASOP))
+ASOP_COLUMNS: tuple[str, ...] = tuple(c for c in ASOP_SCHEMA_COLUMNS if c in _ASOP_DECLARED)
+# Columns the table has and this contract cannot model. A row with a value in
+# one is quarantined on read rather than read without it — see `_row_to_asop`.
+_ASOP_UNMODELLED: tuple[str, ...] = tuple(c for c in ASOP_SCHEMA_COLUMNS if c not in _ASOP_DECLARED)
+_ASOP_JSON_COLUMNS = frozenset({
+    "inputs", "roles", "constraints", "steps", "proposals",
+    "outcomes", "outputs", "handoffs", "on_escalate", "requires", "entry_gates", "rework",
+})
 # What an EMPTY value of each JSON column serialises to. `roles` is an object
 # and the rest are arrays; one shared `or []` would have written `[]` into a
-# column every reader decodes as a mapping.
-_ASOP_JSON_EMPTY = {"inputs": [], "roles": {}, "constraints": [], "steps": [], "proposals": []}
+# column every reader decodes as a mapping. `on_escalate` is the one whose empty
+# value is NULL: it is one optional record, not a list of them.
+_ASOP_JSON_EMPTY = {
+    "inputs": [], "roles": {}, "constraints": [], "steps": [], "proposals": [],
+    "outcomes": [], "outputs": [], "handoffs": [], "on_escalate": None, "requires": [],
+    "entry_gates": [], "rework": [],
+}
 
 
 def _check_columns(dataclass_type, columns: Sequence[str]) -> None:
@@ -167,7 +196,7 @@ def _check_columns(dataclass_type, columns: Sequence[str]) -> None:
 
 _check_columns(WorkItem, WORK_COLUMNS)
 _check_columns(SOP, SOP_COLUMNS)
-_check_columns(ASOP, ASOP_COLUMNS)
+_check_columns(ASOP, ASOP_SCHEMA_COLUMNS)
 
 
 def _quote(column: str) -> str:
@@ -539,9 +568,11 @@ class SqlQueue(_SqlBacked, Queue):
         cannot change a result.
         """
         with self._read_tx() as conn:
+            # VERIFY_FAILED too: a could-not-evaluate item is offered for a
+            # re-run (`work.rerun_pending`), and `ready()` decides which are.
             rows = conn.execute(
-                "SELECT * FROM work_items WHERE status IN (?, ?)",
-                (WorkStatus.PENDING.value, WorkStatus.IN_PROGRESS.value),
+                "SELECT * FROM work_items WHERE status IN (?, ?, ?)",
+                (WorkStatus.PENDING.value, WorkStatus.IN_PROGRESS.value, WorkStatus.VERIFY_FAILED.value),
             ).fetchall()
             items = [WorkItem.from_json(json.dumps(_row_to_dict(r))) for r in rows]
 
@@ -692,20 +723,40 @@ def _asop_to_row(asop: ASOP) -> tuple:
         elif column == "steps":
             value = json.dumps([asdict(step) for step in value or []])
         elif column in _ASOP_JSON_COLUMNS:
-            value = json.dumps(value if value else _ASOP_JSON_EMPTY[column])
+            empty = _ASOP_JSON_EMPTY[column]
+            # An empty `on_escalate` is SQL NULL, not the JSON text `null`.
+            value = json.dumps(value) if value else (None if empty is None else json.dumps(empty))
         values.append(value)
     return tuple(values)
 
 
 def _row_to_asop(row: sqlite3.Row) -> ASOP:
+    """One row as an `ASOP`, or a `ValueError` the caller quarantines.
+
+    **A value in a column the installed contract does not model quarantines the
+    row.** The record schema is closed (the spec's MIGRATION.md, v3.6): a reader
+    that dropped an entry gate or a rework bound it did not understand would run
+    the procedure without it — and here would also write it back without it on
+    the next authoring call, because `_write_all` rewrites the table. Quarantine
+    carries the row through verbatim and makes `revise()` refuse, which is the
+    loud outcome rather than the lossy one.
+    """
+    keys = row.keys()
+    for column in _ASOP_UNMODELLED:
+        if column in keys and row[column] not in (None, "", "[]", "{}", "null"):
+            raise ValueError(
+                f"ASOP {row['asop_id']} v{row['version']} carries {column!r}, which "
+                f"the installed asop-spec does not model. Upgrade asop-spec to read it."
+            )
     data = dict(json.loads(row["unknown"] or "{}"))
     for column in ASOP_COLUMNS:
         value = row[column]
-        data[column] = json.loads(value) if column in _ASOP_JSON_COLUMNS else value
+        if column in _ASOP_JSON_COLUMNS:
+            value = json.loads(value) if value is not None else _ASOP_JSON_EMPTY[column]
+        data[column] = value
     data["status"] = SopStatus(data["status"])
     data["steps"] = [Step(**step) for step in data.get("steps") or []]
-    known = {f.name for f in fields(ASOP)}
-    return ASOP(**{k: v for k, v in data.items() if k in known})
+    return ASOP(**{k: v for k, v in data.items() if k in _ASOP_DECLARED})
 
 
 class SqlSopLibrary(_SqlBacked, SopLibrary):
@@ -815,10 +866,17 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
             refusal stops the NUMBER being reused. Dropping them here would
             make the refusal moot by deleting the thing it protects.
         """
-        columns = ASOP_COLUMNS + ("unknown",)
-        quoted = ", ".join(_quote(c) for c in columns)
-        placeholders = ", ".join("?" for _ in columns)
-        insert = f"INSERT INTO asops ({quoted}) VALUES ({placeholders})"
+        def insert_for(columns: Sequence[str]) -> str:
+            quoted = ", ".join(_quote(c) for c in columns)
+            placeholders = ", ".join("?" for _ in columns)
+            return f"INSERT INTO asops ({quoted}) VALUES ({placeholders})"
+
+        insert = insert_for(ASOP_COLUMNS + ("unknown",))
+        # A quarantined row goes back with EVERY column, including the ones this
+        # contract does not model: those values are usually why it was
+        # quarantined, and they are exactly what has to survive the rewrite.
+        raw_columns = ASOP_SCHEMA_COLUMNS + ("unknown",)
+        insert_raw = insert_for(raw_columns)
         clear = "DELETE FROM asops"
         with self._read_tx() as conn:
             preserved = {
@@ -833,4 +891,4 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
                     + (preserved.get((asop.asop_id, asop.version), "{}"),),
                 )
             for row in quarantined:
-                conn.execute(insert, tuple(row[c] for c in columns))
+                conn.execute(insert_raw, tuple(row[c] for c in raw_columns))

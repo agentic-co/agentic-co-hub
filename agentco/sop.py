@@ -50,7 +50,7 @@ import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
@@ -65,8 +65,12 @@ from agentco.work import (
     Queue,
     WorkItem,
     WorkStatus,
+    _iso,
+    _now,
     pin_of,
     reject_reserved,
+    rerun_pending,
+    self_verifying_gate,
 )
 from asop.gates import GATE_FIELDS
 from asop.gates import validate_gate as _validate_gate
@@ -88,6 +92,14 @@ from asop.sop import (
     validate_asop,
     validate_step,
 )
+
+# The record's chaining fields (v3.5: §3.7; v3.6: §3.8, §3.9), as the INSTALLED
+# contract declares them. asop-spec 0.4.0 has no `asop.chain` and therefore no
+# chaining fields; the plane supports it, so this is detected, not required.
+try:
+    from asop.chain import CHAIN_FIELDS
+except ImportError:  # asop-spec 0.4.x
+    CHAIN_FIELDS: tuple[str, ...] = ()
 
 __all__ = [
     "ASOP",
@@ -206,6 +218,11 @@ def asop_payload(asop: ASOP) -> dict:
         "constraints": [dict(c) for c in asop.constraints or []],
         "steps": [step_payload(s) for s in asop.steps],
         **({"proposals": list(asop.proposals)} if asop.proposals else {}),
+        # Carried forward like everything else. Leaving them out made `revise`
+        # write the next version WITHOUT its hand-offs, entry gates and rework
+        # bounds — a change to `purpose` silently unchaining the procedure.
+        **{k: getattr(asop, k) for k in CHAIN_FIELDS
+           if getattr(asop, k, None) not in (None, [], {})},
     }
 
 
@@ -289,6 +306,19 @@ def read_record(line: str) -> ASOP:
     """One stored line as an ASOP, whichever generation wrote it."""
     raw = json.loads(line)
     if "asop_id" in raw:
+        # `ASOP.from_json` drops keys its dataclass does not declare. A line a
+        # newer contract wrote with an entry gate or a rework bound would read
+        # back without it, and the next authoring call — which rewrites the
+        # file — would persist the loss. Refuse instead: the caller quarantines
+        # the line verbatim and `revise()` stops, as `sqlstore` does per row.
+        declared = {f.name for f in fields(ASOP)}
+        unmodelled = sorted(k for k, v in raw.items()
+                            if k not in declared and v not in (None, [], {}, ""))
+        if unmodelled:
+            raise ValueError(
+                f"ASOP {raw.get('asop_id')} v{raw.get('version')} carries "
+                f"{unmodelled}, which the installed asop-spec does not model."
+            )
         return ASOP.from_json(line)
     if "sop_id" in raw:
         return upgrade_legacy(SOP.from_json(line))
@@ -298,6 +328,11 @@ def read_record(line: str) -> ASOP:
 # --------------------------------------------------------------------------- #
 # the store
 # --------------------------------------------------------------------------- #
+
+# Where a chain run's pin is written (`agentco/chains.py`). Reserved in
+# `agentco/work.py` for the reason `sop_ref` is: a caller who could set it
+# could claim a run was filed under a manifest it never resolved from.
+CHAIN_KEY = "sop_chain"
 
 
 def _version_payload(asop) -> dict:
@@ -781,6 +816,10 @@ class SopLibrary:
         version: Optional[int] = None,
         title: Optional[str] = None,
         metadata: Optional[dict] = None,
+        chain_pin: Optional[dict] = None,
+        blocked_by: Sequence[str] = (),
+        owner_store: Optional[str] = None,
+        filed_by: Optional[str] = None,
         **work_kwargs,
     ) -> dict:
         """File one execution of one ASOP version as a TREE (ASOP.md §5.1).
@@ -802,6 +841,22 @@ class SopLibrary:
 
         Every refusal fires before anything is filed, so a refused run leaves
         the queue byte-identical.
+
+        **`blocked_by` holds the run's ROOT steps** — every step with no
+        in-run predecessor (`after` empty), and, through a `uses` step, the
+        inner procedure's roots as well. It is not put on the parent: the
+        parent already waits on its steps, and a blocker there alone left the
+        steps pullable while the run read as blocked. A root unblocks when
+        every blocker is DONE; a blocker that fails stays a blocker
+        (`releases_blockers`), and the run view says what it is waiting on
+        (`waitingOn`). Validated before anything is filed: each id must name an
+        existing work item, once. The run cannot name itself — its ids do not
+        exist until it is filed.
+
+        `chain_pin` is `{chain, manifest}` when the run belongs to a pinned
+        chain (v3.6 §3.10). The caller — the HTTP route — has already resolved
+        `version` from that manifest (`agentco.chains.pin_for_run`); this only
+        records it, under a key no filer can set.
         """
         if "verify" in work_kwargs:
             raise SopError(
@@ -816,6 +871,8 @@ class SopLibrary:
         supplied = dict(inputs or {})
         bound = dict(bindings or {})
         plan = self._plan(asop, supplied, bound, depth=1, seen=())
+        blockers = self._run_blockers(blocked_by, queue)
+        owner = self._run_owner(owner_store, filed_by, queue)
 
         reject_reserved(metadata, work_kwargs.get("natural_key"))
         parent_metadata = dict(metadata or {})
@@ -825,7 +882,13 @@ class SopLibrary:
             "version": asop.version,
             "inputs": supplied,
             "bindings": bound,
+            **({"blocked_by": blockers} if blockers else {}),
         }
+        if chain_pin is not None:
+            parent_metadata[CHAIN_KEY] = dict(chain_pin)
+        from agentco import ownership
+
+        parent_metadata[ownership.RUN_OWNER_KEY] = ownership.initial_record(owner, filed_by, _iso(_now()))
         parent_metadata[PLAN_KEY] = {
             "title": asop.title,
             **{k: getattr(asop, k) for k in ASOP_TEXT_FIELDS if getattr(asop, k)},
@@ -864,7 +927,9 @@ class SopLibrary:
             "version": asop.version,
             "inputs": supplied,
             "bindings": bound,
-            "steps": self._file(plan, queue, parent.id),
+            "chain": dict(chain_pin) if chain_pin is not None else None,
+            "blockedBy": blockers,
+            "steps": self._file(plan, queue, parent.id, inherited=blockers),
         }
 
     def _runnable(self, asop_id: str, version: Optional[int], *, nested: bool = False) -> ASOP:
@@ -1014,6 +1079,16 @@ class SopLibrary:
                         status=409,
                     )
 
+        # A human step bound to its own gate's verifier. The queue refuses it
+        # too, but only when it reaches that step — after the parent and every
+        # earlier step are filed. Checked here, with the rest, so a refused run
+        # files nothing.
+        for step in asop.steps:
+            if step.uses is None:
+                refusal = self_verifying_gate(step.gate, bindings.get(step.role))
+                if refusal is not None:
+                    raise refusal
+
         nodes: list[dict] = []
         for step in asop.steps:
             node = {
@@ -1055,11 +1130,67 @@ class SopLibrary:
             plan["uses"] = dict(step.uses)
         return plan
 
-    def _file(self, nodes: list[dict], queue: Queue, parent_id: str) -> list[dict]:
-        """File one level of the tree, in order, resolving `after` to ids."""
+    @staticmethod
+    def _run_owner(owner_store: object, filed_by: Optional[str], queue: Queue) -> str:
+        """The store that will own the run (ASOP §7.2): this hub, unless the
+        filer speaks for a registered store and names it. Refused before
+        anything is filed."""
+        from agentco import ownership
+
+        if owner_store is None or owner_store == queue.hub_id:
+            return queue.hub_id
+        if not isinstance(owner_store, str) or owner_store not in queue.stores:
+            raise _refuse("not_the_owner", f"ownerStore {owner_store!r} is not a registered store",
+                          f"Register it ({ownership.STORES_ENV_VAR}) or omit ownerStore so this hub owns the run.",
+                          status=403)
+        if not ownership.speaks_for(queue, filed_by, owner_store):
+            raise _refuse("not_the_owner", f"{filed_by!r} does not speak for store {owner_store!r}",
+                          f"Only an actor {ownership.STORES_ENV_VAR} lists for {owner_store!r} may file a run it owns.",
+                          status=403)
+        return owner_store
+
+    @staticmethod
+    def _run_blockers(blocked_by: object, queue: Queue) -> list[str]:
+        """The run-level `blocked_by`, refused whole before anything is filed."""
+        if blocked_by is None or blocked_by == ():
+            return []
+        if isinstance(blocked_by, (str, dict)) or not isinstance(blocked_by, (list, tuple)):
+            raise _refuse("blocked_by_invalid", "blocked_by must be a list of work item ids",
+                          "Send blockedBy: [\"w-...\", ...] — the items this run's first steps wait on.")
+        ids = [b for b in blocked_by]
+        if any(not isinstance(b, str) or not b.strip() for b in ids):
+            raise _refuse("blocked_by_invalid", "blocked_by holds an empty or non-string id",
+                          "Every entry is a work item id.")
+        duplicated = sorted({b for b in ids if ids.count(b) > 1})
+        if duplicated:
+            raise _refuse("blocked_by_invalid", f"blocked_by names {duplicated} more than once",
+                          "Name each blocker once.")
+        unknown = [b for b in ids if queue.get(b) is None]
+        if unknown:
+            raise _refuse(
+                "blocked_by_invalid",
+                f"blocked_by names {unknown}, which this queue does not hold",
+                "Name items that exist. An unknown blocker can never be done, so the run's "
+                "first steps would wait forever — refused before anything is filed.",
+            )
+        return ids
+
+    def _file(self, nodes: list[dict], queue: Queue, parent_id: str,
+              inherited: Sequence[str] = ()) -> list[dict]:
+        """File one level of the tree, in order, resolving `after` to ids.
+
+        A node with no `after` is a ROOT of its level and waits on `inherited`
+        instead: the run's `blocked_by` at the top level, and, for a `uses`
+        step's inner procedure, whatever that step itself waits on — so an
+        inner procedure never starts ahead of the outer step it implements.
+        """
         by_step: dict[int, str] = {}
         filed: list[dict] = []
         for node in nodes:
+            own_blockers = (
+                [by_step[ref] for ref in node["after"] if ref in by_step]
+                if node["after"] else list(inherited)
+            )
             metadata = {
                 PARENT_KEY: parent_id,
                 REF_KEY: node["pin"],
@@ -1070,7 +1201,7 @@ class SopLibrary:
                 metadata=metadata,
                 verify=gate_payload(node["gate"]),
                 assigned_agent=node["binding"],
-                blocked_by=[by_step[ref] for ref in node["after"] if ref in by_step],
+                blocked_by=own_blockers,
                 by_plane=True,
             )
             by_step[node["step"]] = item.id
@@ -1084,7 +1215,7 @@ class SopLibrary:
             }
             if node["children"]:
                 entry["uses"] = node["uses"]
-                entry["children"] = self._file(node["children"], queue, item.id)
+                entry["children"] = self._file(node["children"], queue, item.id, inherited=own_blockers)
             filed.append(entry)
         return filed
 
@@ -1173,8 +1304,37 @@ class SopLibrary:
             "bindings": record.get("bindings") or {},
             "drifted": bool(active and active.version != ref.get("version")),
             "activeVersion": active.version if active else None,
+            # `{chain, manifest}` for a run filed in a pinned chain, else None.
+            # In a chain, `drifted` compares against the ACTIVE version, which
+            # the chain deliberately does not follow — the manifest is the pin.
+            "chain": (parent.metadata or {}).get(CHAIN_KEY),
+            # The run-level blockers and, of those, the ones not done yet with
+            # their status — so a run held by a FAILED upstream says so instead
+            # of reading as merely pending.
+            "blockedBy": list(record.get("blocked_by") or []),
+            "waitingOn": self._waiting_on(record.get("blocked_by") or [], queue),
+            # Who owns the run (ASOP §7.2), its ownership history, and the pack
+            # reference — location and digest, never content.
+            "owner": self._owner_view(parent, queue),
+            "pack": (parent.metadata or {}).get("run_pack"),
             "steps": self._step_views(parent.id, index),
         }
+
+    @staticmethod
+    def _owner_view(parent: WorkItem, queue: Queue) -> dict:
+        from agentco import ownership
+
+        return ownership.owner_record(queue, parent)
+
+    @staticmethod
+    def _waiting_on(blockers: Sequence[str], queue: Queue) -> list[dict]:
+        out = []
+        for blocker in blockers:
+            item = queue.get(blocker)
+            status = item.status.value if item is not None else "unknown"
+            if status != WorkStatus.DONE.value:
+                out.append({"itemId": blocker, "status": status})
+        return out
 
     def _step_views(self, parent_id: str, index: dict) -> list[dict]:
         out = []
@@ -1506,7 +1666,9 @@ class SopLibrary:
         not a failure, and not the same thing as one nobody has started — and
         `verifyFailed` in particular is the single most informative number
         here, because it says the work claimed the step's own definition of
-        done and the gate disagreed.
+        done and the gate disagreed. `cannotEvaluate` is the item whose check
+        could not judge it (v3.6): held, re-run, and never part of
+        `verifyFailed`, because nothing disagreed with the work.
 
         The per-step rows are what v3 adds, and they are the reason the grain
         changed: "did the rewrite of step 2 help?" is a comparison of two
@@ -1522,6 +1684,7 @@ class SopLibrary:
                 "failed": 0,
                 "awaitingVerify": 0,
                 "verifyFailed": 0,
+                "cannotEvaluate": 0,
                 "inFlight": 0,
                 "successRate": None,
                 "steps": [
@@ -1533,6 +1696,7 @@ class SopLibrary:
                         "failed": 0,
                         "awaitingVerify": 0,
                         "verifyFailed": 0,
+                        "cannotEvaluate": 0,
                         "inFlight": 0,
                         "successRate": None,
                     }
@@ -1548,6 +1712,10 @@ class SopLibrary:
                 row["failed"] += 1
             elif item.status == WorkStatus.AWAITING_VERIFY:
                 row["awaitingVerify"] += 1
+            elif rerun_pending(item):
+                # Could not evaluate (spec v3.6 §3.3): not a failure of the
+                # step, and not counted as one — its own column, unresolved.
+                row["cannotEvaluate"] += 1
             elif item.status == WorkStatus.VERIFY_FAILED:
                 row["verifyFailed"] += 1
             else:
@@ -1578,7 +1746,8 @@ class SopLibrary:
                 # whole picture. Say how much is still unresolved, in the same
                 # row, rather than leaving the reader to add three columns.
                 scope["unresolved"] = (
-                    scope["awaitingVerify"] + scope["verifyFailed"] + scope["inFlight"]
+                    scope["awaitingVerify"] + scope["verifyFailed"] + scope["cannotEvaluate"]
+                    + scope["inFlight"]
                 )
                 del total
         return [by_version[v] for v in sorted(by_version)]

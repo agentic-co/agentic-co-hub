@@ -60,10 +60,10 @@ import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from agentco import events, migrations, verifiers
-from agentco.work import WorkStatus, executors_of, pin_of
+from agentco.work import WorkStatus, executors_of, pin_of, rerun_pending
 
 EVENT_KIND = "PulseObserved"
 
@@ -249,8 +249,11 @@ def check_plane(conn: sqlite3.Connection, *, now: datetime) -> tuple[dict, list[
         ))
 
     row = conn.execute(
-        "SELECT COUNT(*) AS n, MAX(occurred_at) AS last FROM events WHERE kind != ?",
-        (EVENT_KIND,),
+        # Walled kinds are not counted: this count is published on the feed in
+        # the pulse's own event, and a count is a leak (docs/memory.md).
+        "SELECT COUNT(*) AS n, MAX(occurred_at) AS last FROM events "
+        "WHERE kind != ? AND kind != ?",
+        (EVENT_KIND, "MemoryChanged"),
     ).fetchone()
     last = _parse(row["last"])
     facts = {
@@ -260,8 +263,19 @@ def check_plane(conn: sqlite3.Connection, *, now: datetime) -> tuple[dict, list[
         "events": row["n"],
         "lastEventAt": row["last"],
         "lastEventAgeSeconds": int((now - last).total_seconds()) if last else None,
+        # Shared memory's switch (AGENTCO_MEMORY), as this process reads it.
+        "memory": _memory_state(),
     }
     return facts, findings
+
+
+def _memory_state() -> str:
+    from agentco.memory import memory_enabled
+
+    try:
+        return "enabled" if memory_enabled() else "disabled"
+    except ValueError as exc:
+        return f"misconfigured: {exc}"
 
 
 def check_keys(keys_env: Optional[str]) -> tuple[dict, list[dict]]:
@@ -355,6 +369,7 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
     # window where a child's write commits and the process dies before the
     # container's does. Not new logic — the same function, applied late.
     stranded = queue.close_finished_runs(dry_run=not apply)
+    backfilled = backfill_run_owners(queue, apply=apply)
     stuck = verifiers.quarantine_digest(queue, now=now)
     status = verifiers.verifier_status(queue, now=now)
 
@@ -387,10 +402,79 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
         },
         "quarantine": {"quarantined": len(quarantine.get("quarantined", []))},
         "strandedRuns": {("closed" if apply else "wouldClose"): len(stranded)},
+        # Runs filed before ownership existed, recorded as hub-owned (ASOP §7.2).
+        "ownershipBackfilled": {("written" if apply else "wouldWrite"): len(backfilled)},
         "stuck": stuck["count"],
+        # Items whose check could not judge them (v3.6), offered for a re-run
+        # and not charged. Counted so a check that keeps failing to evaluate is
+        # visible: its re-runs consume nothing, so nothing else would say so.
+        "cannotEvaluate": sum(1 for i in queue.list(WorkStatus.VERIFY_FAILED) if rerun_pending(i)),
         "verifier": {"configured": status.get("configured"), "warning": status.get("warning")},
     }
     return facts, findings
+
+
+def _runs(queue) -> list:
+    from agentco.work import RUN_KEY
+
+    return [i for i in queue.list() if RUN_KEY in (i.metadata or {})]
+
+
+def backfill_run_owners(queue, *, apply: bool) -> list[str]:
+    """Write the hub-owned record onto every run filed before ownership existed.
+    Reads already treat such a run as hub-owned; this makes it a fact on disk."""
+    from agentco import ownership
+
+    missing = [r.id for r in _runs(queue) if not isinstance((r.metadata or {}).get(ownership.RUN_OWNER_KEY), dict)]
+    if apply:
+        for run_id in missing:
+            root = queue.get(run_id)
+            record = ownership.owner_record(queue, root)
+            queue.annotate(run_id, {ownership.RUN_OWNER_KEY: record}, by_plane=True)
+    return missing
+
+
+def check_orphaned_runs(conn, queue, *, now: datetime, cadences: dict[str, int],
+                        identities: Optional[Mapping] = None) -> tuple[list[dict], list[dict]]:
+    """Runs whose owner cannot act: an unregistered store, a store none of whose
+    actors still holds a key (revoked), or a store whose actors are all silent
+    past their declared cadence. Each is an attention finding naming the run,
+    the owner and the remedy — the administrative transfer."""
+    from agentco import auth, ownership
+
+    known = set((identities if identities is not None else auth.load_identities()) or {})
+    seen = last_seen(conn, queue)
+    out: list[dict] = []
+    findings: list[dict] = []
+    for run in _runs(queue):
+        if run.status.value in ("done", "failed"):
+            continue
+        record = ownership.owner_record(queue, run)
+        store = record["store"]
+        if store == queue.hub_id:
+            continue
+        actors = sorted(queue.stores.get(store, ()))
+        why = None
+        if not actors:
+            why = "the owner store is not registered"
+        elif not [a for a in actors if a in known]:
+            why = f"no actor of the owner store holds a key any more ({', '.join(actors)})"
+        else:
+            declared = [a for a in actors if a in cadences]
+            if declared and all(
+                seen.get(a) is None or (now - seen[a]).total_seconds() > cadences[a] for a in declared
+            ):
+                why = "every actor of the owner store is silent past its declared cadence"
+        if why is None:
+            continue
+        out.append({"runId": run.id, "owner": store, "epoch": record.get("epoch"), "reason": why})
+        findings.append(_finding(
+            "ownership.orphaned-run", "attention",
+            f"run {run.id} is owned by {store!r} and its owner cannot act: {why}",
+            f"A declared admin transfers it: POST /runs/{run.id}/transfer {{\"to\": \"{queue.hub_id}\", "
+            f"\"reason\": \"…\"}} (or to another registered store).",
+        ))
+    return out, findings
 
 
 def last_seen(conn: sqlite3.Connection, queue) -> dict[str, datetime]:
@@ -663,6 +747,8 @@ def run(
     findings += f
     stranded, f = check_stranded_steps(queue, now=at, cadences=cadences)
     findings += f
+    orphaned, f = check_orphaned_runs(conn, queue, now=at, cadences=cadences)
+    findings += f
     own, f = self_audit(conn, now=at, every=every)
     findings += f
 
@@ -679,6 +765,7 @@ def run(
         "housekeeping": house,
         "participants": participants,
         "strandedSteps": stranded,
+        "orphanedRuns": orphaned,
         "self": own,
     }
 

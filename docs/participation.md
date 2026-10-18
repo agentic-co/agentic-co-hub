@@ -177,9 +177,10 @@ Writing the client in another language? [`connector-guide.md`](connector-guide.m
 is the wire contract as observed live: signing, casing, every response shape and
 refusal a work-queue seam meets, and the fence in action.
 
-```bash
-python3 -m agentco keygen your-name   # prints a secret; never writes it anywhere
-```
+Your `AGENTCO_SECRET` comes from the registry's operator, through the
+procedure below. Do not mint one yourself: `keygen` on your machine produces a
+key the registry has never seen. If `whoami` reports `auth.status` other than
+`ok`, its `auth.access` field lists the steps to get access.
 
 ### Adding a person, and the tools they run
 
@@ -255,6 +256,13 @@ AGENTCO_SECRET=<that tool's secret>
 
 Then `agentco sync` pulls the active procedures, and the tool is an L2 worker.
 
+For an MCP harness, those three go in the `env` block of its `.mcp.json` entry,
+with the secret referenced as `"${AGENTCO_SECRET}"` rather than pasted, so the
+value lives in the environment and never in a file a repository can pick up.
+The MCP server reads its environment once, at start, so after setting or
+changing the secret **restart the harness**: reconnecting the MCP server from
+inside a running session does not pick up a new value.
+
 **Check it took, rather than assuming.** A new actor that cannot authenticate
 looks identical to one nobody added:
 
@@ -263,7 +271,15 @@ AGENTCO_ACTOR=alice-codex-01 AGENTCO_SECRET=… agentco sync
 ```
 
 Anything other than a clean exit means the table and the tool disagree, and the
-refusal says which.
+refusal says which. From an MCP harness, `whoami` makes the same check: it signs
+one read and reports `auth.status`.
+
+When it fails, compare fingerprints before anyone generates anything.
+`agentco keycheck` on the key file prints a `fingerprint` per actor; the
+harness's `whoami` reports `auth.secretFingerprint`. Different means the tool was
+given, or minted, the wrong secret. Equal means the table has not loaded it yet:
+the file is re-read on every request, but a Kubernetes Secret mounted as a file
+takes a minute or two to reach the pod.
 
 #### Removing them again
 
@@ -449,7 +465,10 @@ In order, cheapest check first:
    harness that believes it's on a shared registry while actually writing to a
    local file just sees a queue that's always empty, and nothing about that
    looks like an error. `whoami` is the one call that tells you which of the
-   two you're actually in.
+   two you're actually in. In remote mode, read `auth.status` next: `ok`
+   means the registry accepted a signed request; `rejected` means it did not
+   know this actor and secret pair, and `auth.access` says how to get access;
+   `unreachable` means nothing answered at `AGENTCO_REGISTRY_URL`.
 2. **`events()`** — with no `since`, this starts from the beginning of the
    feed. If your actor's own scope claims and snapshots show up, you're
    writing to the store you think you are.
