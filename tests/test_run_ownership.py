@@ -172,12 +172,18 @@ def test_a_transfer_fences_the_old_owner_and_makes_the_steps_workable_by_the_hub
     assert done.status is WorkStatus.DONE
 
 
-@pytest.mark.parametrize("to,reason", [("hub-a", ""), ("hub-a", None), ("nowhere", "gone"), ("runtime-a", "noop")])
-def test_a_transfer_needs_a_reason_and_a_real_new_owner(world, to, reason):
+@pytest.mark.parametrize("to,reason,code", [
+    ("hub-a", "", "transfer_refused:reason"), ("hub-a", None, "transfer_refused:reason"),
+    ("nowhere", "gone", "transfer_refused:malformed"), ("runtime-a", "noop", "transfer_refused:same_owner"),
+    (None, "gone", "transfer_refused:malformed"),
+])
+def test_a_transfer_needs_a_reason_and_a_real_new_owner(world, to, reason, code):
+    """Spec 0.6.1's `transfer_refused:<rule>`; the old `transfer_invalid` rides as an alias."""
     _, queue, _ = world
     run = runtime_run(world)
-    assert code_of(lambda: ownership.transfer(queue, run["runId"], to=to, reason=reason, by="dana",
-                                              at="t")) == "transfer_invalid"
+    with pytest.raises(Refusal) as exc:
+        ownership.transfer(queue, run["runId"], to=to, reason=reason, by="dana", at="t")
+    assert exc.value.code == code and exc.value.to_dict()["aliases"] == ["transfer_invalid"]
     assert ownership.owner_record(queue, queue.get(run["runId"]))["epoch"] == 1
 
 
@@ -254,10 +260,10 @@ def test_http_ownership_transfer_and_refusals(tmp_path):
     body = {"to": "hub-a", "reason": "the runtime's maintainer left"}
     # A person without the admin role is a role-binding failure; an agent is not a
     # person at all (decision 9: human_required, formerly capability_mismatch).
-    for actor, code in (("eve", "capability_mismatch"), ("kofi", "human_required")):
+    for actor, code in (("eve", "transfer_refused:administrator"), ("kofi", "human_required")):
         refused = http(client, "POST", path, actor, body)
         assert refused.status_code == 403 and refused.json()["code"] == code, actor
-    assert http(client, "POST", path, "dana", {"to": "hub-a"}).json()["code"] == "transfer_invalid"
+    assert http(client, "POST", path, "dana", {"to": "hub-a"}).json()["code"] == "transfer_refused:reason"
     assert http(client, "POST", path, "dana", {**body, "by": "eve"}).json()["code"] == "author_from_signature"
     moved = http(client, "POST", path, "dana", body)
     assert moved.status_code == 200 and moved.json()["epoch"] == 2

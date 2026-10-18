@@ -55,7 +55,7 @@ import re
 from typing import Iterable, Mapping, Optional
 from urllib.parse import urlparse
 
-from agentco.errors import Refusal
+from agentco.errors import Refusal, transfer_refused
 
 RUN_OWNER_KEY = "run_owner"
 RUN_PACK_KEY = "run_pack"
@@ -63,6 +63,9 @@ OWNER_EPOCH_KEY = "owner_epoch"
 LEASE_VOID_KEY = "lease_voided"
 
 STORES_ENV_VAR = "AGENTCO_STORES"
+#: The standard's name for the administrator registry (spec 0.6.1 §9).
+ADMINISTRATORS_ENV_VAR = "ASOP_ADMINISTRATORS"
+#: DEPRECATED: the name this hub shipped first; read only when the standard's is unset.
 ADMINS_ENV_VAR = "AGENTCO_ADMINS"
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -91,9 +94,15 @@ def stores_from_env(value: Optional[str] = None) -> dict[str, frozenset]:
 
 
 def admins_from_env(value: Optional[str] = None) -> frozenset:
-    """`AGENTCO_ADMINS`, comma-separated. Fail closed: unset means nobody."""
-    raw = os.environ.get(ADMINS_ENV_VAR, "") if value is None else value
-    return frozenset(a.strip() for a in raw.split(",") if a.strip())
+    """The declared administrators: `ASOP_ADMINISTRATORS` (spec 0.6.1 §9), falling
+    back to the deprecated `AGENTCO_ADMINS` only when the standard's name is UNSET —
+    presence, not truthiness, so an operator who declares it empty means nobody.
+    Comma-separated. Fail closed: unset (both) means nobody."""
+    if value is None:
+        value = os.environ.get(ADMINISTRATORS_ENV_VAR)
+        if value is None:
+            value = os.environ.get(ADMINS_ENV_VAR, "")
+    return frozenset(a.strip() for a in value.split(",") if a.strip())
 
 
 def _refuse(code: str, message: str, remediation: str, status: int) -> Refusal:
@@ -202,6 +211,15 @@ def check_epoch(queue, item) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def check_shape(to: object) -> None:
+    """`transfer_refused:malformed` for a `to` that is not an exact name — the
+    record's own validity, which spec 0.6.1 §10 checks after the caller and
+    BEFORE the administrator rule."""
+    if not isinstance(to, str) or not to.strip() or to != to.strip():
+        raise transfer_refused("malformed", "transfer 'to' must be an exact, non-empty store name",
+                               "Name this hub or a registered store.", alias="transfer_invalid")
+
+
 def transfer(queue, run_id: str, *, to: object, reason: object, by: str, at: str) -> dict:
     """Move a run to another owner, by a recorded administrative act. The
     caller has already checked that `by` is a declared human admin."""
@@ -210,16 +228,22 @@ def transfer(queue, run_id: str, *, to: object, reason: object, by: str, at: str
     root = queue.get(run_id)
     if root is None or RUN_KEY not in (root.metadata or {}):
         raise _refuse("work_item_unknown", f"no run {run_id!r}", "Transfer a run's id, as GET /runs lists them.", 404)
+    # Spec 0.6.1 §10's order, after the caller (checked by the route): the record's
+    # own validity, then the reason, then the target. Each code carries the
+    # `transfer_invalid` it replaced, as a deprecated alias.
+    check_shape(to)
     if not isinstance(reason, str) or not reason.strip():
-        raise _refuse("transfer_invalid", "a transfer needs a `reason`",
-                      "Say why the owner is being replaced; the reason is recorded on the run for good.", 400)
-    if not isinstance(to, str) or not (to == queue.hub_id or to in queue.stores):
-        raise _refuse("transfer_invalid", f"{to!r} is not this hub ({queue.hub_id!r}) or a registered store",
-                      f"Transfer to {queue.hub_id!r} or to one of {sorted(queue.stores)} ({STORES_ENV_VAR}).", 400)
+        raise transfer_refused("reason", "a transfer must say why",
+                               "Say why the owner is being replaced; the reason is recorded on the run for good.",
+                               alias="transfer_invalid")
     record = owner_record(queue, root)
     if to == record["store"]:
-        raise _refuse("transfer_invalid", f"run {run_id} is already owned by {to!r}",
-                      "A transfer to the current owner moves nothing.", 400)
+        raise transfer_refused("same_owner", f"{to!r} already owns run {run_id}",
+                               "A transfer to the current owner moves nothing.", alias="transfer_invalid")
+    if not (to == queue.hub_id or to in queue.stores):
+        raise transfer_refused("malformed", f"{to!r} is not this hub ({queue.hub_id!r}) or a registered store",
+                               f"Transfer to {queue.hub_id!r} or to one of {sorted(queue.stores)} ({STORES_ENV_VAR}).",
+                               alias="transfer_invalid")
     epoch = int(record.get("epoch", 1)) + 1
     entry = {"at": at, "by": by, "from": record["store"], "to": to, "reason": reason.strip(), "epoch": epoch}
     updated = {**{k: v for k, v in record.items() if k != "backfilled"},

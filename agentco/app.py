@@ -63,7 +63,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from agentco import auth, chains, clearance as clearance_module, db, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
-from agentco.errors import Refusal, human_required
+from agentco.errors import Refusal, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
 from agentco.memory import memory_enabled as memory_switch
@@ -1137,19 +1137,17 @@ def create_app(
                 # Not a person at all: the human-only half (decision 9).
                 raise human_required(
                     f"{actor!r} is not a declared human; only a person may transfer a run",
-                    f"Ask a person listed in both {ownership.ADMINS_ENV_VAR} and AGENTCO_HUMANS.",
+                    f"Ask a person listed in both {ownership.ADMINISTRATORS_ENV_VAR} and AGENTCO_HUMANS.",
                 )
+            ownership.check_shape(payload.get("to"))  # the record's validity, before the role (§10)
             if actor not in declared_admins:
-                # A person without the admin ROLE: a role binding failure, which
-                # keeps `capability_mismatch`.
-                raise Refusal(
-                    code="capability_mismatch",
-                    message=f"{actor!r} is a declared human but not a declared admin; only an admin may transfer a run",
-                    remediation=(
-                        f"Ask a person listed in both {ownership.ADMINS_ENV_VAR} and AGENTCO_HUMANS. "
-                        f"Unset, nobody may transfer: it fails closed."
-                    ),
-                    http_status=403,
+                # A person who is not an administrator (spec 0.6.1 §10).
+                raise transfer_refused(
+                    "administrator",
+                    f"{actor!r} is a declared human but not a declared administrator",
+                    f"Have a person the operator declared in {ownership.ADMINISTRATORS_ENV_VAR} (and "
+                    f"AGENTCO_HUMANS) record it. Unset, nobody may transfer: it fails closed.",
+                    alias="capability_mismatch", http_status=403,
                 )
             for key in ("by", "from", "epoch"):
                 if key in payload:
@@ -1544,6 +1542,8 @@ def create_app(
         computed here; a body carrying one, or naming who adopted, is refused."""
 
         def work(actor: str, payload: dict) -> dict:
+            # Who is asking, before what they sent (spec 0.6.1 §10's order).
+            chains.require_person(actor, declared_humans, "record an adoption")
             named = sorted({"impact", "adopted_by", "adopted_at", "from"} & set(payload))
             if named:
                 raise Refusal(
@@ -1570,6 +1570,7 @@ def create_app(
         subset of its subjects (`asop.approval/1`)."""
 
         def work(actor: str, payload: dict) -> dict:
+            chains.require_person(actor, declared_humans, "record an approval")
             named = sorted({"approved_by", "approved_at"} & set(payload))
             if named:
                 raise Refusal(
