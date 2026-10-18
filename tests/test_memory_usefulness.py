@@ -158,6 +158,7 @@ def client(tmp_path):
         memory_store=str(tmp_path / "memory.jsonl"), hub_id="hub-a", humans=["dana"],
         hub_clearance={"acme": "confidential"},
         clearances={"dana": {"acme": "confidential"}, "kofi": {"acme": "internal"}}, memory_levels=LEVELS,
+        memory_enabled=True,
     ))
 
 
@@ -205,10 +206,13 @@ def memory_item(client):
 def test_the_outcome_is_derived_from_the_gate_never_asserted(client, gate, exit_status, status, expected):
     mem = memory_item(client)
     work_id = finished_work(client, gate=gate, exit_status=exit_status, status=status)
-    response = post(client, "/memory/traces", "kofi", {
+    asserted = post(client, "/memory/traces", "kofi", {
         "workItemId": work_id, "invoked": [mem], "retrieved": [mem], "outcome": "success"})
+    assert asserted.status_code == 422 and asserted.json()["code"] == "unknown_field", \
+        "a body asserting its own outcome is refused, not believed"
+    response = post(client, "/memory/traces", "kofi", {"workItemId": work_id, "invoked": [mem], "retrieved": [mem]})
     assert response.status_code == 200, response.text
-    assert response.json()["outcome"] == expected, "the body's own `outcome` is ignored"
+    assert response.json()["outcome"] == expected, "the outcome is the plane's, from the gate"
     state = get(client, f"/memory/{mem}/state", "kofi").json()["state"]
     assert state["successes"] == (1 if expected == "success" else 0)
     assert state["failures"] == (1 if expected == "failure" else 0)

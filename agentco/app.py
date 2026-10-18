@@ -179,8 +179,17 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     ("POST", "/memory/{item_id}/pin"): wire.strict(
         ("pinned", "review_by", "expected_version"), "the pinned class and its calendar review"),
     ("POST", "/memory/{item_id}/retire"): wire.strict(("expected_version",), "the version it was read at"),
+    # The usefulness engine (M3): a trace credits items, so an asserted `outcome`
+    # or a misspelt `invoked` must be refused, never ignored.
+    ("POST", "/memory/traces"): wire.strict(
+        ("workItemId", "invoked", "retrieved"), "credit: the plane derives the outcome, never the body"),
+    ("POST", "/memory/replay"): wire.strict((), "a replay pass takes no options"),
+    ("POST", "/memory/{item_id}/rate"): wire.strict(("rating",), "the owner's rating"),
+    ("POST", "/memory/{item_id}/revive"): wire.strict((), "a revival takes no options"),
+    ("POST", "/memory/{item_id}/reconsolidate"): wire.strict((), "a reconsolidation takes no options"),
     **{("GET", path): wire.lenient() for path in (
-        "/memory", "/memory/search", "/memory/clearance", "/memory/{item_id}", "/memory/{item_id}/history")},
+        "/memory", "/memory/search", "/memory/clearance", "/memory/reviews", "/memory/{item_id}",
+        "/memory/{item_id}/history", "/memory/{item_id}/state")},
     # Reads take no body. Lenient, so a stray body never fails a read.
     **{("GET", path): wire.lenient() for path in (
         "/events", "/work", "/sops/{sop_id}/outcomes", "/runs", "/runs/{run_id}",
