@@ -157,6 +157,29 @@ jobs:
           assert policy.check_asop_revision is asop.revision.check_asop_revision
           print('asop resolves from', asop.__file__)
           "
+      - name: The image serves on Postgres, as the compose `pg` profile runs it
+        # The image shipped without the Postgres driver while docker-compose.yml
+        # documented `--profile pg` against it: the registry crash-looped on
+        # start and every check above stayed green, because none of them ran
+        # the image on Postgres. This one does, end to end.
+        run: |
+          set -euo pipefail
+          docker network create agentco-ci-pg
+          docker run -d --name agentco-ci-postgres --network agentco-ci-pg \
+            -e POSTGRES_USER=agentco -e POSTGRES_PASSWORD=ci-only-not-a-secret -e POSTGRES_DB=agentco \
+            postgres:16-alpine
+          for i in $(seq 1 30); do docker exec agentco-ci-postgres pg_isready -U agentco && break; sleep 2; done
+          docker run -d --name agentco-ci-pg-registry --network agentco-ci-pg -p 8788:8787 \
+            -e AGENTCO_DB=postgresql://agentco:ci-only-not-a-secret@agentco-ci-postgres:5432/agentco \
+            agentco:ci serve --host 0.0.0.0 --port 8787
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8788/events || true)
+            [ "$code" = "401" ] && { echo "registry serves on Postgres"; exit 0; }
+            sleep 2
+          done
+          echo "FAIL: the registry never answered on Postgres (last code: ${code:-none})"
+          docker logs agentco-ci-pg-registry
+          exit 1
       - name: Unauthenticated is 401, and 200 would be the failure
         # The image's own healthcheck encodes this: a 200 here means the key
         # table loaded OPEN, which is the one outcome worse than being down.
@@ -178,4 +201,6 @@ jobs:
           exit 1
       - name: Stop
         if: always()
-        run: docker rm -f agentco-ci || true
+        run: |
+          docker rm -f agentco-ci agentco-ci-pg-registry agentco-ci-postgres || true
+          docker network rm agentco-ci-pg || true
