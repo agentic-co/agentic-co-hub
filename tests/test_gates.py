@@ -589,18 +589,22 @@ def test_the_http_report_and_attest_verbs_ignore_a_gate_in_the_body(tmp_path):
     leased = registry.work_pull()
 
     tampered = {"kind": "deterministic", "check": "true", "max_park_seconds": 1, "on_timeout": "pass"}
-    registry.call_raw(
-        "POST",
-        f"/work/{filed['id']}/report",
-        {
-            "attempt": leased["attempt"],
-            "status": "done",
-            "verify": tampered,
-            "attestation": attestation(),
-        },
-    )
-    stored = registry.work_get(filed["id"])["item"] if hasattr(registry, "work_get") else None
-    del stored
+    # Refused outright now, not merely ignored: the report route is strict about
+    # unknown keys (agentco/wire.py), so a gate in its body never reaches it.
+    from agentco.publish import RegistryError
+
+    with pytest.raises(RegistryError) as refused:
+        registry.call_raw(
+            "POST",
+            f"/work/{filed['id']}/report",
+            {
+                "attempt": leased["attempt"],
+                "status": "done",
+                "verify": tampered,
+                "attestation": attestation(),
+            },
+        )
+    assert refused.value.status == 422 and refused.value.payload["code"] == "unknown_field"
 
     rows = registry.call_raw("GET", "/work", None)["items"]
     [item] = [i for i in rows if i["id"] == filed["id"]]

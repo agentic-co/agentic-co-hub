@@ -22,12 +22,24 @@ jobs:
     # and it must not be reported as one line in a test summary.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Scan for identity leakage
         # No leakguard.toml in the tree on purpose — a denylist of real names is
-        # itself a list of real names. CI runs base rules; a fork or a private
-        # mirror can supply its own via --config.
-        run: python3 tools/leakguard/leakguard.py --root .
+        # itself a list of real names. CI reads the real list from the LEAKGUARD_CONFIG
+        # secret when it is available and falls back to the base rules when it is not.
+        env:
+          # The real list of internal names lives in a repository secret, never in the tree.
+          # Pull requests from forks get no secrets: they fall back to the base rules.
+          LEAKGUARD_CONFIG: ${{ secrets.LEAKGUARD_CONFIG }}
+        run: |
+          if [ -n "${LEAKGUARD_CONFIG:-}" ]; then
+            printf '%s' "$LEAKGUARD_CONFIG" > "$RUNNER_TEMP/leakguard.toml"
+            echo "leakguard: running with the private denylist"
+            python3 tools/leakguard/leakguard.py --root . --config "$RUNNER_TEMP/leakguard.toml"
+          else
+            echo "::notice::leakguard: no private denylist available (fork or unset secret); base rules only"
+            python3 tools/leakguard/leakguard.py --root .
+          fi
 
   test:
     runs-on: ubuntu-latest
@@ -36,8 +48,8 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
       - run: uv python install ${{ matrix.python-version }}
@@ -57,9 +69,8 @@ jobs:
     # stopped importing on 0.5.0 — the SQL column guard fired — and nothing
     # here could have said so, because nothing here installed 0.5.0.
     #
-    # The floor and the newest. 0.6.0 is built from the spec's source at a
-    # pinned commit until it is on PyPI; replace that line with
-    # `asop-spec==0.6.0` the day it is. One Python: this is a contract
+    # The floor, the version that once broke the plane (0.5.0) and the newest
+    # (0.6.0, on PyPI since 2026-10-17). One Python: this is a contract
     # question, and the matrix above answers the language one.
     runs-on: ubuntu-latest
     strategy:
@@ -67,10 +78,11 @@ jobs:
       matrix:
         contract:
           - "asop-spec==0.4.0"
-          - "asop-spec @ git+https://github.com/mabidoli/asop@7c32c77acc190f7f99b4ed870bc328431232d07d"
+          - "asop-spec==0.5.0"
+          - "asop-spec==0.6.0"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
       - run: uv python install 3.12
@@ -114,8 +126,8 @@ jobs:
     env:
       AGENTCO_TEST_PG: postgresql://agentco:ci-only-not-a-secret@127.0.0.1:5432/agentco
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
       - run: uv python install 3.12
@@ -143,7 +155,7 @@ jobs:
     # only a downstream consumer can see is one that will happen again.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build
         run: docker build -t agentco:ci .
       - name: The contract resolves, and the shims ARE it
@@ -157,6 +169,29 @@ jobs:
           assert policy.check_asop_revision is asop.revision.check_asop_revision
           print('asop resolves from', asop.__file__)
           "
+      - name: The image serves on Postgres, as the compose `pg` profile runs it
+        # The image shipped without the Postgres driver while docker-compose.yml
+        # documented `--profile pg` against it: the registry crash-looped on
+        # start and every check above stayed green, because none of them ran
+        # the image on Postgres. This one does, end to end.
+        run: |
+          set -euo pipefail
+          docker network create agentco-ci-pg
+          docker run -d --name agentco-ci-postgres --network agentco-ci-pg \
+            -e POSTGRES_USER=agentco -e POSTGRES_PASSWORD=ci-only-not-a-secret -e POSTGRES_DB=agentco \
+            postgres:16-alpine
+          for i in $(seq 1 30); do docker exec agentco-ci-postgres pg_isready -U agentco && break; sleep 2; done
+          docker run -d --name agentco-ci-pg-registry --network agentco-ci-pg -p 8788:8787 \
+            -e AGENTCO_DB=postgresql://agentco:ci-only-not-a-secret@agentco-ci-postgres:5432/agentco \
+            agentco:ci serve --host 0.0.0.0 --port 8787
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8788/events || true)
+            [ "$code" = "401" ] && { echo "registry serves on Postgres"; exit 0; }
+            sleep 2
+          done
+          echo "FAIL: the registry never answered on Postgres (last code: ${code:-none})"
+          docker logs agentco-ci-pg-registry
+          exit 1
       - name: Unauthenticated is 401, and 200 would be the failure
         # The image's own healthcheck encodes this: a 200 here means the key
         # table loaded OPEN, which is the one outcome worse than being down.
@@ -178,4 +213,6 @@ jobs:
           exit 1
       - name: Stop
         if: always()
-        run: docker rm -f agentco-ci || true
+        run: |
+          docker rm -f agentco-ci agentco-ci-pg-registry agentco-ci-postgres || true
+          docker network rm agentco-ci-pg || true

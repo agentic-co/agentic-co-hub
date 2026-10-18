@@ -34,7 +34,12 @@ in exactly the place it should have, the connectors.
 | Legacy v2 records upgraded, never dropped | 🆕 | ✅ | Migration 0009 adds `asops` and copies every `sops` row forward as a one-step ASOP, leaving `sops` byte-identical; the JSONL store applies the same upgrade on read. A v2 record had no gate, so the upgrade fails CLOSED to a `human` gate |
 | ASOP contract package (`asop-spec`, `asop-spec`) | 🆕 | ✅ | The gate schema, `Refusal`, and the SOP record shape split out of `agentco/gates.py` \| `errors.py` \| `sop.py` into a standalone package a harness can depend on without depending on this plane; `agentco/{gates,errors,sop}.py` are now thin shims over it. Merges this plane's park-clock gate fields with the AgentCo Harness's staged-check/runtime-hint fields into one normalised schema. Floor is `asop-spec>=0.4.0`: from 0.4 a judged or human attestation must carry `verdict: {passed, reason}` and a negative verdict fails the gate even at exit 0 |
 | `asop-spec` 0.4 → 0.6 compatibility (spec v3.5, v3.6) | 🆕 | ✅ | The pin is `>=0.4.0,<1` and the lock is 0.5.0. Migration 0011 adds the seven chaining columns; the store reads only what the installed contract models and quarantines what it cannot. Before this the plane did not import on 0.5.0 (the column guard fired), and `revise` on the JSONL store silently dropped every chaining field. Matrix: [`docs/asop.md`](asop.md#contract-compatibility). |
+| Request bodies: strict and lenient routes, field provenance, weekly asop-spec watch | 🆕 | ✅ | Unknown keys refused `422 unknown_field` where a dropped key can remove a safety property, reported as `ignored` (and counted in `/metrics`) everywhere else; every route declared, pinned by a test. Messages name the closest key and whether a newer released asop-spec has the field, from a bundled generated table (`tools/asop_fields.py`). A weekly job opens one issue when PyPI has a release adding fields the hub does not forward: [`docs/wire.md`](wire.md) |
+| Run ownership (ASOP §7.2) and the administrative transfer | 🆕 | ✅ | One owner store per run recorded at filing (`AGENTCO_HUB_ID`, `AGENTCO_STORES`), `not_the_owner` for anyone else, a pack reference (uri + sha256, never content), and `POST /runs/{id}/transfer` for a declared human admin (`AGENTCO_ADMINS`, new): epoch bump, history, voided leases, `RunTransferred`; the pulse names orphaned runs: [`docs/asop.md`](asop.md#run-ownership-and-the-administrative-transfer-asop-72-owner-decision-2026-10-18) |
 | Chain manifests, adoptions, approvals (spec v3.6 §3.7, §3.10) | 🆕 | ✅ | `agentco/chains.py`, migration 0012. A manifest's members are checked against this store's versions and digests (`GET /sops/{id}` serves `digest`); adoptions and approvals are declared-human only, signed, and the adoption impact is computed. A chain run files at its pinned version or is refused `adoption_required`. Needs asop-spec 0.6.0. Not built: the chain outcome record and step journal, which need journal ingest — see [`docs/asop.md`](asop.md#chain-manifests-adoptions-and-approvals-v36-agentcochainspy) |
+| Shared memory: item store (ADR 0006 §1, slice M1) | 🆕 | ✅ | **Off by default** (`AGENTCO_MEMORY=on` to enable; off = every `/memory` route `404 memory_disabled`, no store opened). `agentco/memory.py`, `agentco/clearance.py`, migration 0013. Owner-labeled items in held layers, one authoritative hub each, read-only replicas, required provenance, pinned class, audit, nothing deleted; JSONL/SQLite/Postgres. Clearance per data owner (hub ∧ actor) on the memory routes. The wall on every other read path, decay and residuals are later slices: [`docs/memory.md`](memory.md) |
+| Shared memory: the wall (ADR 0006 §2, slice M2) | 🆕 | ✅ | Clearance applied before every read path: list, search, item routes (walled answers like missing), the change feed (`MemoryChanged` carries the label, never content, filtered per reader), the MCP `events` tool, internal feed readers (none), the pulse count. Known metadata/timing/existence limits listed and pinned by tests: [`docs/memory.md`](memory.md#known-limits--open-documented-not-claimed-closed) |
+| Shared memory: usefulness and decay (ADR 0006 §4-§5, slice M3) | 🆕 | ✅ | Pure engine `agentco/memory_engine.py` on an exposure clock; credit only for items invoked in a trace, against an outcome the plane derives from the work item's gate; power-law decay with a floor; pinned exemption with calendar review; cold storage, demand pull, replay, probation, reconsolidation; nothing deleted. Every parameter is configuration labelled NOT VALIDATED: [`docs/memory.md`](memory.md#built-usefulness-and-decay-m3) |
 | Durable storage backend (SQLite) | 🆕 | ✅ | Opt-in via `AGENTCO_DB`; same interfaces, conformance-tested against the JSONL default |
 | Durable storage backend (Postgres) | 🆕 | ✅ | Opt-in via `AGENTCO_DB=postgresql://…`; thin `sqlite3.Connection`-shaped adapter (`agentco/pgadapter.py`) over `psycopg`, no second copy of the SQL; same conformance suite, `psycopg[binary]` is an optional `postgres` extra |
 | `tools/migrate_sqlite_to_pg.py` | 🆕 | ✅ | Idempotent cutover from a stopped SQLite file to Postgres; preserves `events.seq`/`calls.id`/`conflict_actions.id` and advances the identity sequence so a subscriber's cursor keeps resuming |
@@ -207,12 +212,107 @@ Two registries, both following the same shape:
   the reaper's in-lock liveness re-check and `assigned_agent` enforcement are
   single-process tested only (see below).
 
+### Hub network — planned, not built
+
+Accepted as a design in [`decisions/0007-hub-network-graph-and-channels.md`](decisions/0007-hub-network-graph-and-channels.md),
+extending the built push-only digest of [0005](decisions/0005-federated-hub-topology.md):
+
+- Many connections per hub instead of one parent URL; cycle protection for
+  forwarded work.
+- Declared channels per connection (work, answers, memory, notices), enforced
+  on both ends.
+- Signed per-owner clearance that only narrows per hop; the existing digest
+  filtered by it.
+- Pull-based work: stimulus by age and priority, thresholds, a Decline verb,
+  evidence pointers, WIP limits, random audit, a level-skipping alert path.
+- Harness-to-human binding through an external identity provider, after a
+  review of delegated-authentication patterns (this is the "identity beyond
+  HMAC" item above, given a shape).
+
+Still open (owner decision 8, 2026-10-18): the **identity mechanism** — direction accepted, mechanism
+not chosen, confidence 0.55; revisit when a second organisation needs to connect a hub — and **credit
+across hubs** — not decided, no internal market; revisit when two hubs exchange work with different
+owners.
+
+### A dedicated `cannot_evaluate` status — designed, not built (option B)
+
+**Today (option A, 2026-10-18):** a could-not-evaluate gate result lands `verify_failed` with
+`metadata.verify_cannot_evaluate.pending`, is not charged, and is re-run (`docs/asop.md`, "Could not
+evaluate"). **Option B** gives it its own stored work-item status, `cannot_evaluate` — the name the
+spec's §5.2 table already uses for the bead.
+
+**Why it is cleaner.** The case becomes a fact of the status rather than a flag a reader must know to
+look for: `?status=cannot_evaluate` filters it, every consumer that switches on status handles it by
+construction, and "failed" stops meaning two different things depending on a metadata key. A runtime
+or second implementation reading the plane's items would not need this plane's flag to tell a failed
+check from a check that could not run.
+
+**What it would touch** — the reason it is deferred:
+- `WorkStatus` (work.py) and `releases_blockers` (must stay DONE-only), `TERMINAL`, the verify-state
+  guard in `report_result`, `attest` (the transition out), `ready()` / `claim()` / `rerun_pending`;
+- `SqlQueue._ready_candidates` (its `status IN (...)` list) and `idx_work_status`; there are **no** SQL
+  `CHECK` constraints on `status` on SQLite or Postgres today, so no constraint migration — but every
+  backend's readers matter (below);
+- `verifiers`: `route_open_gates`, `sweep_park_clocks`, `sweep_quarantine`, `quarantine_digest`,
+  `verifier_status`;
+- the pulse: housekeeping facts, `check_stranded_steps`, `close_finished_runs`;
+- the digest and write-back texts, and the feed kinds that announce verify states;
+- `SopLibrary.outcomes_by_version` (the `cannotEvaluate` column would read the status), run and step
+  views;
+- `metrics.py` wherever it groups by status;
+- the HTTP API: `parse_terminal_status`, `GET /work?status=` (its `unknown_status` refusal lists the
+  legal set — a strict client validating against that enum sees a new value);
+- the MCP tools' descriptions and the remote relay, which pass statuses through;
+- `agentco conform` scenarios and `conformance.py`'s status expectations.
+
+**Compatibility for old clients and old binaries.** An older plane reading a row with a status value it
+cannot model **quarantines** it (work.py, "a newer writer's unknown status value") — safe, but the item
+disappears from that reader's queue. A strict client that validates `status` against today's enum
+breaks on the new value. So: readers first, writers later, and the flag kept.
+
+**Migration plan.**
+1. Release N: every reader understands `cannot_evaluate` (treats it exactly as option A treats
+   `verify_failed` + `pending`); nothing writes it. Option A's flag stays authoritative.
+2. Release N+1, behind a setting: writers land `cannot_evaluate`, and still write
+   `verify_cannot_evaluate` with `pending: true`, so a client reading only the flag keeps working.
+3. Additive data migration: `verify_failed` with `pending: true` → `cannot_evaluate` (SQL `UPDATE`
+   in a numbered migration; JSONL on the next write), with the reverse statement recorded for rollback.
+4. A later major may drop the flag's `pending` field once no supported client reads it.
+
+**Revisit condition.** When a runtime or a second implementation needs to tell "failed" from "could not
+evaluate" without reading this plane's metadata flag; when the spec's conformance suite asserts the bead
+status `cannot_evaluate`; or when a status-keyed consumer is found mishandling `verify_failed` +
+`pending` — whichever comes first.
+
 ## Later — review delivery
 
 The routing spine: named owners, shared queues, offers with claim deadlines, explicit
 defer reasons, escalation, and a terminal `Undeliverable` state. Capacity modelling ships
 as **measurement** — observed and published — and throttles nothing until there is real
 data to throttle on.
+
+### Shared memory — planned, not built
+
+Accepted as a design in [`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md).
+The item store, the wall and the usefulness engine are built **behind `AGENTCO_MEMORY`, off by
+default** (the rows above; [`docs/memory.md`](memory.md)). Owner decision 8 (2026-10-18):
+the three-valued verified outcome and holding shared-layer records in full are **confirmed**; every
+parameter value is **open** until real traces measure it. The original list, in dependency order:
+
+- An owner-labeled memory item, stored beside the ASOP store, with one
+  authoritative hub per item.
+- Label enforcement in retrieval, before ranking, tested to fail on bypass.
+- Per-owner partition and session isolation as a connector requirement.
+- Action-trace reporting from harnesses, bound to a three-valued verified outcome.
+- Exposure clock, power-law decay with an activation floor, a pinned class with
+  calendar review; cold storage with demand-pull revival, periodic replay and
+  probation.
+- The residuals path: owner categories, never-leave list, mechanical checker,
+  blind validator, per-owner aggregate check, batch approval, reversible
+  category graduation.
+- The lesson-to-ASOP-revision hand-off through the existing improvement loop.
+- A primary-source spot-check of the research behind the design, before any
+  parameter is claimed.
 
 ### Borrowed candidates (from the 2026-08-31 OpenViking review)
 
