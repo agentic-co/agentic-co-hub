@@ -178,3 +178,9 @@ exception, the hub is non-conforming in exactly these places: the `POST /runs/{i
 (`agentco/app.py`), `ownership.transfer` and `Queue.release_for_transfer`, the `RunTransferred` event
 kind, and the orphan finding's remedy text. Ownership at filing, `not_the_owner`, the epoch and the
 pack reference do not depend on it.
+
+**Compatibility note (refusal codes, owner decision 9).** Human-only verbs now refuse a non-human with
+`human_required` (formerly `capability_mismatch`), and an unrecorded target manifest is
+`manifest_unknown` (formerly `manifest_member_unknown`). For one minor the payload also carries the old
+code in a deprecated `aliases` list. Details and the remaining divergence from the spec's 0.6.1 draft:
+[`docs/wire.md`](wire.md#renamed-refusal-codes-owner-decision-9-2026-10-18).

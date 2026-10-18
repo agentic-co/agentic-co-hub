@@ -135,7 +135,7 @@ def test_rating_and_replay_are_human_only_and_replay_respects_the_wall(store):
                  lambda: store.replay(actor="kofi", human=False, clearance=ACME)):
         with pytest.raises(Refusal) as exc:
             call()
-        assert exc.value.code == "capability_mismatch"
+        assert exc.value.code == "human_required"
     assert store.replay(actor="dana", human=True, clearance=ACME_INTERNAL)["revived"] == [seen.item_id]
     assert store.state(walled.item_id, ACME)["state"]["cold"], "a replay never touches what its caller cannot see"
     rated = store.rate(seen.item_id, actor="dana", human=True, clearance=ACME, up=True)
@@ -236,10 +236,10 @@ def test_a_trace_for_unfinished_work_is_refused(client):
 
 def test_http_rating_revival_and_reviews(client):
     mem = memory_item(client)
-    assert post(client, f"/memory/{mem}/rate", "kofi", {"rating": "up"}).json()["code"] == "capability_mismatch"
+    assert post(client, f"/memory/{mem}/rate", "kofi", {"rating": "up"}).json()["code"] == "human_required"
     assert post(client, f"/memory/{mem}/rate", "dana", {"rating": "sideways"}).json()["code"] == "memory_invalid"
     assert post(client, f"/memory/{mem}/rate", "dana", {"rating": "up"}).json()["state"]["ratings_up"] == 1
     assert post(client, f"/memory/{mem}/revive", "kofi", {}).json()["revived"] is False, "a warm item has nothing to revive"
-    assert post(client, "/memory/replay", "kofi", {}).json()["code"] == "capability_mismatch"
+    assert post(client, "/memory/replay", "kofi", {}).json()["code"] == "human_required"
     assert post(client, "/memory/replay", "dana", {}).json()["revived"] == []
     assert get(client, "/memory/reviews", "kofi").json()["count"] == 0
