@@ -25,9 +25,21 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Scan for identity leakage
         # No leakguard.toml in the tree on purpose — a denylist of real names is
-        # itself a list of real names. CI runs base rules; a fork or a private
-        # mirror can supply its own via --config.
-        run: python3 tools/leakguard/leakguard.py --root .
+        # itself a list of real names. CI reads the real list from the LEAKGUARD_CONFIG
+        # secret when it is available and falls back to the base rules when it is not.
+        env:
+          # The real list of internal names lives in a repository secret, never in the tree.
+          # Pull requests from forks get no secrets: they fall back to the base rules.
+          LEAKGUARD_CONFIG: ${{ secrets.LEAKGUARD_CONFIG }}
+        run: |
+          if [ -n "${LEAKGUARD_CONFIG:-}" ]; then
+            printf '%s' "$LEAKGUARD_CONFIG" > "$RUNNER_TEMP/leakguard.toml"
+            echo "leakguard: running with the private denylist"
+            python3 tools/leakguard/leakguard.py --root . --config "$RUNNER_TEMP/leakguard.toml"
+          else
+            echo "::notice::leakguard: no private denylist available (fork or unset secret); base rules only"
+            python3 tools/leakguard/leakguard.py --root .
+          fi
 
   test:
     runs-on: ubuntu-latest

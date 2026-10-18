@@ -234,7 +234,7 @@ def test_a_table_auth_refuses_is_refused_here_too(tmp_path, capsys):
 def test_expect_owners_fails_on_the_shape_the_live_registry_had(tmp_path, capsys):
     """Five flat strings, no owner anywhere. Opt-in, because a service identity
     with nobody behind it is a legitimate entry."""
-    path = written(tmp_path, {"operator": "s1", "leeloo": "s2", "panacea": "s3"})
+    path = written(tmp_path, {"operator": "s1", "assistant": "s2", "service": "s3"})
     assert cli.main(["keycheck", path]) == 0
     assert cli.main(["keycheck", path, "--expect-owners"]) == 1
     assert "declare no owner" in capsys.readouterr().err
