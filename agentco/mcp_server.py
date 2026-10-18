@@ -302,10 +302,10 @@ class _RemoteBackend:
         return self.registry.release_scope(lease_uid, action)
 
     def snapshot(self, artifact_uri: str, purpose: str, ttl_days=None) -> dict:
-        return self.registry.snapshot(artifact_uri, purpose)
+        return self.registry.snapshot(artifact_uri, purpose, ttl_days=ttl_days)
 
     def events(self, since=None, limit=events_module.DEFAULT_LIMIT, kind=None) -> dict:
-        return self.registry.events(since=since, limit=limit)
+        return self.registry.events(since=since, limit=limit, kind=kind)
 
     def work_pull(self, agent: str, capabilities, ttl_seconds: int) -> Optional[dict]:
         pulled = self.registry.work_pull(capabilities=capabilities, ttl_seconds=ttl_seconds)
@@ -397,6 +397,15 @@ class _RemoteBackend:
                 }
             return {"status": "error", "detail": str(exc), "secretFingerprint": fingerprint}
         return {"status": "ok", "secretFingerprint": fingerprint}
+
+
+def _memory_state() -> str:
+    from agentco.memory import memory_enabled
+
+    try:
+        return "enabled" if memory_enabled() else "disabled"
+    except ValueError as exc:
+        return f"misconfigured: {exc}"
 
 
 def create_server(
@@ -781,6 +790,8 @@ def create_server(
             **({"auth": backend.auth_check()} if backend.remote else {}),
             "scope": {"minSegments": scope.MIN_SEGMENTS, "intents": list(scope.INTENTS)},
             "eventKinds": list(events_module.KINDS),
+            # Shared memory's switch (AGENTCO_MEMORY), as this server reads it.
+            "memory": _memory_state(),
         }
 
     return mcp

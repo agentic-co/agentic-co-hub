@@ -3,6 +3,25 @@
 The design is [ADR 0006](decisions/0006-hub-memory-design.md). This page states what is
 **built**, slice by slice, and what is not. Everything not listed as built is not built.
 
+## The switch: `AGENTCO_MEMORY`, off by default
+
+Shared memory is **off** unless an operator sets `AGENTCO_MEMORY=on` (owner decision 2026-10-18):
+its slices land on main before the whole of ADR 0006 does, and a hub must not start holding and
+serving owner-labeled items because it was upgraded. Any value other than `on`/`off` (also `true`,
+`1`, `yes` / `false`, `0`, `no`, unset) refuses to start.
+
+While **off**:
+
+- every `/memory` route answers **`404 memory_disabled`** — one uniform body whatever the route, after
+  authentication, with the remediation naming the switch. 404 rather than 503 because the feature does
+  not exist on this hub, as opposed to being temporarily unavailable;
+- the memory store is **never opened** (no JSONL file, no SQL store object), so nothing can be written,
+  read or announced;
+- the migration still applies, harmlessly: the memory tables exist and stay empty;
+- the pulse reports `memory: disabled` in its plane facts, and MCP `whoami` reports `memory: disabled`.
+
+While **on**: everything below, exactly as built.
+
 ## Built: the item store (M1)
 
 A memory item is a short authored record held next to the ASOPs (`agentco/memory.py`):

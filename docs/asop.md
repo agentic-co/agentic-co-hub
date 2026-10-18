@@ -77,3 +77,56 @@ Feed kinds: `ChainManifestRecorded`, `ChainAdopted`, `ArtefactApproved`.
 holds no ledger of a runtime's runs; accepting a typed outcome would store
 exactly what the spec forbids. Both arrive with journal ingest (§7.2: "a
 journal is what a non-owning plane receives"), tracked in `docs/roadmap.md`.
+
+## Could not evaluate — the third gate outcome (spec v3.6 §3.3, §5.4)
+
+A `deterministic` gate may declare `cannot_evaluate_exit` (3 by convention) and `min_cases`. An
+attestation that exits with that status, or exits 0 having run fewer than `min_cases` cases
+(`cases_run`), **could not evaluate** the work: the check could not judge it, which is neither a pass
+nor the executor's failure. Classified by the contract's own `asop.gates.gate_outcome`, on the
+`report` path and on the executor's re-attest path alike. What the plane does today (option A, owner
+decision 2026-10-18):
+
+| | could not evaluate | real failure (any other nonzero exit) |
+|---|---|---|
+| status | `verify_failed` | `verify_failed` |
+| releases dependents | **no** | no |
+| `verify_failures` | **unchanged** | +1 |
+| `metadata.verify_retry.decision` | `"re-run"` (`outcome: "cannot_evaluate"`) | `"fix"`, then `"escalate"`, then `"stop"` |
+| `metadata.verify_cannot_evaluate` | `{pending: true, count, last: {check, exit_status, cases_run, …}, reason}` | `pending` set false if present; `count` kept as history |
+| pullable again | **yes** — offered by `ready()` / `POST /work/pull`, claimed under a **new fence** (`lease_attempt` +1; a report on the old attempt is refused) | no — held until its own gate passes |
+| `GET /sops/{id}/outcomes` | its own column, `cannotEvaluate`, counted in `unresolved`; never in `verifyFailed` or `failed` | `verifyFailed` |
+| pulse | fact `cannotEvaluate`: items pending a re-run | unchanged |
+| quarantine (re-run offer unclaimed past the gate's park time) | reason `re-run unclaimed after could-not-evaluate` | `re-verify unanswered` |
+
+A gate that declares neither field keeps exactly its two outcomes: exit 3 there is a failure and is
+charged, as in v3.5. `verify_cannot_evaluate` is a reserved metadata key: no caller can set it.
+
+The spec's own bead status for this case is `cannot_evaluate` (§5.2). The plane represents it as
+`verify_failed` plus the flag; the dedicated status is designed and deferred — `docs/roadmap.md`,
+"A dedicated `cannot_evaluate` status".
+
+## A run waiting on other work: `blockedBy` (owner decision 2026-10-18)
+
+`POST /sops/{id}/run {…, "blockedBy": ["w-…", …]}` (and `SopLibrary.run(blocked_by=…)`) files a run
+whose first steps wait on other work items — how a runtime sequences one run after another.
+
+- **What waits.** Every **root** step — a step with no in-run predecessor (`after: []`, or step 1; an
+  omitted `after` means "after the step before", so it is not a root). Non-root steps wait only on their
+  predecessors, as before.
+- **Nested procedures (`uses`).** An inner procedure's roots wait on whatever their outer step waits on:
+  the run's blockers when the `uses` step is a root, the outer predecessors otherwise. An inner procedure
+  never starts ahead of the outer step it implements.
+- **The parent.** Carries no extra blocker: it already waits on its steps, so it reads `pending` like any
+  run whose steps have not finished. The run view adds `blockedBy` (the run's blockers) and `waitingOn`
+  (`[{itemId, status}]` for each blocker not yet `done`).
+- **Release.** A root becomes ready when **every** blocker is `done`. A blocker that is `failed`,
+  `verify_failed` or still awaiting verification keeps it blocked — never released silently — and
+  `waitingOn` names it with its status.
+- **Refused before anything is filed** (`422 blocked_by_invalid`): a value that is not a list of ids, an
+  empty id, an id named twice, or an id this queue does not hold. A run cannot name itself: its ids do
+  not exist until it is filed.
+
+There is no MCP tool for running a procedure (HTTP-only by design, ADR 0004), so there is no relay to
+forward it. `RUN_BODY_FIELDS` in `agentco/app.py` is the route's wire map, and
+`tests/test_run_blocked_by.py` pins it to `SopLibrary.run`'s and `Queue.create`'s signatures.
