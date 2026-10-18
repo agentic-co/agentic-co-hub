@@ -815,6 +815,7 @@ class SopLibrary:
         title: Optional[str] = None,
         metadata: Optional[dict] = None,
         chain_pin: Optional[dict] = None,
+        blocked_by: Sequence[str] = (),
         **work_kwargs,
     ) -> dict:
         """File one execution of one ASOP version as a TREE (ASOP.md §5.1).
@@ -837,6 +838,17 @@ class SopLibrary:
         Every refusal fires before anything is filed, so a refused run leaves
         the queue byte-identical.
 
+        **`blocked_by` holds the run's ROOT steps** — every step with no
+        in-run predecessor (`after` empty), and, through a `uses` step, the
+        inner procedure's roots as well. It is not put on the parent: the
+        parent already waits on its steps, and a blocker there alone left the
+        steps pullable while the run read as blocked. A root unblocks when
+        every blocker is DONE; a blocker that fails stays a blocker
+        (`releases_blockers`), and the run view says what it is waiting on
+        (`waitingOn`). Validated before anything is filed: each id must name an
+        existing work item, once. The run cannot name itself — its ids do not
+        exist until it is filed.
+
         `chain_pin` is `{chain, manifest}` when the run belongs to a pinned
         chain (v3.6 §3.10). The caller — the HTTP route — has already resolved
         `version` from that manifest (`agentco.chains.pin_for_run`); this only
@@ -855,6 +867,7 @@ class SopLibrary:
         supplied = dict(inputs or {})
         bound = dict(bindings or {})
         plan = self._plan(asop, supplied, bound, depth=1, seen=())
+        blockers = self._run_blockers(blocked_by, queue)
 
         reject_reserved(metadata, work_kwargs.get("natural_key"))
         parent_metadata = dict(metadata or {})
@@ -864,6 +877,7 @@ class SopLibrary:
             "version": asop.version,
             "inputs": supplied,
             "bindings": bound,
+            **({"blocked_by": blockers} if blockers else {}),
         }
         if chain_pin is not None:
             parent_metadata[CHAIN_KEY] = dict(chain_pin)
@@ -906,7 +920,8 @@ class SopLibrary:
             "inputs": supplied,
             "bindings": bound,
             "chain": dict(chain_pin) if chain_pin is not None else None,
-            "steps": self._file(plan, queue, parent.id),
+            "blockedBy": blockers,
+            "steps": self._file(plan, queue, parent.id, inherited=blockers),
         }
 
     def _runnable(self, asop_id: str, version: Optional[int], *, nested: bool = False) -> ASOP:
@@ -1107,11 +1122,48 @@ class SopLibrary:
             plan["uses"] = dict(step.uses)
         return plan
 
-    def _file(self, nodes: list[dict], queue: Queue, parent_id: str) -> list[dict]:
-        """File one level of the tree, in order, resolving `after` to ids."""
+    @staticmethod
+    def _run_blockers(blocked_by: object, queue: Queue) -> list[str]:
+        """The run-level `blocked_by`, refused whole before anything is filed."""
+        if blocked_by is None or blocked_by == ():
+            return []
+        if isinstance(blocked_by, (str, dict)) or not isinstance(blocked_by, (list, tuple)):
+            raise _refuse("blocked_by_invalid", "blocked_by must be a list of work item ids",
+                          "Send blockedBy: [\"w-...\", ...] — the items this run's first steps wait on.")
+        ids = [b for b in blocked_by]
+        if any(not isinstance(b, str) or not b.strip() for b in ids):
+            raise _refuse("blocked_by_invalid", "blocked_by holds an empty or non-string id",
+                          "Every entry is a work item id.")
+        duplicated = sorted({b for b in ids if ids.count(b) > 1})
+        if duplicated:
+            raise _refuse("blocked_by_invalid", f"blocked_by names {duplicated} more than once",
+                          "Name each blocker once.")
+        unknown = [b for b in ids if queue.get(b) is None]
+        if unknown:
+            raise _refuse(
+                "blocked_by_invalid",
+                f"blocked_by names {unknown}, which this queue does not hold",
+                "Name items that exist. An unknown blocker can never be done, so the run's "
+                "first steps would wait forever — refused before anything is filed.",
+            )
+        return ids
+
+    def _file(self, nodes: list[dict], queue: Queue, parent_id: str,
+              inherited: Sequence[str] = ()) -> list[dict]:
+        """File one level of the tree, in order, resolving `after` to ids.
+
+        A node with no `after` is a ROOT of its level and waits on `inherited`
+        instead: the run's `blocked_by` at the top level, and, for a `uses`
+        step's inner procedure, whatever that step itself waits on — so an
+        inner procedure never starts ahead of the outer step it implements.
+        """
         by_step: dict[int, str] = {}
         filed: list[dict] = []
         for node in nodes:
+            own_blockers = (
+                [by_step[ref] for ref in node["after"] if ref in by_step]
+                if node["after"] else list(inherited)
+            )
             metadata = {
                 PARENT_KEY: parent_id,
                 REF_KEY: node["pin"],
@@ -1122,7 +1174,7 @@ class SopLibrary:
                 metadata=metadata,
                 verify=gate_payload(node["gate"]),
                 assigned_agent=node["binding"],
-                blocked_by=[by_step[ref] for ref in node["after"] if ref in by_step],
+                blocked_by=own_blockers,
                 by_plane=True,
             )
             by_step[node["step"]] = item.id
@@ -1136,7 +1188,7 @@ class SopLibrary:
             }
             if node["children"]:
                 entry["uses"] = node["uses"]
-                entry["children"] = self._file(node["children"], queue, item.id)
+                entry["children"] = self._file(node["children"], queue, item.id, inherited=own_blockers)
             filed.append(entry)
         return filed
 
@@ -1229,8 +1281,23 @@ class SopLibrary:
             # In a chain, `drifted` compares against the ACTIVE version, which
             # the chain deliberately does not follow — the manifest is the pin.
             "chain": (parent.metadata or {}).get(CHAIN_KEY),
+            # The run-level blockers and, of those, the ones not done yet with
+            # their status — so a run held by a FAILED upstream says so instead
+            # of reading as merely pending.
+            "blockedBy": list(record.get("blocked_by") or []),
+            "waitingOn": self._waiting_on(record.get("blocked_by") or [], queue),
             "steps": self._step_views(parent.id, index),
         }
+
+    @staticmethod
+    def _waiting_on(blockers: Sequence[str], queue: Queue) -> list[dict]:
+        out = []
+        for blocker in blockers:
+            item = queue.get(blocker)
+            status = item.status.value if item is not None else "unknown"
+            if status != WorkStatus.DONE.value:
+                out.append({"itemId": blocker, "status": status})
+        return out
 
     def _step_views(self, parent_id: str, index: dict) -> list[dict]:
         out = []

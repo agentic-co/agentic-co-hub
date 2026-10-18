@@ -105,3 +105,28 @@ charged, as in v3.5. `verify_cannot_evaluate` is a reserved metadata key: no cal
 The spec's own bead status for this case is `cannot_evaluate` (§5.2). The plane represents it as
 `verify_failed` plus the flag; the dedicated status is designed and deferred — `docs/roadmap.md`,
 "A dedicated `cannot_evaluate` status".
+
+## A run waiting on other work: `blockedBy` (owner decision 2026-10-18)
+
+`POST /sops/{id}/run {…, "blockedBy": ["w-…", …]}` (and `SopLibrary.run(blocked_by=…)`) files a run
+whose first steps wait on other work items — how a runtime sequences one run after another.
+
+- **What waits.** Every **root** step — a step with no in-run predecessor (`after: []`, or step 1; an
+  omitted `after` means "after the step before", so it is not a root). Non-root steps wait only on their
+  predecessors, as before.
+- **Nested procedures (`uses`).** An inner procedure's roots wait on whatever their outer step waits on:
+  the run's blockers when the `uses` step is a root, the outer predecessors otherwise. An inner procedure
+  never starts ahead of the outer step it implements.
+- **The parent.** Carries no extra blocker: it already waits on its steps, so it reads `pending` like any
+  run whose steps have not finished. The run view adds `blockedBy` (the run's blockers) and `waitingOn`
+  (`[{itemId, status}]` for each blocker not yet `done`).
+- **Release.** A root becomes ready when **every** blocker is `done`. A blocker that is `failed`,
+  `verify_failed` or still awaiting verification keeps it blocked — never released silently — and
+  `waitingOn` names it with its status.
+- **Refused before anything is filed** (`422 blocked_by_invalid`): a value that is not a list of ids, an
+  empty id, an id named twice, or an id this queue does not hold. A run cannot name itself: its ids do
+  not exist until it is filed.
+
+There is no MCP tool for running a procedure (HTTP-only by design, ADR 0004), so there is no relay to
+forward it. `RUN_BODY_FIELDS` in `agentco/app.py` is the route's wire map, and
+`tests/test_run_blocked_by.py` pins it to `SopLibrary.run`'s and `Queue.create`'s signatures.
