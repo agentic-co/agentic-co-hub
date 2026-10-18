@@ -226,6 +226,7 @@ class Registry:
         artifact_uri: str,
         purpose: str,
         agent_label: Optional[str] = None,
+        ttl_days: Optional[int] = None,
     ) -> dict:
         """Baseline a document by pointer. The body is never sent or stored.
 
@@ -234,6 +235,8 @@ class Registry:
         You get told at the next cadence boundary if it moves.
         """
         body: dict[str, Any] = {"artifactUri": artifact_uri, "purpose": purpose}
+        if ttl_days is not None:
+            body["ttlDays"] = ttl_days
         if agent_label:
             body["agentLabel"] = agent_label
         return self._call("POST", "/snapshots", body)

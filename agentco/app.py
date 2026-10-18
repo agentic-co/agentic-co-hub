@@ -471,6 +471,9 @@ def create_app(
                 actor=actor,
                 artifact_uri=payload.get("artifactUri", ""),
                 purpose=payload.get("purpose", ""),
+                # Read here as the MCP tool already did; unread, `ttlDays` was
+                # accepted with a 200 and the default silently applied.
+                ttl_days=_int(payload, "ttlDays", snapshots.DEFAULT_TTL_DAYS),
                 agent_label=payload.get("agentLabel"),
             )
 
