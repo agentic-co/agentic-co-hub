@@ -67,6 +67,7 @@ from agentco.work import (
     WorkStatus,
     pin_of,
     reject_reserved,
+    self_verifying_gate,
 )
 from asop.gates import GATE_FIELDS
 from asop.gates import validate_gate as _validate_gate
@@ -1053,6 +1054,16 @@ class SopLibrary:
                         "whether or not the author wrote it down.",
                         status=409,
                     )
+
+        # A human step bound to its own gate's verifier. The queue refuses it
+        # too, but only when it reaches that step — after the parent and every
+        # earlier step are filed. Checked here, with the rest, so a refused run
+        # files nothing.
+        for step in asop.steps:
+            if step.uses is None:
+                refusal = self_verifying_gate(step.gate, bindings.get(step.role))
+                if refusal is not None:
+                    raise refusal
 
         nodes: list[dict] = []
         for step in asop.steps:
