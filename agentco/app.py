@@ -167,6 +167,19 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     ("POST", "/approvals"): wire.strict(
         ("artefact", "digest", "subset"), "a person's approval — an absent `subset` approves every subject",
         refused_by_name=("approved_by", "approved_at")),
+    # Shared memory (ADR 0006): writes are strict — a dropped `provenance`,
+    # `label` or `expected_version` would weaken what the item record promises.
+    ("POST", "/memory"): wire.strict(
+        ("label", "layer", "title", "body", "kind", "tags", "applies_to", "provenance"),
+        "an item's owner label and provenance"),
+    ("POST", "/memory/{item_id}/revise"): wire.strict(
+        ("title", "body", "kind", "tags", "applies_to", "provenance", "expected_version"),
+        "an item's content and the version it was read at"),
+    ("POST", "/memory/{item_id}/pin"): wire.strict(
+        ("pinned", "review_by", "expected_version"), "the pinned class and its calendar review"),
+    ("POST", "/memory/{item_id}/retire"): wire.strict(("expected_version",), "the version it was read at"),
+    **{("GET", path): wire.lenient() for path in (
+        "/memory", "/memory/{item_id}", "/memory/{item_id}/history")},
     # Reads take no body. Lenient, so a stray body never fails a read.
     **{("GET", path): wire.lenient() for path in (
         "/events", "/work", "/sops/{sop_id}/outcomes", "/runs", "/runs/{run_id}",

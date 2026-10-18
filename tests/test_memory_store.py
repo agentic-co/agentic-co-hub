@@ -378,4 +378,6 @@ def test_http_create_refuses_fields_the_hub_assigns(client):
     response = post(client, "/memory", "kofi", {
         "label": {"owner": "acme", "level": "internal"}, "layer": "shared", "title": "t", "body": "b",
         "provenance": PROV, "authority": "hub-z"})
-    assert response.status_code == 400 and response.json()["code"] == "memory_invalid"
+    # The route is strict about unknown keys (agentco/wire.py), so this is refused
+    # before the store sees it; the store would refuse it too (memory_invalid).
+    assert response.status_code == 422 and response.json()["code"] == "unknown_field"
