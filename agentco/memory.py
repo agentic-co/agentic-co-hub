@@ -72,6 +72,37 @@ REVISABLE = ("title", "body", "kind", "tags", "applies_to", "provenance")
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
+#: Shared memory is OFF unless an operator turns it on (owner decision
+#: 2026-10-18): the slices land on main before the whole of ADR 0006 does, and a
+#: hub must not start holding and serving owner-labeled items by upgrading.
+MEMORY_ENV_VAR = "AGENTCO_MEMORY"
+_ON, _OFF = ("on", "true", "1", "yes"), ("off", "false", "0", "no", "")
+
+
+def memory_enabled(value: Optional[str] = None) -> bool:
+    """`AGENTCO_MEMORY=on|off`, default off. Any other value refuses to start:
+    a typo that silently left memory off — or on — is the failure this avoids."""
+    raw = (os.environ.get(MEMORY_ENV_VAR, "") if value is None else value).strip().lower()
+    if raw in _ON:
+        return True
+    if raw in _OFF:
+        return False
+    raise ValueError(f"{MEMORY_ENV_VAR}={raw!r}: expected 'on' or 'off' (default off)")
+
+
+def memory_disabled() -> Refusal:
+    """The one answer every memory path gives while the switch is off."""
+    return Refusal(
+        code="memory_disabled",
+        message="shared memory is not enabled on this hub",
+        remediation=(
+            f"An operator turns it on with {MEMORY_ENV_VAR}=on (docs/memory.md). It is off by "
+            f"default; while off, no memory store is opened and nothing is held or served."
+        ),
+        http_status=404,
+    )
+
+
 def resolve_hub_id(hub_id: Optional[str] = None) -> str:
     return (hub_id or os.environ.get(HUB_ID_ENV_VAR) or DEFAULT_HUB_ID).strip()
 

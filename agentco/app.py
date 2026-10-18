@@ -62,13 +62,15 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, chains, clearance as clearance_module, db, digests, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, chains, clearance as clearance_module, db, wire, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
-from agentco.memory import open_memory_store
+from agentco.memory import memory_disabled, open_memory_store
+from agentco.memory import memory_enabled as memory_switch
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
 from agentco.refusals import classify
 from agentco.sop import (
+    CHAIN_FIELDS,
     SopError,
     SopLibrary,
     resolve_sop_store,
@@ -93,8 +95,98 @@ from agentco.work import (
 # the half the author just wrote. `steps` carries the gates, so the wire shape
 # of a procedure is one object rather than a body plus a gate the filer supplies
 # — which is the v3 change this list is the wire half of.
+#
+# The chaining fields (v3.5 hand-offs, v3.6 entry gates and rework) come from
+# the installed contract's own `CHAIN_FIELDS`. They were missing from this list
+# until a live chain run found every one of them dropped on the way in, with a
+# 200; `tests/test_sop_wire_fields.py` now pins this list to the dataclass.
 SOP_BODY_KEYS = (*ASOP_TEXT_FIELDS, "task_type", "inputs", "roles", "constraints",
-                 "steps", "proposals")
+                 "steps", "proposals", *CHAIN_FIELDS)
+
+# The wire name → `SopLibrary.run` keyword for `POST /sops/{id}/run`. A literal
+# argument list in the route dropped `blockedBy` with a 200 (found by the live
+# wire probes, 2026-10-18), the same class as `SOP_BODY_KEYS` above.
+# `tests/test_run_blocked_by.py` pins this map to `run`'s and `Queue.create`'s
+# signatures, minus `RUN_NOT_ON_THE_WIRE`, so a new keyword fails a test.
+RUN_BODY_FIELDS = {
+    "inputs": "inputs", "bindings": "bindings", "version": "version", "title": "title",
+    "metadata": "metadata", "blockedBy": "blocked_by", "requires": "requires",
+    "naturalKey": "natural_key", "source": "source", "sourceId": "source_id",
+    "kind": "kind", "subject": "subject", "period": "period",
+}
+#: Keywords `run` or `Queue.create` accept that the route deliberately does not
+#: read from the body, each with its reason.
+RUN_NOT_ON_THE_WIRE = {
+    "asop_id": "the path", "queue": "the plane's",
+    "chain_pin": "resolved by the plane from `chain` (agentco/chains.py)",
+    "verify": "refused: the gate belongs to the step",
+    "assigned_agent": "steps are assigned by `bindings`; a run parent is never pulled",
+    "by_plane": "plane-internal",
+}
+
+# Every route's body policy (agentco/wire.py): STRICT refuses an unknown key
+# 422, LENIENT serves the request and reports `ignored`. Strict where a dropped
+# key can silently remove a safety property; the reason travels in the refusal.
+# Keys a route refuses BY NAME with its own code (author, adopted_by, ...) are
+# `refused_by_name`, so that specific refusal is the one a caller sees. `tests/test_wire.py`
+# fails on a route that is not declared here.
+_IDENTITY = ("author", "author_kind")
+ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
+    ("POST", "/scope-claims"): wire.strict(
+        ("repo", "prefixes", "intent", "holder", "ttlSeconds"), "a scope claim's paths and lease"),
+    ("POST", "/scope-claims/{lease_uid}/release"): wire.lenient(("action",)),
+    ("POST", "/snapshots"): wire.lenient(("artifactUri", "purpose", "ttlDays")),
+    ("POST", "/digests"): wire.lenient(("text", "generatedAt", "meta")),
+    ("POST", "/work"): wire.strict(
+        ("title", "requires", "blockedBy", "assignedAgent", "naturalKey", "source", "sourceId",
+         "kind", "subject", "period", "metadata", "verify"),
+        "a misspelt `verify` filed an ungated item"),
+    ("POST", "/work/pull"): wire.strict(("capabilities", "ttlSeconds"), "the capabilities a claim is checked against"),
+    ("POST", "/work/{item_id}/report"): wire.strict(
+        ("status", "attempt", "result", "idempotencyKey", "attestation"),
+        "the fence, the idempotency key and the attestation"),
+    ("POST", "/work/{item_id}/adjudicate"): wire.strict(
+        ("verdict", "evidence"), "the adjudication record", refused_by_name=("adjudicator", "by")),
+    ("POST", "/work/{item_id}/attest"): wire.strict(
+        ("attestation", "capabilities", "adjudication"), "the gate's evidence"),
+    ("POST", "/sops"): wire.strict(("title", *SOP_BODY_KEYS), "a procedure's gates and chaining",
+                                   refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/revise"): wire.strict(("title", *SOP_BODY_KEYS),
+                                                    "a procedure's gates and chaining",
+                                                    refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/activate"): wire.lenient(("version",), refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/retire"): wire.lenient(refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/run"): wire.strict(
+        (*RUN_BODY_FIELDS, "chain"), "a run's blockers, chain pin and bindings",
+        refused_by_name=("verify", "gate")),
+    ("POST", "/runs/{run_id}/promote"): wire.lenient(("taskType", "title"), refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/propose"): wire.lenient(refused_by_name=_IDENTITY),
+    ("POST", "/chains/manifests"): wire.strict(("manifest",), "the pins a chain resolves from"),
+    ("POST", "/chains/{chain}/adoptions"): wire.strict(
+        ("to", "reason"), "a person's adoption record",
+        refused_by_name=("impact", "adopted_by", "adopted_at", "from")),
+    ("POST", "/approvals"): wire.strict(
+        ("artefact", "digest", "subset"), "a person's approval — an absent `subset` approves every subject",
+        refused_by_name=("approved_by", "approved_at")),
+    # Shared memory (ADR 0006): writes are strict — a dropped `provenance`,
+    # `label` or `expected_version` would weaken what the item record promises.
+    ("POST", "/memory"): wire.strict(
+        ("label", "layer", "title", "body", "kind", "tags", "applies_to", "provenance"),
+        "an item's owner label and provenance"),
+    ("POST", "/memory/{item_id}/revise"): wire.strict(
+        ("title", "body", "kind", "tags", "applies_to", "provenance", "expected_version"),
+        "an item's content and the version it was read at"),
+    ("POST", "/memory/{item_id}/pin"): wire.strict(
+        ("pinned", "review_by", "expected_version"), "the pinned class and its calendar review"),
+    ("POST", "/memory/{item_id}/retire"): wire.strict(("expected_version",), "the version it was read at"),
+    **{("GET", path): wire.lenient() for path in (
+        "/memory", "/memory/search", "/memory/clearance", "/memory/{item_id}", "/memory/{item_id}/history")},
+    # Reads take no body. Lenient, so a stray body never fails a read.
+    **{("GET", path): wire.lenient() for path in (
+        "/events", "/work", "/sops/{sop_id}/outcomes", "/runs", "/runs/{run_id}",
+        "/sops/{sop_id}/proposals", "/sops", "/sops/{sop_id}", "/chains/{chain}",
+        "/chains/{chain}/impact", "/approvals", "/metrics", "/divergence")},
+}
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
@@ -222,6 +314,7 @@ def create_app(
     hub_clearance: Optional[dict] = None,
     clearances: Optional[dict] = None,
     memory_levels: Optional[Iterable[str]] = None,
+    memory_enabled: Optional[bool] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -247,15 +340,22 @@ def create_app(
     queue = open_queue(work_store)
     library = open_sop_library(sop_store)
     # Shared memory (ADR 0006): the store, and the two clearances every read
-    # and write of it is gated by — this hub's and the calling actor's.
-    memory = open_memory_store(memory_store, hub_id=hub_id)
-    walls = clearance_module.build(hub_clearance, clearances, memory_levels)
+    # and write of it is gated by — this hub's and the calling actor's. OFF by
+    # default (AGENTCO_MEMORY): while off the store is never opened, and
+    # `_handle` answers every /memory route `memory_disabled` before any handler.
+    memory_on = memory_switch() if memory_enabled is None else bool(memory_enabled)
+    memory = open_memory_store(memory_store, hub_id=hub_id) if memory_on else None
+    walls = clearance_module.build(hub_clearance, clearances, memory_levels) if memory_on else None
     # Every write these two perform goes on the change feed, wired ONCE here
     # rather than at each handler. A harness following `GET /events?since=`
     # learns about new procedures and new work without asking the library or
     # the queue for everything they hold — which is what both of them do when
     # asked, and what a fleet of a hundred pollers cannot afford.
-    queue.announce = library.announce = memory.announce = events.announcer(conn)
+    queue.announce = library.announce = events.announcer(conn)
+    if memory is not None:
+        # Off (AGENTCO_MEMORY), there is no store, so nothing can announce a
+        # memory event: the feed never carries one.
+        memory.announce = queue.announce
     # Who answers for each actor, read from the SAME key table that decides
     # whether they may sign at all. Passed as a callable so an offboarding has
     # one answer rather than two: the table is edited while this process runs,
@@ -307,6 +407,8 @@ def create_app(
     app.state.conn = conn
     app.state.keys = keys
     app.state.operator = resolve_operator(operator)
+    app.state.ignored = wire.Ignored()
+    app.state.memory_enabled = memory_on
 
     async def _handle(
         request: Request,
@@ -386,8 +488,15 @@ def create_app(
             # applied per-handler is a rule the next handler forgets.
             auth.reject_actor_in_body(payload)
             payload["agentLabel"] = auth.normalise_agent_label(payload.get("agentLabel"))
+            route = request.scope.get("route")
+            if not app.state.memory_enabled and getattr(route, "path", "").startswith("/memory"):
+                raise memory_disabled()
+            policy = ROUTE_BODIES.get((request.method, getattr(route, "path", "")))
+            ignored = wire.check(policy, payload, verb=verb, ignored=app.state.ignored) if policy else []
 
             result = work(actor, payload)
+            if ignored and isinstance(result, dict):
+                result = {**result, "ignored": ignored}
             elapsed = (time.perf_counter() - started) * 1000
             metrics.record_call(
                 conn,
@@ -475,6 +584,9 @@ def create_app(
                 actor=actor,
                 artifact_uri=payload.get("artifactUri", ""),
                 purpose=payload.get("purpose", ""),
+                # Read here as the MCP tool already did; unread, `ttlDays` was
+                # accepted with a 200 and the default silently applied.
+                ttl_days=_int(payload, "ttlDays", snapshots.DEFAULT_TTL_DAYS),
                 agent_label=payload.get("agentLabel"),
             )
 
@@ -504,7 +616,9 @@ def create_app(
                 since=params.get("since"),
                 limit=int(params.get("limit") or events.DEFAULT_LIMIT),
                 kind=params.get("kind"),
-                viewer=walls.effective(actor),
+                # Memory off: no viewer, so no walled event is ever shown (and
+                # none exists, since no store was opened to announce one).
+                viewer=walls.effective(actor) if walls is not None else None,
             )
 
         return await _handle(request, "events", work)
@@ -900,23 +1014,13 @@ def create_app(
                 chain_pin = None
                 if payload.get("chain") is not None:
                     version, chain_pin = chains.pin_for_run(conn, str(payload["chain"]), sop_id, version)
-                run = library.run(
-                    sop_id,
-                    queue,
-                    inputs=payload.get("inputs") or {},
-                    bindings=payload.get("bindings") or {},
-                    version=version,
-                    chain_pin=chain_pin,
-                    title=payload.get("title"),
-                    metadata=payload.get("metadata"),
-                    requires=payload.get("requires") or (),
-                    natural_key=payload.get("naturalKey"),
-                    source=payload.get("source"),
-                    source_id=payload.get("sourceId"),
-                    kind=payload.get("kind"),
-                    subject=payload.get("subject"),
-                    period=payload.get("period"),
-                )
+                fields = {py: payload[wire] for wire, py in RUN_BODY_FIELDS.items()
+                          if wire in payload and wire != "version"}
+                fields["inputs"] = fields.get("inputs") or {}
+                fields["bindings"] = fields.get("bindings") or {}
+                fields["requires"] = fields.get("requires") or ()
+                fields["blocked_by"] = fields.get("blocked_by") or ()
+                run = library.run(sop_id, queue, version=version, chain_pin=chain_pin, **fields)
             except (SopError, WorkError, NaturalKeyError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             return {"state": "accepted", "run": run}
@@ -1440,6 +1544,8 @@ def create_app(
                 "latency": metrics.verb_latency(conn),
                 "timeToFirstEvent": metrics.time_to_first_event(conn),
                 "conflictPrecision": metrics.conflict_precision(conn),
+                # Keys lenient routes ignored, per verb, since this process started.
+                "ignoredFields": app.state.ignored.as_dict(),
             }
 
         return await _handle(request, "metrics", work)

@@ -568,9 +568,11 @@ class SqlQueue(_SqlBacked, Queue):
         cannot change a result.
         """
         with self._read_tx() as conn:
+            # VERIFY_FAILED too: a could-not-evaluate item is offered for a
+            # re-run (`work.rerun_pending`), and `ready()` decides which are.
             rows = conn.execute(
-                "SELECT * FROM work_items WHERE status IN (?, ?)",
-                (WorkStatus.PENDING.value, WorkStatus.IN_PROGRESS.value),
+                "SELECT * FROM work_items WHERE status IN (?, ?, ?)",
+                (WorkStatus.PENDING.value, WorkStatus.IN_PROGRESS.value, WorkStatus.VERIFY_FAILED.value),
             ).fetchall()
             items = [WorkItem.from_json(json.dumps(_row_to_dict(r))) for r in rows]
 

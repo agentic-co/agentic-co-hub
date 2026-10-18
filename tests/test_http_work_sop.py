@@ -122,7 +122,10 @@ def test_a_body_that_names_its_own_actor_is_refused_not_quietly_ignored(client):
 def test_the_claiming_identity_is_the_authenticated_actor_not_the_payload(client):
     """A worker must not be able to name itself into someone else's lease."""
     create_item(client)
-    pulled = post(client, "/work/pull", "kofi", {"agent": "dana"}).json()
+    named = post(client, "/work/pull", "kofi", {"agent": "dana"})
+    # Refused outright: /work/pull is strict about unknown keys (agentco/wire.py).
+    assert named.status_code == 422 and named.json()["code"] == "unknown_field"
+    pulled = post(client, "/work/pull", "kofi", {}).json()
     assert pulled["item"]["leased_by"] == "kofi", (
         "the body named dana and the server believed it — any actor could now "
         "take any other actor's lease, and the fence would record it as valid"

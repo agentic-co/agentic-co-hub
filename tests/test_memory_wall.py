@@ -39,7 +39,7 @@ def make_app(tmp_path, hub=None):
         work_store=str(tmp_path / "work.jsonl"), sop_store=str(tmp_path / "sops.jsonl"),
         memory_store=str(tmp_path / "memory.jsonl"), hub_id="hub-a", humans=["dana"],
         hub_clearance=hub or {"acme": "confidential", "globex": "internal"},
-        clearances=CLEARANCES, memory_levels=LEVELS,
+        clearances=CLEARANCES, memory_levels=LEVELS, memory_enabled=True,
     ))
 
 
