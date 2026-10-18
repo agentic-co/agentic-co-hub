@@ -219,6 +219,26 @@ def cmd_prune(args) -> int:
     return 0
 
 
+def cmd_prune_events(args) -> int:
+    """Delete change-feed events older than the window, recording the retention floor.
+
+    Dry by default, as `prune` is. A cursor older than the new floor will be
+    refused `cursor_expired` from then on — loudly, never as a silent gap.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from agentco import db, events
+
+    conn = db.connect(app_module.resolve_db_path(args.db))
+    before = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
+    report = events.prune(conn, before=before, dry_run=not args.apply)
+    print(f"retention window: {args.days} days (events before {before[:10]})")
+    print(f"floor: {report['previousFloor']} -> {report['retainedFrom']}; events in scope: {report['deleted']}")
+    if not args.apply:
+        print("\n(dry run — nothing written. Re-run with --apply.)", file=sys.stderr)
+    return 0
+
+
 def cmd_revoke(args) -> int:
     """Remove one actor from the key table. Dry by default.
 
@@ -1164,6 +1184,15 @@ def build_parser() -> argparse.ArgumentParser:
                          help="keep raw rows newer than this (default 30)")
     p_prune.add_argument("--apply", action="store_true", help="actually write (default: dry run)")
     p_prune.set_defaults(func=cmd_prune)
+
+    p_prune_events = sub.add_parser(
+        "prune-events", help="delete old change-feed events, recording the retention floor"
+    )
+    p_prune_events.add_argument("--days", type=int, default=90,
+                                help="keep events newer than this (default 90)")
+    p_prune_events.add_argument("--apply", action="store_true", help="actually delete (default: dry run)")
+    p_prune_events.add_argument("--db", default=None, help="registry database (default: $AGENTCO_REGISTRY_DB)")
+    p_prune_events.set_defaults(func=cmd_prune_events)
 
     p_sync = sub.add_parser(
         "sync", help="pull the hub's active procedures into this harness's local cache"

@@ -245,6 +245,69 @@ def append(
     }
 
 
+# --------------------------------------------------------------------------- #
+# Retention: a floor, never a silent gap (owner decision 10, 2026-10-18)
+#
+# The feed was never pruned, so nothing was lost — and nothing said so either:
+# the day a prune was added, a cursor older than what remained would have read
+# on past the hole as if nothing had happened. Now a prune records a FLOOR (the
+# oldest retained seq) and `read` refuses a cursor that would cross it.
+# --------------------------------------------------------------------------- #
+
+RETENTION_FLOOR_KEY = "events_retention_floor"
+RETENTION_ENV_VAR = "AGENTCO_EVENT_RETENTION"
+
+
+def retention_floor(conn) -> int:
+    """The oldest seq the feed still holds: 1 until anything has been pruned."""
+    row = conn.execute("SELECT value FROM meta WHERE key = ?", (RETENTION_FLOOR_KEY,)).fetchone()
+    return int(row[0]) if row else 1
+
+
+def retention_from_env(value: Optional[str] = None) -> Optional[int]:
+    """`AGENTCO_EVENT_RETENTION`: days to keep (`90` or `90d`). Unset = never prune."""
+    import os
+
+    raw = (os.environ.get(RETENTION_ENV_VAR, "") if value is None else value).strip().lower().removesuffix("d")
+    if not raw:
+        return None
+    days = int(raw)
+    if days < 1:
+        raise ValueError(f"{RETENTION_ENV_VAR} must be at least 1 day, got {value!r}")
+    return days
+
+
+def prune(conn, *, before: str, dry_run: bool = False) -> dict:
+    """Delete the feed's oldest events, and record the floor first.
+
+    Only a CONTIGUOUS prefix goes: every event below the first one that is
+    not older than `before`. An event backdated into the window therefore
+    keeps everything after it, so the floor is exact — every seq at or above
+    it is still there, and a cursor at `floor - 1` resumes with nothing lost.
+    """
+    first_kept = conn.execute(
+        "SELECT MIN(seq) AS s FROM events WHERE occurred_at >= ?", (before,)
+    ).fetchone()
+    newest = conn.execute("SELECT MAX(seq) AS s FROM events").fetchone()
+    old_floor = retention_floor(conn)
+    if first_kept is None or first_kept[0] is None:
+        # Nothing is inside the window: everything up to the newest goes.
+        new_floor = (newest[0] or 0) + 1 if newest and newest[0] is not None else old_floor
+    else:
+        new_floor = int(first_kept[0])
+    new_floor = max(new_floor, old_floor)
+    doomed = conn.execute("SELECT COUNT(*) AS n FROM events WHERE seq < ?", (new_floor,)).fetchone()[0]
+    if not dry_run and new_floor > old_floor:
+        with conn:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (RETENTION_FLOOR_KEY, str(new_floor)),
+            )
+            conn.execute("DELETE FROM events WHERE seq < ?", (new_floor,))
+    return {"state": "dry-run" if dry_run else "pruned", "before": before, "retainedFrom": new_floor,
+            "previousFloor": old_floor, "deleted": int(doomed)}
+
+
 def read(
     conn: sqlite3.Connection,
     *,
@@ -274,6 +337,24 @@ def read(
     an idle feed is a no-op rather than a reset.
     """
     start = decode_cursor(since)
+    floor = retention_floor(conn)
+    if since is not None and start < floor - 1:
+        # Events after this cursor and below the floor were pruned. Reading on
+        # would skip them in silence, which is the one thing a feed must not do.
+        raise Refusal(
+            code="cursor_expired",
+            message=(
+                f"cursor {since!r} (seq {start}) is older than the retention floor: the feed now begins at "
+                f"seq {floor}, so the events between were pruned"
+            ),
+            remediation=(
+                f"Resync: re-read current state from the stores (GET /work, /sops, /runs, /chains), then "
+                f"resume with since={encode_cursor(floor - 1)} — or read with no cursor, which begins at the floor."
+            ),
+            http_status=410,
+        )
+    if since is None and start < floor - 1:
+        start = floor - 1
     bounded = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
     sql = "SELECT * FROM events WHERE seq > ?"
     args: list[Any] = [start]
@@ -305,6 +386,9 @@ def read(
         "events": events,
         "nextCursor": encode_cursor(next_seq),
         "count": len(events),
+        # The oldest seq still held (1 = nothing ever pruned). A reader that
+        # stores cursors can tell how close it is to expiring.
+        "retainedFrom": floor,
     }
 
 
