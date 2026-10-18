@@ -394,6 +394,15 @@ class _RemoteBackend:
         return {"status": "ok", "secretFingerprint": fingerprint}
 
 
+def _memory_state() -> str:
+    from agentco.memory import memory_enabled
+
+    try:
+        return "enabled" if memory_enabled() else "disabled"
+    except ValueError as exc:
+        return f"misconfigured: {exc}"
+
+
 def create_server(
     db_path: Optional[str] = None,
     work_store: Optional[str] = None,
@@ -776,6 +785,8 @@ def create_server(
             **({"auth": backend.auth_check()} if backend.remote else {}),
             "scope": {"minSegments": scope.MIN_SEGMENTS, "intents": list(scope.INTENTS)},
             "eventKinds": list(events_module.KINDS),
+            # Shared memory's switch (AGENTCO_MEMORY), as this server reads it.
+            "memory": _memory_state(),
         }
 
     return mcp

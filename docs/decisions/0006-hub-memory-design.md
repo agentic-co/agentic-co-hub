@@ -7,8 +7,12 @@ record, proposed alongside this one) for the memory channel between hubs
 
 > A decision with no revisit condition is doctrine. Every record here carries one.
 
-Nothing in this record is built. It fixes the shape the implementation has to
-take, and it says which parts of that shape are still guesses.
+It fixes the shape the implementation has to take, and it says which parts of that
+shape are still guesses.
+
+> **Implementation status (updated as slices land):** being built in slices behind
+> `AGENTCO_MEMORY`, **off by default**; what is built, and what is not, is
+> [`docs/memory.md`](../memory.md). The decision below is unchanged by it.
 
 ## Context
 
