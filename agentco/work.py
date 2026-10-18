@@ -393,6 +393,11 @@ RESERVED_METADATA_KEYS = frozenset({
     # where a gate's result is classified. A caller who could set it could make
     # a failed item pullable again without its gate ever having been re-run.
     "verify_cannot_evaluate",
+    # Run ownership (agentco/ownership.py, ASOP §7.2): the owner record, the
+    # pack reference, the epoch a step was claimed under, and a voided lease.
+    # A caller who could set any of them could make itself a run's owner, or
+    # forge the evidence of a transfer.
+    "run_owner", "run_pack", "owner_epoch", "lease_voided",
     # One evidence record per rung of a staged gate, keyed by stage index.
     # Written only where a gate is answered, and read back as the record of
     # WHICH rungs were actually climbed. A caller who could set it could
@@ -1334,6 +1339,13 @@ class Queue:
             frozenset(adjudicators) if adjudicators is not None
             else policy.adjudicators_from_env()
         )
+        # Run ownership (agentco/ownership.py): this hub's id, and which actors
+        # speak for which external store. Re-set by `create_app` when injected.
+        from agentco import ownership
+        from agentco.memory import resolve_hub_id
+
+        self.hub_id: str = resolve_hub_id()
+        self.stores: dict = ownership.stores_from_env()
 
     # -- storage ---------------------------------------------------------
 
@@ -1645,8 +1657,52 @@ class Queue:
                 continue
             if agent and item.assigned_agent and item.assigned_agent != agent:
                 continue
+            if agent and self.stores and not self._may_act(item, agent):
+                continue
             out.append(item)
         return out
+
+    def _may_act(self, item: "WorkItem", agent: str) -> bool:
+        """Whether run ownership lets `agent` take `item` (agentco/ownership.py).
+        `ready()` and `claim()` must agree, as they do on every other rule."""
+        from agentco import ownership
+
+        try:
+            ownership.check_actor(self, item, agent, "claim")
+        except Refusal:
+            return False
+        return True
+
+    def release_for_transfer(self, item_id: str, record: dict,
+                             former_actors: frozenset) -> Optional["WorkItem"]:
+        """What a run transfer does to one open step, in one fenced write.
+
+        * IN_PROGRESS: the lease is voided — back to PENDING, the fence advances,
+          `leased_by` cleared — so the holder's report on the old attempt is
+          refused like any superseded one;
+        * PENDING or IN_PROGRESS and assigned to an actor of the former owner:
+          the assignment is released, so the new owner's ordinary routing can
+          give it to someone who can still act.
+        Anything else (done, awaiting verification, verify_failed) is left as it
+        is: completed work and its evidence are kept."""
+        def release(item: "WorkItem") -> dict:
+            if item.status not in (WorkStatus.PENDING, WorkStatus.IN_PROGRESS):
+                return {}
+            updates: dict = {}
+            note = dict(record)
+            if item.status is WorkStatus.IN_PROGRESS and item.leased_by:
+                updates.update(status=WorkStatus.PENDING, leased_by=None, lease_expires_at=None,
+                               lease_attempt=item.lease_attempt + 1)
+                note["voided_lease_of"] = item.leased_by
+            if item.assigned_agent and item.assigned_agent in former_actors:
+                updates["assigned_agent"] = None
+                note["released_assignment_of"] = item.assigned_agent
+            if not updates:
+                return {}
+            updates["metadata"] = {**(item.metadata or {}), "lease_voided": note}
+            return updates
+
+        return self._mutate(item_id, release)
 
     # -- the lease protocol ----------------------------------------------
 
@@ -1740,6 +1796,13 @@ class Queue:
         one, and every not-yet-updated caller a hole. Items with no `requires`
         are unaffected: nothing is required, so nothing can be missing.
         """
+        from agentco import ownership
+
+        owned = None
+        if self.stores:
+            current = self.get(item_id)
+            if current is not None:
+                owned = ownership.check_actor(self, current, agent, "claim")
         at = now or _now()
         held, unbound = policy.bind_capabilities(agent, capabilities, self.verifiers)
         # From the RAW rows, not from `_read_all()`. `_read_all` drops any row
@@ -1856,9 +1919,14 @@ class Queue:
             # times is not a thousand facts.
             history = list((item.metadata or {}).get("claims") or [])[-19:]
             history.append({"agent": agent, "attempt": item.lease_attempt + 1, "at": _iso(at)})
+            stamped = {**(item.metadata or {}), "claims": history}
+            if owned is not None:
+                # The ownership epoch this lease was taken under: a report after
+                # a transfer is refused on it (`ownership.check_epoch`).
+                stamped[ownership.OWNER_EPOCH_KEY] = owned.get("epoch", 1)
             return {
                 "status": WorkStatus.IN_PROGRESS,
-                "metadata": {**(item.metadata or {}), "claims": history},
+                "metadata": stamped,
                 # `assigned_agent` is deliberately NOT written here. Taking work
                 # is not the same act as being assigned it, and overwriting the
                 # routing decision with the claimant erased the only record that
@@ -2090,6 +2158,12 @@ class Queue:
         verified, and a gate that accepts the executor's verdict is a
         deterministic gate with extra ceremony.
         """
+        if self.stores:
+            from agentco import ownership
+
+            current = self.get(item_id)
+            if current is not None:
+                ownership.check_actor(self, current, submitted_by, "attest")
         if not isinstance(submitted_by, str) or not submitted_by.strip():
             raise Refusal(
                 code=gates.ATTESTATION_INVALID,
@@ -2496,6 +2570,11 @@ class Queue:
         executor — compared against nothing and matched nobody. The party that
         reported could then verify its own report. So: no lease, no report.
         """
+        current = self.get(item_id) if self.stores else None
+        if current is not None:
+            from agentco import ownership
+
+            ownership.check_epoch(self, current)
         if status not in TERMINAL:
             raise Refusal(
                 code="not_terminal",

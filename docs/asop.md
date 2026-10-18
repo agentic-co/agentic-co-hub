@@ -130,3 +130,51 @@ whose first steps wait on other work items — how a runtime sequences one run a
 There is no MCP tool for running a procedure (HTTP-only by design, ADR 0004), so there is no relay to
 forward it. `RUN_BODY_FIELDS` in `agentco/app.py` is the route's wire map, and
 `tests/test_run_blocked_by.py` pins it to `SopLibrary.run`'s and `Queue.create`'s signatures.
+
+## Run ownership and the administrative transfer (ASOP §7.2; owner decision 2026-10-18)
+
+**Spec wording this implements** (asked of the spec's 0.6.1 amendment): *ownership is recorded on the
+run when it is filed and no **run** verb moves it; a recorded administrative transfer may.*
+
+| Setting | Meaning |
+|---|---|
+| `AGENTCO_HUB_ID` | this hub's store id (default `local`); hub-filed runs are owned by it |
+| `AGENTCO_STORES` | external stores and the actors that speak for them: `runtime-a=actor-1\|actor-2,…` or JSON |
+| `AGENTCO_ADMINS` | actors who may transfer a run; each must ALSO be in `AGENTCO_HUMANS`. **New** — there was no admin set before. Unset = nobody (fails closed) |
+
+- **At filing.** A run is owned by this hub, unless the filer speaks for a registered store and sends
+  `ownerStore` (`POST /sops/{id}/run`); a filer who does not is refused `not_the_owner` before anything
+  is filed. The record is on the run: `owner = {store, epoch, since, filed_by, history[]}`
+  (`GET /runs/{id}`). A run filed before this existed reads as hub-owned, epoch 1, `backfilled`; the
+  pulse writes the record down on `--apply`.
+- **Who may flip a step.** For a run owned by another store, only that store's actors may claim, report or
+  attest its steps — anyone else is refused **`not_the_owner`** (403, with the ownership epoch; distinct
+  from `not_the_holder`, which is about a lease). `/work/pull` does not offer such steps to non-owners.
+- **The pack** — `POST /runs/{id}/pack {uri, sha256}`: a location with a scheme and the sha256 of the
+  pack's bytes, never its content. Set by the owner store's actors, or for a hub-owned run by its filer
+  or an admin; a replaced reference is kept in `previous`.
+- **The transfer** — `POST /runs/{id}/transfer {to, reason}`, declared human AND declared admin;
+  `reason` required; `to` is this hub or a registered store. It needs nothing from the current owner,
+  so it works when the owner's key is revoked or the owner is silent. It:
+  - bumps the **ownership epoch** and appends `{at, by, from, to, reason, epoch}` to the history;
+  - emits **`RunTransferred`** on the change feed;
+  - **voids every live lease** on the run's steps (back to `pending`, `lease_attempt` +1, `leased_by`
+    cleared, `metadata.lease_voided` says why) and **releases open steps assigned** to the former
+    owner's actors, so the new owner's ordinary routing applies;
+  - leaves **done** steps done, with their evidence; awaiting-verification and `verify_failed` steps
+    are unchanged and answerable only under the new owner.
+
+  After it, the former owner is fenced out: a report on a lease taken under the old epoch is
+  `not_the_owner` naming both epochs, and the former store's actors may no longer claim, report or
+  attest the run's steps. Transferred to the hub, the run's open steps are worked through the hub's own
+  queue under normal fencing.
+- **Orphans.** The pulse reports an attention finding (`ownership.orphaned-run`) for every open run whose
+  owner store is not registered, none of whose actors still holds a key (after `agentco revoke
+  --apply`), or whose actors are all silent past their declared cadence (`AGENTCO_CADENCE`) — naming the
+  run, the owner, and the remedy: the transfer verb.
+
+**If the spec lands differently.** Should 0.6.1 keep "no verb moves it" without the administrative
+exception, the hub is non-conforming in exactly these places: the `POST /runs/{id}/transfer` route
+(`agentco/app.py`), `ownership.transfer` and `Queue.release_for_transfer`, the `RunTransferred` event
+kind, and the orphan finding's remedy text. Ownership at filing, `not_the_owner`, the epoch and the
+pack reference do not depend on it.
