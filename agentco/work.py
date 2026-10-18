@@ -1045,6 +1045,38 @@ def plan_vs_actual(item: "WorkItem", *, reported: "WorkStatus", landed: "WorkSta
     }
 
 
+def self_verifying_gate(gate: Optional[dict], assigned_agent: Optional[str]) -> Optional[Refusal]:
+    """The refusal for a human gate whose verifier is the party doing the work.
+
+    The separation check would refuse this person's verdict when it came, so
+    the gate could only ever resolve on its clock — configured-looking, and
+    unanswerable. Refused at filing, like every other gate that would quietly
+    do nothing (DECIDE-L3 #5).
+
+    A function rather than an inline check because two places must apply it
+    BEFORE anything is written: `build_item` for one item, and
+    `SopLibrary.run`'s planning pass for a whole run. Applied only at the
+    queue, a run was refused at its second step after its parent and first
+    step were already filed — and those went on to be pulled and completed.
+    """
+    if not gate or gate.get("kind") != "human" or not assigned_agent:
+        return None
+    if gate.get("verifier") != assigned_agent:
+        return None
+    return Refusal(
+        code=gates.GATE_INVALID,
+        message=(
+            f"the human gate names {assigned_agent!r} as verifier and the item is "
+            f"assigned to {assigned_agent!r} — the one party a human gate exists to exclude"
+        ),
+        remediation=(
+            "Name somebody else as verifier, or assign the work to somebody else. "
+            "A person may not sign off their own step; the plane would refuse the "
+            "verdict, and the gate would resolve on its clock with nobody having looked."
+        ),
+    )
+
+
 def build_item(
     title: str,
     *,
@@ -1078,23 +1110,9 @@ def build_item(
     if not by_plane:
         reject_reserved(metadata, natural_key)
     gate = gates.validate_gate(verify) if verify is not None else None
-    if gate and gate.get("kind") == "human" and assigned_agent and gate.get("verifier") == assigned_agent:
-        # The separation check would refuse this person's verdict when it came,
-        # so the gate could only ever resolve on its clock — configured-looking,
-        # and unanswerable. Refused here, like every other gate that would
-        # quietly do nothing (DECIDE-L3 #5).
-        raise Refusal(
-            code=gates.GATE_INVALID,
-            message=(
-                f"the human gate names {assigned_agent!r} as verifier and the item is "
-                f"assigned to {assigned_agent!r} — the one party a human gate exists to exclude"
-            ),
-            remediation=(
-                "Name somebody else as verifier, or assign the work to somebody else. "
-                "A person may not sign off their own step; the plane would refuse the "
-                "verdict, and the gate would resolve on its clock with nobody having looked."
-            ),
-        )
+    refusal = self_verifying_gate(gate, assigned_agent)
+    if refusal is not None:
+        raise refusal
     return WorkItem(
         id=f"w-{uuid.uuid4().hex[:8]}",
         title=title,
