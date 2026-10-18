@@ -101,6 +101,27 @@ from agentco.work import (
 SOP_BODY_KEYS = (*ASOP_TEXT_FIELDS, "task_type", "inputs", "roles", "constraints",
                  "steps", "proposals", *CHAIN_FIELDS)
 
+# The wire name → `SopLibrary.run` keyword for `POST /sops/{id}/run`. A literal
+# argument list in the route dropped `blockedBy` with a 200 (found by the live
+# wire probes, 2026-10-18), the same class as `SOP_BODY_KEYS` above.
+# `tests/test_run_blocked_by.py` pins this map to `run`'s and `Queue.create`'s
+# signatures, minus `RUN_NOT_ON_THE_WIRE`, so a new keyword fails a test.
+RUN_BODY_FIELDS = {
+    "inputs": "inputs", "bindings": "bindings", "version": "version", "title": "title",
+    "metadata": "metadata", "blockedBy": "blocked_by", "requires": "requires",
+    "naturalKey": "natural_key", "source": "source", "sourceId": "source_id",
+    "kind": "kind", "subject": "subject", "period": "period",
+}
+#: Keywords `run` or `Queue.create` accept that the route deliberately does not
+#: read from the body, each with its reason.
+RUN_NOT_ON_THE_WIRE = {
+    "asop_id": "the path", "queue": "the plane's",
+    "chain_pin": "resolved by the plane from `chain` (agentco/chains.py)",
+    "verify": "refused: the gate belongs to the step",
+    "assigned_agent": "steps are assigned by `bindings`; a run parent is never pulled",
+    "by_plane": "plane-internal",
+}
+
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
 
@@ -898,23 +919,13 @@ def create_app(
                 chain_pin = None
                 if payload.get("chain") is not None:
                     version, chain_pin = chains.pin_for_run(conn, str(payload["chain"]), sop_id, version)
-                run = library.run(
-                    sop_id,
-                    queue,
-                    inputs=payload.get("inputs") or {},
-                    bindings=payload.get("bindings") or {},
-                    version=version,
-                    chain_pin=chain_pin,
-                    title=payload.get("title"),
-                    metadata=payload.get("metadata"),
-                    requires=payload.get("requires") or (),
-                    natural_key=payload.get("naturalKey"),
-                    source=payload.get("source"),
-                    source_id=payload.get("sourceId"),
-                    kind=payload.get("kind"),
-                    subject=payload.get("subject"),
-                    period=payload.get("period"),
-                )
+                fields = {py: payload[wire] for wire, py in RUN_BODY_FIELDS.items()
+                          if wire in payload and wire != "version"}
+                fields["inputs"] = fields.get("inputs") or {}
+                fields["bindings"] = fields.get("bindings") or {}
+                fields["requires"] = fields.get("requires") or ()
+                fields["blocked_by"] = fields.get("blocked_by") or ()
+                run = library.run(sop_id, queue, version=version, chain_pin=chain_pin, **fields)
             except (SopError, WorkError, NaturalKeyError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             return {"state": "accepted", "run": run}
