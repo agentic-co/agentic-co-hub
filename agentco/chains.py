@@ -36,7 +36,7 @@ import uuid
 from typing import Any, Iterable, Mapping, Optional
 
 from agentco import events, policy
-from agentco.errors import Refusal
+from agentco.errors import Refusal, human_required, manifest_unknown
 from agentco.sop import ASOP, CHAIN_KEY, SopContractError, SopStatus, asop_payload, validate_asop
 
 try:  # asop-spec 0.6.0 (spec v3.6)
@@ -256,11 +256,9 @@ def impact(conn, chain: str, to: str) -> dict:
         raise _unknown_chain(chain)
     old, new = _manifest(conn, current), _manifest(conn, to)
     if new is None or new["chain"] != chain:
-        raise Refusal(
-            code="manifest_member_unknown",
-            message=f"no manifest {to} is recorded for chain {chain!r}",
-            remediation="Record the target manifest for this chain first (POST /chains/manifests).",
-            http_status=404,
+        raise manifest_unknown(
+            f"no manifest {to} is recorded for chain {chain!r}",
+            "Record the target manifest for this chain first (POST /chains/manifests).",
         )
     return {"chain": chain, "from": current, "to": to, "impact": adoption_impact(old, new)}
 
@@ -284,14 +282,10 @@ def adopt(conn, *, chain: str, to: str, actor: str, humans: Iterable[str],
     """
     _require_contract()
     if policy.kind_of(actor, frozenset(humans)) != policy.HUMAN:
-        raise Refusal(
-            code="capability_mismatch",
-            message=f"{actor!r} is not a declared human; only a person records an adoption",
-            remediation=(
-                "Ask a person the operator declared in AGENTCO_HUMANS to record it. An "
-                "agent may read GET /chains/{chain}/impact and propose; it may not adopt."
-            ),
-            http_status=403,
+        raise human_required(
+            f"{actor!r} is not a declared human; only a person records an adoption",
+            "Ask a person the operator declared in AGENTCO_HUMANS to record it. An "
+            "agent may read GET /chains/{chain}/impact and propose; it may not adopt.",
         )
     preview = impact(conn, chain, to)
     old, new = _manifest(conn, preview["from"]), _manifest(conn, to)
@@ -430,11 +424,9 @@ def record_approval(conn, *, actor: str, humans: Iterable[str], artefact: Any, d
     """
     _require_contract()
     if policy.kind_of(actor, frozenset(humans)) != policy.HUMAN:
-        raise Refusal(
-            code="capability_mismatch",
-            message=f"{actor!r} is not a declared human; an approval is a person's",
-            remediation="Have a person the operator declared in AGENTCO_HUMANS record it.",
-            http_status=403,
+        raise human_required(
+            f"{actor!r} is not a declared human; an approval is a person's",
+            "Have a person the operator declared in AGENTCO_HUMANS record it.",
         )
     record = {"schema": APPROVAL_SCHEMA, "artefact": artefact, "digest": digest,
               "approved_by": actor, "approved_at": _now()}

@@ -389,6 +389,15 @@ RESERVED_METADATA_KEYS = frozenset({
     "verifies", "claims", "lease_report", "verify_parked_at", "verify_resolution",
     "verify_history", "verify_escalated", "verify_quarantined", "verify_retry",
     "verify_verdict", "natural_key_conflict",
+    # The could-not-evaluate record (spec v3.6 §3.3; docs/asop.md). Written only
+    # where a gate's result is classified. A caller who could set it could make
+    # a failed item pullable again without its gate ever having been re-run.
+    "verify_cannot_evaluate",
+    # Run ownership (agentco/ownership.py, ASOP §7.2): the owner record, the
+    # pack reference, the epoch a step was claimed under, and a voided lease.
+    # A caller who could set any of them could make itself a run's owner, or
+    # forge the evidence of a transfer.
+    "run_owner", "run_pack", "owner_epoch", "lease_voided",
     # One evidence record per rung of a staged gate, keyed by stage index.
     # Written only where a gate is answered, and read back as the record of
     # WHICH rungs were actually climbed. A caller who could set it could
@@ -1045,6 +1054,119 @@ def plan_vs_actual(item: "WorkItem", *, reported: "WorkStatus", landed: "WorkSta
     }
 
 
+# --------------------------------------------------------------------------- #
+# The third gate outcome: could not evaluate (spec v3.6 §3.3, §5.4)
+#
+# A deterministic check that could not judge the work — the gate's declared
+# `cannot_evaluate_exit`, or an exit 0 that ran fewer than `min_cases` — is not
+# a check that judged it wrong. The item still lands VERIFY_FAILED, so nothing
+# downstream is released (`releases_blockers` is DONE only), but:
+#
+#   * `verify_failures` is NOT incremented: the repair budget counts the
+#     executor's failures, and this is not one;
+#   * `verify_retry.decision` is "re-run", never "fix" or "escalate";
+#   * the item carries `metadata.verify_cannot_evaluate` = {pending, count, last};
+#   * while `pending`, the item is offered by `ready()` and accepted by
+#     `claim()` again — the spec's "re-filed". The claim advances
+#     `lease_attempt` exactly as any claim does, because that is the fence
+#     (§5.6: "the lease attempt increments, because that is fencing; §5.4's
+#     budget does not"), so a report on the old attempt is still refused.
+#
+# The next gate result of any other kind clears `pending` and keeps the count.
+# A dedicated status for this is the cleaner long-term shape and is documented,
+# with its cost, in docs/roadmap.md ("A dedicated cannot_evaluate status").
+# --------------------------------------------------------------------------- #
+
+CANNOT_EVALUATE_KEY = "verify_cannot_evaluate"
+RERUN_DECISION = "re-run"
+
+try:  # asop-spec 0.6.0
+    from asop.gates import gate_outcome as _gate_outcome_of
+except ImportError:  # 0.4.x / 0.5.x: the third outcome does not exist
+    _gate_outcome_of = None
+
+
+def cannot_evaluate(gate: Optional[dict], record: Optional[dict]) -> bool:
+    """Does this one attestation say the deterministic check could not judge?
+
+    Classified by the contract's own `gate_outcome`, over the rung this record
+    answers (a staged gate's rung is a single check with the gate's fields)."""
+    if _gate_outcome_of is None or not gate or not record or gate.get("kind") != "deterministic":
+        return False
+    if gate.get("cannot_evaluate_exit") is None and gate.get("min_cases") is None:
+        return False
+    rung = {k: v for k, v in gate.items() if k != "checks"}
+    rung["check"] = record.get("check") or gate.get("check")
+    single = {k: v for k, v in record.items() if k != "stage"}
+    return _gate_outcome_of(rung, [single]) == "cannot_evaluate"
+
+
+def rerun_pending(item: "WorkItem") -> bool:
+    """A VERIFY_FAILED item whose latest gate result was could-not-evaluate,
+    and which is therefore offered for a re-run rather than held for a fix."""
+    if item.status is not WorkStatus.VERIFY_FAILED:
+        return False
+    record = (item.metadata or {}).get(CANNOT_EVALUATE_KEY)
+    return isinstance(record, dict) and bool(record.get("pending"))
+
+
+def _note_cannot_evaluate(metadata: dict, record: dict, failures: int, at: str) -> None:
+    previous = metadata.get(CANNOT_EVALUATE_KEY) if isinstance(metadata.get(CANNOT_EVALUATE_KEY), dict) else {}
+    metadata[CANNOT_EVALUATE_KEY] = {
+        "pending": True,
+        "count": int(previous.get("count") or 0) + 1,
+        "last": {k: record.get(k) for k in ("check", "exit_status", "cases_run", "environment", "at", "submitted_by")
+                 if record.get(k) is not None},
+        "reason": "the check could not judge the work; it is re-run, and not charged",
+    }
+    metadata["verify_retry"] = {
+        "failures": failures,
+        "decision": RERUN_DECISION,
+        "outcome": "cannot_evaluate",
+        "decided_at": at,
+    }
+    metadata["verify_parked_at"] = at
+
+
+def _settle_cannot_evaluate(metadata: dict) -> None:
+    """Any other gate result ends a pending re-run; the count is history."""
+    record = metadata.get(CANNOT_EVALUATE_KEY)
+    if isinstance(record, dict) and record.get("pending"):
+        metadata[CANNOT_EVALUATE_KEY] = {**record, "pending": False}
+
+
+def self_verifying_gate(gate: Optional[dict], assigned_agent: Optional[str]) -> Optional[Refusal]:
+    """The refusal for a human gate whose verifier is the party doing the work.
+
+    The separation check would refuse this person's verdict when it came, so
+    the gate could only ever resolve on its clock — configured-looking, and
+    unanswerable. Refused at filing, like every other gate that would quietly
+    do nothing (DECIDE-L3 #5).
+
+    A function rather than an inline check because two places must apply it
+    BEFORE anything is written: `build_item` for one item, and
+    `SopLibrary.run`'s planning pass for a whole run. Applied only at the
+    queue, a run was refused at its second step after its parent and first
+    step were already filed — and those went on to be pulled and completed.
+    """
+    if not gate or gate.get("kind") != "human" or not assigned_agent:
+        return None
+    if gate.get("verifier") != assigned_agent:
+        return None
+    return Refusal(
+        code=gates.GATE_INVALID,
+        message=(
+            f"the human gate names {assigned_agent!r} as verifier and the item is "
+            f"assigned to {assigned_agent!r} — the one party a human gate exists to exclude"
+        ),
+        remediation=(
+            "Name somebody else as verifier, or assign the work to somebody else. "
+            "A person may not sign off their own step; the plane would refuse the "
+            "verdict, and the gate would resolve on its clock with nobody having looked."
+        ),
+    )
+
+
 def build_item(
     title: str,
     *,
@@ -1078,23 +1200,9 @@ def build_item(
     if not by_plane:
         reject_reserved(metadata, natural_key)
     gate = gates.validate_gate(verify) if verify is not None else None
-    if gate and gate.get("kind") == "human" and assigned_agent and gate.get("verifier") == assigned_agent:
-        # The separation check would refuse this person's verdict when it came,
-        # so the gate could only ever resolve on its clock — configured-looking,
-        # and unanswerable. Refused here, like every other gate that would
-        # quietly do nothing (DECIDE-L3 #5).
-        raise Refusal(
-            code=gates.GATE_INVALID,
-            message=(
-                f"the human gate names {assigned_agent!r} as verifier and the item is "
-                f"assigned to {assigned_agent!r} — the one party a human gate exists to exclude"
-            ),
-            remediation=(
-                "Name somebody else as verifier, or assign the work to somebody else. "
-                "A person may not sign off their own step; the plane would refuse the "
-                "verdict, and the gate would resolve on its clock with nobody having looked."
-            ),
-        )
+    refusal = self_verifying_gate(gate, assigned_agent)
+    if refusal is not None:
+        raise refusal
     return WorkItem(
         id=f"w-{uuid.uuid4().hex[:8]}",
         title=title,
@@ -1231,6 +1339,13 @@ class Queue:
             frozenset(adjudicators) if adjudicators is not None
             else policy.adjudicators_from_env()
         )
+        # Run ownership (agentco/ownership.py): this hub's id, and which actors
+        # speak for which external store. Re-set by `create_app` when injected.
+        from agentco import ownership
+        from agentco.memory import resolve_hub_id
+
+        self.hub_id: str = resolve_hub_id()
+        self.stores: dict = ownership.stores_from_env()
 
     # -- storage ---------------------------------------------------------
 
@@ -1532,7 +1647,7 @@ class Queue:
             # claimable but never listed is work no poller ever offers to do,
             # and it strands silently because nothing reports an empty queue as
             # a problem.
-            if item.status not in (WorkStatus.PENDING, WorkStatus.IN_PROGRESS):
+            if item.status not in (WorkStatus.PENDING, WorkStatus.IN_PROGRESS) and not rerun_pending(item):
                 continue
             if item.status == WorkStatus.IN_PROGRESS and item.lease_active_at(at):
                 continue
@@ -1542,8 +1657,52 @@ class Queue:
                 continue
             if agent and item.assigned_agent and item.assigned_agent != agent:
                 continue
+            if agent and self.stores and not self._may_act(item, agent):
+                continue
             out.append(item)
         return out
+
+    def _may_act(self, item: "WorkItem", agent: str) -> bool:
+        """Whether run ownership lets `agent` take `item` (agentco/ownership.py).
+        `ready()` and `claim()` must agree, as they do on every other rule."""
+        from agentco import ownership
+
+        try:
+            ownership.check_actor(self, item, agent, "claim")
+        except Refusal:
+            return False
+        return True
+
+    def release_for_transfer(self, item_id: str, record: dict,
+                             former_actors: frozenset) -> Optional["WorkItem"]:
+        """What a run transfer does to one open step, in one fenced write.
+
+        * IN_PROGRESS: the lease is voided — back to PENDING, the fence advances,
+          `leased_by` cleared — so the holder's report on the old attempt is
+          refused like any superseded one;
+        * PENDING or IN_PROGRESS and assigned to an actor of the former owner:
+          the assignment is released, so the new owner's ordinary routing can
+          give it to someone who can still act.
+        Anything else (done, awaiting verification, verify_failed) is left as it
+        is: completed work and its evidence are kept."""
+        def release(item: "WorkItem") -> dict:
+            if item.status not in (WorkStatus.PENDING, WorkStatus.IN_PROGRESS):
+                return {}
+            updates: dict = {}
+            note = dict(record)
+            if item.status is WorkStatus.IN_PROGRESS and item.leased_by:
+                updates.update(status=WorkStatus.PENDING, leased_by=None, lease_expires_at=None,
+                               lease_attempt=item.lease_attempt + 1)
+                note["voided_lease_of"] = item.leased_by
+            if item.assigned_agent and item.assigned_agent in former_actors:
+                updates["assigned_agent"] = None
+                note["released_assignment_of"] = item.assigned_agent
+            if not updates:
+                return {}
+            updates["metadata"] = {**(item.metadata or {}), "lease_voided": note}
+            return updates
+
+        return self._mutate(item_id, release)
 
     # -- the lease protocol ----------------------------------------------
 
@@ -1637,6 +1796,13 @@ class Queue:
         one, and every not-yet-updated caller a hole. Items with no `requires`
         are unaffected: nothing is required, so nothing can be missing.
         """
+        from agentco import ownership
+
+        owned = None
+        if self.stores:
+            current = self.get(item_id)
+            if current is not None:
+                owned = ownership.check_actor(self, current, agent, "claim")
         at = now or _now()
         held, unbound = policy.bind_capabilities(agent, capabilities, self.verifiers)
         # From the RAW rows, not from `_read_all()`. `_read_all` drops any row
@@ -1726,7 +1892,9 @@ class Queue:
             # is still worth running, for the visible state transition; it is an
             # optimisation, not a correctness requirement.
             claimable = (WorkStatus.PENDING, WorkStatus.IN_PROGRESS)
-            if item.status not in claimable:
+            # A could-not-evaluate item is re-filed, not held: it is claimable
+            # again, and the claim below advances the fence like any other.
+            if item.status not in claimable and not rerun_pending(item):
                 # The two verify states are not terminal, and saying so would
                 # send the reader looking for a finished item. They are settled
                 # against a gate: the work is claimed complete and only the
@@ -1751,9 +1919,14 @@ class Queue:
             # times is not a thousand facts.
             history = list((item.metadata or {}).get("claims") or [])[-19:]
             history.append({"agent": agent, "attempt": item.lease_attempt + 1, "at": _iso(at)})
+            stamped = {**(item.metadata or {}), "claims": history}
+            if owned is not None:
+                # The ownership epoch this lease was taken under: a report after
+                # a transfer is refused on it (`ownership.check_epoch`).
+                stamped[ownership.OWNER_EPOCH_KEY] = owned.get("epoch", 1)
             return {
                 "status": WorkStatus.IN_PROGRESS,
-                "metadata": {**(item.metadata or {}), "claims": history},
+                "metadata": stamped,
                 # `assigned_agent` is deliberately NOT written here. Taking work
                 # is not the same act as being assigned it, and overwriting the
                 # routing decision with the claimant erased the only record that
@@ -1896,6 +2069,10 @@ class Queue:
             gate=gate,
             submitted_by=submitted_by or "unknown",
         )
+        if cannot_evaluate(gate, record):
+            _note_cannot_evaluate(metadata, record, failures, _iso(now or _now()))
+            return WorkStatus.VERIFY_FAILED, record, failures
+        _settle_cannot_evaluate(metadata)
         answered = self._answered_status(gate, metadata, record, failures)
         if answered is WorkStatus.AWAITING_VERIFY:
             # A rung passed and others have not been climbed. Not done, and it
@@ -1981,6 +2158,12 @@ class Queue:
         verified, and a gate that accepts the executor's verdict is a
         deterministic gate with extra ceremony.
         """
+        if self.stores:
+            from agentco import ownership
+
+            current = self.get(item_id)
+            if current is not None:
+                ownership.check_actor(self, current, submitted_by, "attest")
         if not isinstance(submitted_by, str) or not submitted_by.strip():
             raise Refusal(
                 code=gates.ATTESTATION_INVALID,
@@ -2242,6 +2425,14 @@ class Queue:
                     "at": record.get("at"), "passed": gates.attestation_passes(record),
                 }}
                 metadata[PLAN_VS_ACTUAL_KEY] = review
+            if cannot_evaluate(gate, record):
+                _note_cannot_evaluate(metadata, record, item.verify_failures, _iso(now or _now()))
+                return {
+                    "status": WorkStatus.VERIFY_FAILED,
+                    "attestation": record,
+                    "metadata": metadata,
+                }
+            _settle_cannot_evaluate(metadata)
             answered = self._answered_status(gate, metadata, record, item.verify_failures)
             if answered is not None:
                 metadata.pop("verify_retry", None)
@@ -2379,6 +2570,11 @@ class Queue:
         executor — compared against nothing and matched nobody. The party that
         reported could then verify its own report. So: no lease, no report.
         """
+        current = self.get(item_id) if self.stores else None
+        if current is not None:
+            from agentco import ownership
+
+            ownership.check_epoch(self, current)
         if status not in TERMINAL:
             raise Refusal(
                 code="not_terminal",

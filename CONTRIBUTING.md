@@ -128,3 +128,12 @@ rather than being assumed:
   wrote. The consequence is that this project cannot be relicensed without the agreement
   of everyone who has contributed — which is the intended constraint, not an oversight.
 
+
+
+## The leak check and its private list
+
+`tools/leakguard/leakguard.py` always runs its base rules. The list of internal names to refuse (people, domains, product
+and project names) is itself sensitive, so it is not in this repository: maintainers keep it in a local, git-ignored
+`leakguard.toml` (see `leakguard.toml.example`) and CI reads it from the `LEAKGUARD_CONFIG` repository secret. Pull
+requests from forks cannot read secrets, so their check runs the base rules only and says so; a maintainer's local run or
+the CI run after merge applies the full list.

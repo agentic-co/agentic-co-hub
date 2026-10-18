@@ -29,8 +29,8 @@ that range. What it can store and serve depends on which one is installed:
 | `asop-spec` | Spec | What the plane stores | Status |
 |---|---|---|---|
 | 0.4.0 / 0.4.1 | v3.4 | the v3 record: steps, gates, roles, constraints | supported, CI-tested |
-| 0.5.0 | v3.5 | plus the chaining fields `outcomes`, `outputs`, `handoffs`, `on_escalate`, `requires` (§3.7) | supported, the locked version, CI-tested |
-| 0.6.0 | v3.6 | plus `entry_gates` and `rework` (§3.8, §3.9), and the v3.6 fields that live inside existing ones: hand-off `preflight`, `subject_from.order_by` / `concurrency` / `approved_subset`, gate `on_timeout: proceed_on_default` with `default`, `cannot_evaluate_exit`, `min_cases`, and `human_approved.binds_digest` | supported, CI-tested from the spec's source until it is on PyPI |
+| 0.5.0 | v3.5 | plus the chaining fields `outcomes`, `outputs`, `handoffs`, `on_escalate`, `requires` (§3.7) | supported, CI-tested |
+| 0.6.0 | v3.6 | plus `entry_gates` and `rework` (§3.8, §3.9), and the v3.6 fields that live inside existing ones: hand-off `preflight`, `subject_from.order_by` / `concurrency` / `approved_subset`, gate `on_timeout: proceed_on_default` with `default`, `cannot_evaluate_exit`, `min_cases`, and `human_approved.binds_digest` | supported, the locked version, CI-tested (on PyPI since 2026-10-17) |
 
 How that is kept true:
 
@@ -77,3 +77,110 @@ Feed kinds: `ChainManifestRecorded`, `ChainAdopted`, `ArtefactApproved`.
 holds no ledger of a runtime's runs; accepting a typed outcome would store
 exactly what the spec forbids. Both arrive with journal ingest (§7.2: "a
 journal is what a non-owning plane receives"), tracked in `docs/roadmap.md`.
+
+## Could not evaluate — the third gate outcome (spec v3.6 §3.3, §5.4)
+
+A `deterministic` gate may declare `cannot_evaluate_exit` (3 by convention) and `min_cases`. An
+attestation that exits with that status, or exits 0 having run fewer than `min_cases` cases
+(`cases_run`), **could not evaluate** the work: the check could not judge it, which is neither a pass
+nor the executor's failure. Classified by the contract's own `asop.gates.gate_outcome`, on the
+`report` path and on the executor's re-attest path alike. What the plane does today (option A, owner
+decision 2026-10-18):
+
+| | could not evaluate | real failure (any other nonzero exit) |
+|---|---|---|
+| status | `verify_failed` | `verify_failed` |
+| releases dependents | **no** | no |
+| `verify_failures` | **unchanged** | +1 |
+| `metadata.verify_retry.decision` | `"re-run"` (`outcome: "cannot_evaluate"`) | `"fix"`, then `"escalate"`, then `"stop"` |
+| `metadata.verify_cannot_evaluate` | `{pending: true, count, last: {check, exit_status, cases_run, …}, reason}` | `pending` set false if present; `count` kept as history |
+| pullable again | **yes** — offered by `ready()` / `POST /work/pull`, claimed under a **new fence** (`lease_attempt` +1; a report on the old attempt is refused) | no — held until its own gate passes |
+| `GET /sops/{id}/outcomes` | its own column, `cannotEvaluate`, counted in `unresolved`; never in `verifyFailed` or `failed` | `verifyFailed` |
+| pulse | fact `cannotEvaluate`: items pending a re-run | unchanged |
+| quarantine (re-run offer unclaimed past the gate's park time) | reason `re-run unclaimed after could-not-evaluate` | `re-verify unanswered` |
+
+A gate that declares neither field keeps exactly its two outcomes: exit 3 there is a failure and is
+charged, as in v3.5. `verify_cannot_evaluate` is a reserved metadata key: no caller can set it.
+
+The spec's own bead status for this case is `cannot_evaluate` (§5.2). The plane represents it as
+`verify_failed` plus the flag; the dedicated status is designed and deferred — `docs/roadmap.md`,
+"A dedicated `cannot_evaluate` status".
+
+## A run waiting on other work: `blockedBy` (owner decision 2026-10-18)
+
+`POST /sops/{id}/run {…, "blockedBy": ["w-…", …]}` (and `SopLibrary.run(blocked_by=…)`) files a run
+whose first steps wait on other work items — how a runtime sequences one run after another.
+
+- **What waits.** Every **root** step — a step with no in-run predecessor (`after: []`, or step 1; an
+  omitted `after` means "after the step before", so it is not a root). Non-root steps wait only on their
+  predecessors, as before.
+- **Nested procedures (`uses`).** An inner procedure's roots wait on whatever their outer step waits on:
+  the run's blockers when the `uses` step is a root, the outer predecessors otherwise. An inner procedure
+  never starts ahead of the outer step it implements.
+- **The parent.** Carries no extra blocker: it already waits on its steps, so it reads `pending` like any
+  run whose steps have not finished. The run view adds `blockedBy` (the run's blockers) and `waitingOn`
+  (`[{itemId, status}]` for each blocker not yet `done`).
+- **Release.** A root becomes ready when **every** blocker is `done`. A blocker that is `failed`,
+  `verify_failed` or still awaiting verification keeps it blocked — never released silently — and
+  `waitingOn` names it with its status.
+- **Refused before anything is filed** (`422 blocked_by_invalid`): a value that is not a list of ids, an
+  empty id, an id named twice, or an id this queue does not hold. A run cannot name itself: its ids do
+  not exist until it is filed.
+
+There is no MCP tool for running a procedure (HTTP-only by design, ADR 0004), so there is no relay to
+forward it. `RUN_BODY_FIELDS` in `agentco/app.py` is the route's wire map, and
+`tests/test_run_blocked_by.py` pins it to `SopLibrary.run`'s and `Queue.create`'s signatures.
+
+## Run ownership and the administrative transfer (ASOP §7.2; owner decision 2026-10-18)
+
+**Spec wording this implements** (asked of the spec's 0.6.1 amendment): *ownership is recorded on the
+run when it is filed and no **run** verb moves it; a recorded administrative transfer may.*
+
+| Setting | Meaning |
+|---|---|
+| `AGENTCO_HUB_ID` | this hub's store id (default `local`); hub-filed runs are owned by it |
+| `AGENTCO_STORES` | external stores and the actors that speak for them: `runtime-a=actor-1\|actor-2,…` or JSON |
+| `AGENTCO_ADMINS` | actors who may transfer a run; each must ALSO be in `AGENTCO_HUMANS`. **New** — there was no admin set before. Unset = nobody (fails closed) |
+
+- **At filing.** A run is owned by this hub, unless the filer speaks for a registered store and sends
+  `ownerStore` (`POST /sops/{id}/run`); a filer who does not is refused `not_the_owner` before anything
+  is filed. The record is on the run: `owner = {store, epoch, since, filed_by, history[]}`
+  (`GET /runs/{id}`). A run filed before this existed reads as hub-owned, epoch 1, `backfilled`; the
+  pulse writes the record down on `--apply`.
+- **Who may flip a step.** For a run owned by another store, only that store's actors may claim, report or
+  attest its steps — anyone else is refused **`not_the_owner`** (403, with the ownership epoch; distinct
+  from `not_the_holder`, which is about a lease). `/work/pull` does not offer such steps to non-owners.
+- **The pack** — `POST /runs/{id}/pack {uri, sha256}`: a location with a scheme and the sha256 of the
+  pack's bytes, never its content. Set by the owner store's actors, or for a hub-owned run by its filer
+  or an admin; a replaced reference is kept in `previous`.
+- **The transfer** — `POST /runs/{id}/transfer {to, reason}`, declared human AND declared admin;
+  `reason` required; `to` is this hub or a registered store. It needs nothing from the current owner,
+  so it works when the owner's key is revoked or the owner is silent. It:
+  - bumps the **ownership epoch** and appends `{at, by, from, to, reason, epoch}` to the history;
+  - emits **`RunTransferred`** on the change feed;
+  - **voids every live lease** on the run's steps (back to `pending`, `lease_attempt` +1, `leased_by`
+    cleared, `metadata.lease_voided` says why) and **releases open steps assigned** to the former
+    owner's actors, so the new owner's ordinary routing applies;
+  - leaves **done** steps done, with their evidence; awaiting-verification and `verify_failed` steps
+    are unchanged and answerable only under the new owner.
+
+  After it, the former owner is fenced out: a report on a lease taken under the old epoch is
+  `not_the_owner` naming both epochs, and the former store's actors may no longer claim, report or
+  attest the run's steps. Transferred to the hub, the run's open steps are worked through the hub's own
+  queue under normal fencing.
+- **Orphans.** The pulse reports an attention finding (`ownership.orphaned-run`) for every open run whose
+  owner store is not registered, none of whose actors still holds a key (after `agentco revoke
+  --apply`), or whose actors are all silent past their declared cadence (`AGENTCO_CADENCE`) — naming the
+  run, the owner, and the remedy: the transfer verb.
+
+**If the spec lands differently.** Should 0.6.1 keep "no verb moves it" without the administrative
+exception, the hub is non-conforming in exactly these places: the `POST /runs/{id}/transfer` route
+(`agentco/app.py`), `ownership.transfer` and `Queue.release_for_transfer`, the `RunTransferred` event
+kind, and the orphan finding's remedy text. Ownership at filing, `not_the_owner`, the epoch and the
+pack reference do not depend on it.
+
+**Compatibility note (refusal codes, owner decision 9).** Human-only verbs now refuse a non-human with
+`human_required` (formerly `capability_mismatch`), and an unrecorded target manifest is
+`manifest_unknown` (formerly `manifest_member_unknown`). For one minor the payload also carries the old
+code in a deprecated `aliases` list. Details and the remaining divergence from the spec's 0.6.1 draft:
+[`docs/wire.md`](wire.md#renamed-refusal-codes-owner-decision-9-2026-10-18).
