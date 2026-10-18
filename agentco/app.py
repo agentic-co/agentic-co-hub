@@ -143,6 +143,8 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
          "kind", "subject", "period", "metadata", "verify"),
         "a misspelt `verify` filed an ungated item"),
     ("POST", "/work/pull"): wire.strict(("capabilities", "ttlSeconds"), "the capabilities a claim is checked against"),
+    ("POST", "/work/{item_id}/renew"): wire.strict(
+        ("attempt", "ttlSeconds"), "the fence a renewal is conditioned on"),
     ("POST", "/work/{item_id}/report"): wire.strict(
         ("status", "attempt", "result", "idempotencyKey", "attestation"),
         "the fence, the idempotency key and the attestation"),
@@ -332,6 +334,7 @@ def create_app(
     memory_enabled: Optional[bool] = None,
     stores: Optional[dict] = None,
     admins: Optional[Iterable[str]] = None,
+    lease_max_age: Optional[int] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -399,6 +402,8 @@ def create_app(
     queue.hub_id = resolve_hub_id(hub_id)
     if stores is not None:
         queue.stores = {str(k): frozenset(v) for k, v in stores.items()}
+    if lease_max_age is not None:
+        queue.lease_max_age = int(lease_max_age)
     declared_admins = frozenset(admins) if admins is not None else ownership.admins_from_env()
     if adjudicators is not None:
         queue.adjudicators = frozenset(adjudicators)
@@ -727,6 +732,39 @@ def create_app(
             return {"state": "empty", "item": None}
 
         return await _handle(request, "work_pull", work)
+
+    @app.post("/work/{item_id}/renew")
+    async def post_work_renew(item_id: str, request: Request) -> JSONResponse:
+        """Extend the lease you hold — the heartbeat of a long step. Fenced on
+        `attempt`; never moves the fence; capped at the maximum lease age."""
+
+        def work(actor: str, payload: dict) -> dict:
+            attempt = _int(payload, "attempt", -1)
+            if attempt < 0:
+                raise Refusal(
+                    code="attempt_required",
+                    message="a renewal must carry the lease attempt it holds",
+                    remediation="Send the `attempt` returned by /work/pull — the fence this lease was issued under.",
+                    http_status=400,
+                )
+            ttl = _int(payload, "ttlSeconds", DEFAULT_LEASE_TTL_S)
+            try:
+                item = queue.renew(item_id, attempt, actor, ttl_seconds=ttl)
+            except (WorkError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+            if item is None:
+                raise unknown_item(item_id, "renew")
+            from datetime import datetime, timezone
+
+            from agentco.work import lease_started_at
+
+            started = lease_started_at(item)
+            age = int((datetime.now(timezone.utc) - started).total_seconds()) if started else None
+            return {"state": "renewed", "item": json.loads(item.to_json()), "attempt": item.lease_attempt,
+                    "leaseExpiresAt": item.lease_expires_at, "leaseAgeSeconds": age,
+                    "maxLeaseAgeSeconds": queue.lease_max_age}
+
+        return await _handle(request, "work_renew", work)
 
     @app.post("/work/{item_id}/report")
     async def post_work_report(item_id: str, request: Request) -> JSONResponse:

@@ -71,6 +71,26 @@ from agentco.keys import derive_natural_key, natural_key_of
 
 DEFAULT_LEASE_TTL_S = 3600
 
+#: How long ONE lease may be kept alive by renewing it, measured from the claim
+#: that took it (owner decision 10, 2026-10-18). A renewal never extends past it:
+#: work that runs longer has stopped being one lease and should be reported and
+#: re-filed. `AGENTCO_LEASE_MAX_AGE` in seconds or with a unit (`90m`, `24h`, `2d`).
+#: NOT VALIDATED: 24 hours is a default, not a measurement.
+LEASE_MAX_AGE_ENV_VAR = "AGENTCO_LEASE_MAX_AGE"
+DEFAULT_LEASE_MAX_AGE_S = 24 * 3600
+
+
+def lease_max_age_from_env(value: Optional[str] = None) -> int:
+    raw = (os.environ.get(LEASE_MAX_AGE_ENV_VAR, "") if value is None else value).strip().lower()
+    if not raw:
+        return DEFAULT_LEASE_MAX_AGE_S
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    number, unit = (raw[:-1], units[raw[-1]]) if raw[-1] in units else (raw, 1)
+    seconds = int(float(number) * unit)
+    if seconds <= 0:
+        raise ValueError(f"{LEASE_MAX_AGE_ENV_VAR}={raw!r}: must be a positive duration")
+    return seconds
+
 WORK_STORE_ENV_VAR = "AGENTCO_WORK_STORE"
 DEFAULT_WORK_STORE = "work.jsonl"
 
@@ -398,6 +418,9 @@ RESERVED_METADATA_KEYS = frozenset({
     # A caller who could set any of them could make itself a run's owner, or
     # forge the evidence of a transfer.
     "run_owner", "run_pack", "owner_epoch", "lease_voided",
+    # How many times the current lease was renewed, and when last (owner
+    # decision 10). A caller who could set it could disguise a lease's age.
+    "lease_renewed",
     # One evidence record per rung of a staged gate, keyed by stage index.
     # Written only where a gate is answered, and read back as the record of
     # WHICH rungs were actually climbed. A caller who could set it could
@@ -1135,6 +1158,14 @@ def _settle_cannot_evaluate(metadata: dict) -> None:
         metadata[CANNOT_EVALUATE_KEY] = {**record, "pending": False}
 
 
+def lease_started_at(item: "WorkItem") -> Optional[datetime]:
+    """When the CURRENT lease was taken: the claim recorded for its attempt."""
+    for entry in reversed((item.metadata or {}).get("claims") or []):
+        if isinstance(entry, dict) and entry.get("attempt") == item.lease_attempt:
+            return _parse(entry.get("at"))
+    return None
+
+
 def self_verifying_gate(gate: Optional[dict], assigned_agent: Optional[str]) -> Optional[Refusal]:
     """The refusal for a human gate whose verifier is the party doing the work.
 
@@ -1346,6 +1377,7 @@ class Queue:
 
         self.hub_id: str = resolve_hub_id()
         self.stores: dict = ownership.stores_from_env()
+        self.lease_max_age: int = lease_max_age_from_env()
 
     # -- storage ---------------------------------------------------------
 
@@ -2512,6 +2544,87 @@ class Queue:
             return {"metadata": metadata}
 
         return self._mutate(item_id, tag)
+
+    def renew(
+        self,
+        item_id: str,
+        attempt: int,
+        agent: str,
+        ttl_seconds: int = DEFAULT_LEASE_TTL_S,
+        now: Optional[datetime] = None,
+    ) -> Optional["WorkItem"]:
+        """Extend a held lease — the heartbeat a long step sends (owner decision 10).
+
+        Only for the current fence holder: `agent` must hold the lease, at
+        `attempt`, and the lease must still be live. Otherwise it is refused
+        exactly as a report would be — a stale or expired fence is `LeaseError`
+        (work_conflict), another holder is `not_the_holder`, and a run moved by
+        an administrative transfer is `not_the_owner`.
+
+        A renewal changes ONLY the expiry. It never advances the fence (the
+        holder's attempt is still the one its report will carry), never touches
+        the repair budget, and emits nothing on the change feed. It is capped at
+        `lease_max_age` from the claim that took the lease; a renewal at the cap
+        is refused `lease_max_age`.
+        """
+        at = now or _now()
+        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or ttl_seconds <= 0:
+            raise Refusal(code="bad_ttl", message=f"ttlSeconds must be a positive integer, got {ttl_seconds!r}",
+                          remediation="Send the seconds the lease should run from now.", http_status=400)
+        if self.stores:
+            from agentco import ownership
+
+            current = self.get(item_id)
+            if current is not None:
+                ownership.check_epoch(self, current)
+                ownership.check_actor(self, current, agent, "renew")
+
+        def extend(item: "WorkItem") -> dict:
+            if item.status is not WorkStatus.IN_PROGRESS or not item.leased_by:
+                raise LeaseError(
+                    f"cannot renew {item_id}: it is {item.status.value} and holds no lease"
+                )
+            if item.leased_by != agent:
+                raise Refusal(
+                    code="not_the_holder",
+                    message=f"{agent!r} does not hold the lease on {item_id}; {item.leased_by!r} does",
+                    remediation="Only the holder renews its lease. Pull the work if it is free.",
+                    http_status=403,
+                )
+            if item.lease_attempt != attempt:
+                raise LeaseError(
+                    f"cannot renew {item_id}: attempt {attempt} is superseded by attempt "
+                    f"{item.lease_attempt}. The work was taken again; stop, do not write."
+                )
+            started = lease_started_at(item) or _parse(item.updated_at) or at
+            limit = started + timedelta(seconds=self.lease_max_age)
+            # The cap first: renewals clamp the expiry to it, so a lease AT the cap
+            # has always just expired too, and "expired" would hide the reason.
+            if at >= limit:
+                raise Refusal(
+                    code="lease_max_age",
+                    message=(
+                        f"the lease on {item_id} was taken at {_iso(started)} and has reached its maximum "
+                        f"age of {self.lease_max_age}s ({LEASE_MAX_AGE_ENV_VAR})"
+                    ),
+                    remediation="Report what is done and re-file the rest; a lease is not renewed forever.",
+                    http_status=409,
+                )
+            if not item.lease_active_at(at):
+                raise LeaseError(
+                    f"cannot renew {item_id}: the lease at attempt {attempt} expired at "
+                    f"{item.lease_expires_at}. An expired lease is not renewed; pull the work again."
+                )
+            renewed = dict((item.metadata or {}).get("lease_renewed") or {})
+            if renewed.get("attempt") != item.lease_attempt:
+                renewed = {"attempt": item.lease_attempt, "count": 0}
+            renewed.update(count=int(renewed.get("count", 0)) + 1, last_at=_iso(at))
+            return {
+                "lease_expires_at": _iso(min(at + timedelta(seconds=ttl_seconds), limit)),
+                "metadata": {**(item.metadata or {}), "lease_renewed": renewed},
+            }
+
+        return self._mutate(item_id, extend)
 
     def report_result(
         self,
