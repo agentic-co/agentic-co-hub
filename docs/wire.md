@@ -63,6 +63,9 @@ settled before what they sent** — a non-human gets `human_required` before any
 | a transfer whose `to` is not an exact name, or not this hub or a registered store | **`transfer_refused:malformed`** (400) | `transfer_invalid` |
 | an impact or adoption naming a target manifest not recorded for the chain | **`manifest_unknown`** (404) | `manifest_member_unknown` |
 
+The administrator registry is `ASOP_ADMINISTRATORS`; the deprecated `AGENTCO_ADMINS` is read only when
+it is unset, and is ignored when both are set (docs/asop.md, run ownership).
+
 `transfer_refused:stale` (the spec's rule for a `from`/`epoch` that is not the run's current owner and
 epoch + 1) cannot arise here: the route computes `from` and the epoch and refuses either in the body.
 

@@ -132,7 +132,7 @@ def test_the_administrator_registry_reads_the_standard_name_first(monkeypatch):
     monkeypatch.delenv("ASOP_ADMINISTRATORS", raising=False)
     assert admins_from_env() == {"legacy-admin"}, "the deprecated name is the fallback"
     monkeypatch.setenv("ASOP_ADMINISTRATORS", "standard-admin")
-    assert admins_from_env() == {"standard-admin"}
+    assert admins_from_env() == {"standard-admin"}, "both set: the standard name wins, the legacy one is ignored"
     monkeypatch.setenv("ASOP_ADMINISTRATORS", "")
     assert admins_from_env() == frozenset(), "declared empty means nobody, not the fallback"
 
@@ -177,12 +177,15 @@ def test_live_wire_the_alias_crosses_a_real_socket(tmp_path):
         time.sleep(0.05)
     try:
         url = f"http://127.0.0.1:{port}"
-        for actor, code, alias in (("kofi", "human_required", "capability_mismatch"),
-                                   ("eve", "transfer_refused:administrator", "capability_mismatch")):
+        for actor, body, status, code, alias in (
+            ("kofi", {"to": "hub-a", "reason": "gone"}, 403, "human_required", "capability_mismatch"),
+            ("eve", {"to": "hub-a", "reason": "gone"}, 403, "transfer_refused:administrator", "capability_mismatch"),
+            ("dana", {"to": "hub-a"}, 400, "transfer_refused:reason", "transfer_invalid"),
+            ("dana", {"to": "runtime-a", "reason": "noop"}, 400, "transfer_refused:same_owner", "transfer_invalid"),
+        ):
             with pytest.raises(RegistryError) as exc:
-                Registry(actor, KEYS[actor], url)._call("POST", f"/runs/{run['runId']}/transfer",
-                                                        {"to": "hub-a", "reason": "gone"})
-            assert exc.value.status == 403
+                Registry(actor, KEYS[actor], url)._call("POST", f"/runs/{run['runId']}/transfer", body)
+            assert exc.value.status == status, (actor, body)
             assert exc.value.payload["code"] == code and exc.value.payload["aliases"] == [alias]
     finally:
         server.should_exit = True

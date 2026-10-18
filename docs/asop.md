@@ -141,7 +141,7 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
 | `AGENTCO_HUB_ID` | this hub's store id (default `local`); hub-filed runs are owned by it |
 | `AGENTCO_STORES` | external stores and the actors that speak for them: `runtime-a=actor-1\|actor-2,…` or JSON |
 | `ASOP_ADMINISTRATORS` | actors who may transfer a run (spec 0.6.1 §9); each must ALSO be a declared human. Unset = nobody (fails closed) |
-| `AGENTCO_ADMINS` | **deprecated** fallback for the same, read only when `ASOP_ADMINISTRATORS` is unset (presence, not truthiness: declaring the standard name empty means nobody). Remove after one minor |
+| `AGENTCO_ADMINS` | **deprecated** fallback for the same, read only when `ASOP_ADMINISTRATORS` is unset. **When both are set, `ASOP_ADMINISTRATORS` wins and `AGENTCO_ADMINS` is ignored**; presence, not truthiness, decides, so declaring `ASOP_ADMINISTRATORS=` empty means nobody even if `AGENTCO_ADMINS` names someone. Remove after one minor |
 
 - **At filing.** A run is owned by this hub, unless the filer speaks for a registered store and sends
   `ownerStore` (`POST /sops/{id}/run`); a filer who does not is refused `not_the_owner` before anything
