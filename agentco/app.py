@@ -65,7 +65,8 @@ from fastapi.responses import JSONResponse
 from agentco import auth, chains, clearance as clearance_module, db, wire, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
-from agentco.memory import open_memory_store
+from agentco.memory import memory_disabled, open_memory_store
+from agentco.memory import memory_enabled as memory_switch
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
 from agentco.refusals import classify
 from agentco.sop import (
@@ -313,6 +314,7 @@ def create_app(
     hub_clearance: Optional[dict] = None,
     clearances: Optional[dict] = None,
     memory_levels: Optional[Iterable[str]] = None,
+    memory_enabled: Optional[bool] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -338,9 +340,12 @@ def create_app(
     queue = open_queue(work_store)
     library = open_sop_library(sop_store)
     # Shared memory (ADR 0006): the store, and the two clearances every read
-    # and write of it is gated by — this hub's and the calling actor's.
-    memory = open_memory_store(memory_store, hub_id=hub_id)
-    walls = clearance_module.build(hub_clearance, clearances, memory_levels)
+    # and write of it is gated by — this hub's and the calling actor's. OFF by
+    # default (AGENTCO_MEMORY): while off the store is never opened, and
+    # `_handle` answers every /memory route `memory_disabled` before any handler.
+    memory_on = memory_switch() if memory_enabled is None else bool(memory_enabled)
+    memory = open_memory_store(memory_store, hub_id=hub_id) if memory_on else None
+    walls = clearance_module.build(hub_clearance, clearances, memory_levels) if memory_on else None
     # Every write these two perform goes on the change feed, wired ONCE here
     # rather than at each handler. A harness following `GET /events?since=`
     # learns about new procedures and new work without asking the library or
@@ -399,6 +404,7 @@ def create_app(
     app.state.keys = keys
     app.state.operator = resolve_operator(operator)
     app.state.ignored = wire.Ignored()
+    app.state.memory_enabled = memory_on
 
     async def _handle(
         request: Request,
@@ -479,6 +485,8 @@ def create_app(
             auth.reject_actor_in_body(payload)
             payload["agentLabel"] = auth.normalise_agent_label(payload.get("agentLabel"))
             route = request.scope.get("route")
+            if not app.state.memory_enabled and getattr(route, "path", "").startswith("/memory"):
+                raise memory_disabled()
             policy = ROUTE_BODIES.get((request.method, getattr(route, "path", "")))
             ignored = wire.check(policy, payload, verb=verb, ignored=app.state.ignored) if policy else []
 

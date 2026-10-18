@@ -308,7 +308,7 @@ def client(tmp_path):
         hub_clearance={"acme": "confidential", "globex": "internal"},
         clearances={"dana": {"acme": "confidential"}, "kofi": {"acme": "internal"},
                     "ana": {"globex": "internal"}},
-        memory_levels=LEVELS,
+        memory_levels=LEVELS, memory_enabled=True,
     )
     return TestClient(app)
 

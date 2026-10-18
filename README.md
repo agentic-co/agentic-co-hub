@@ -40,8 +40,10 @@ It sits **above** agent memory and context stores — an agent's own recall is i
 harness's business (that layer is well served by projects like
 [OpenViking](https://github.com/volcengine/OpenViking)); AgentCo coordinates what
 happens **between** agents and the people who own them. Lessons shared between
-agents belong to that "between" — owner-labeled, judged by use, planned and not
-built ([`docs/decisions/0006-hub-memory-design.md`](docs/decisions/0006-hub-memory-design.md)).
+agents belong to that "between" — owner-labeled, judged by use, and being built in
+slices **behind a switch that is off by default** (`AGENTCO_MEMORY=on`; design:
+[`docs/decisions/0006-hub-memory-design.md`](docs/decisions/0006-hub-memory-design.md),
+what is built: [`docs/memory.md`](docs/memory.md)).
 Likewise it is not a personal-AI framework: projects like [LifeOS](https://github.com/danielmiessler/LifeOS) run *one*
 principal's assistant superbly — AgentCo is the layer they plug into the moment an
 organisation runs more than one.

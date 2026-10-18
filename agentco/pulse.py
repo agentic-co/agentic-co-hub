@@ -260,8 +260,19 @@ def check_plane(conn: sqlite3.Connection, *, now: datetime) -> tuple[dict, list[
         "events": row["n"],
         "lastEventAt": row["last"],
         "lastEventAgeSeconds": int((now - last).total_seconds()) if last else None,
+        # Shared memory's switch (AGENTCO_MEMORY), as this process reads it.
+        "memory": _memory_state(),
     }
     return facts, findings
+
+
+def _memory_state() -> str:
+    from agentco.memory import memory_enabled
+
+    try:
+        return "enabled" if memory_enabled() else "disabled"
+    except ValueError as exc:
+        return f"misconfigured: {exc}"
 
 
 def check_keys(keys_env: Optional[str]) -> tuple[dict, list[dict]]:
