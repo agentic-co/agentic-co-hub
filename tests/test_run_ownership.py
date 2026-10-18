@@ -252,9 +252,11 @@ def test_http_ownership_transfer_and_refusals(tmp_path):
     assert http(client, "POST", "/work/pull", "kofi", {}).json()["state"] == "empty", "not offered to a non-owner"
     path = f"/runs/{run['runId']}/transfer"
     body = {"to": "hub-a", "reason": "the runtime's maintainer left"}
-    for actor, status in (("eve", 403), ("kofi", 403)):
+    # A person without the admin role is a role-binding failure; an agent is not a
+    # person at all (decision 9: human_required, formerly capability_mismatch).
+    for actor, code in (("eve", "capability_mismatch"), ("kofi", "human_required")):
         refused = http(client, "POST", path, actor, body)
-        assert refused.status_code == status and refused.json()["code"] == "capability_mismatch", actor
+        assert refused.status_code == 403 and refused.json()["code"] == code, actor
     assert http(client, "POST", path, "dana", {"to": "hub-a"}).json()["code"] == "transfer_invalid"
     assert http(client, "POST", path, "dana", {**body, "by": "eve"}).json()["code"] == "author_from_signature"
     moved = http(client, "POST", path, "dana", body)

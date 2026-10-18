@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from agentco.clearance import PUBLIC, Clearance, not_cleared
-from agentco.errors import Refusal
+from agentco.errors import Refusal, human_required
 from agentco.events import now_iso
 from agentco.filelock import lock_exclusive, unlock
 from agentco import memory_engine as engine
@@ -171,15 +171,11 @@ def _invalid(message: str) -> Refusal:
 
 
 def _human_only(what: str) -> Refusal:
-    return Refusal(
-        code="capability_mismatch",
-        message=f"only a declared human may {what}",
-        remediation=(
-            "Ask a person the operator declared in AGENTCO_HUMANS. Pinning exempts an "
-            "item from decay and retiring hides it; an agent that could do either could "
-            "decide what everyone else remembers."
-        ),
-        http_status=403,
+    return human_required(
+        f"only a declared human may {what}",
+        "Ask a person the operator declared in AGENTCO_HUMANS. Pinning exempts an "
+        "item from decay and retiring hides it; an agent that could do either could "
+        "decide what everyone else remembers.",
     )
 
 

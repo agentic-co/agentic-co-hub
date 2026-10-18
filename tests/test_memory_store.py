@@ -197,7 +197,7 @@ def test_a_hub_does_not_hold_a_replica_above_its_clearance(store):
 def test_only_a_human_pins_and_a_pin_carries_a_review_date(store):
     item = lesson(store)
     assert code_of(lambda: store.set_pinned(item.item_id, actor="kofi", human=False, clearance=ACME_INTERNAL,
-                                            pinned=True, review_by="2027-01-01")) == "capability_mismatch"
+                                            pinned=True, review_by="2027-01-01")) == "human_required"
     assert code_of(lambda: store.set_pinned(item.item_id, actor="dana", human=True, clearance=ACME_INTERNAL,
                                             pinned=True)) == "memory_invalid"
     pinned = store.set_pinned(item.item_id, actor="dana", human=True, clearance=ACME_INTERNAL,
@@ -208,7 +208,7 @@ def test_only_a_human_pins_and_a_pin_carries_a_review_date(store):
 def test_retire_hides_and_keeps(store):
     item = lesson(store)
     assert code_of(lambda: store.retire(item.item_id, actor="kofi", human=False,
-                                        clearance=ACME_INTERNAL)) == "capability_mismatch"
+                                        clearance=ACME_INTERNAL)) == "human_required"
     store.retire(item.item_id, actor="dana", human=True, clearance=ACME_INTERNAL)
     assert store.list(ACME_INTERNAL) == []
     assert [i.item_id for i in store.list(ACME_INTERNAL, include_retired=True)] == [item.item_id]
@@ -366,10 +366,10 @@ def test_http_hub_and_actor_clearance_both_apply(client):
 def test_http_pin_and_retire_are_human_only(client):
     item = http_lesson(client).json()["item"]
     assert post(client, f"/memory/{item['item_id']}/pin", "kofi",
-                {"review_by": "2027-01-01"}).json()["code"] == "capability_mismatch"
+                {"review_by": "2027-01-01"}).json()["code"] == "human_required"
     pinned = post(client, f"/memory/{item['item_id']}/pin", "dana", {"review_by": "2027-01-01"})
     assert pinned.json()["item"]["pinned"] is True
-    assert post(client, f"/memory/{item['item_id']}/retire", "kofi", {}).json()["code"] == "capability_mismatch"
+    assert post(client, f"/memory/{item['item_id']}/retire", "kofi", {}).json()["code"] == "human_required"
     assert post(client, f"/memory/{item['item_id']}/retire", "dana", {}).json()["item"]["status"] == "retired"
     assert get(client, "/memory", "kofi").json()["count"] == 0
 

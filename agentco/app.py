@@ -63,7 +63,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from agentco import auth, chains, clearance as clearance_module, db, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
-from agentco.errors import Refusal
+from agentco.errors import Refusal, human_required
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
 from agentco.memory import memory_enabled as memory_switch
@@ -1133,11 +1133,18 @@ def create_app(
         declared admin; needs nothing from the current owner."""
 
         def work(actor: str, payload: dict) -> dict:
-            if (policy.kind_of(actor, declared_humans) != policy.HUMAN
-                    or actor not in declared_admins):
+            if policy.kind_of(actor, declared_humans) != policy.HUMAN:
+                # Not a person at all: the human-only half (decision 9).
+                raise human_required(
+                    f"{actor!r} is not a declared human; only a person may transfer a run",
+                    f"Ask a person listed in both {ownership.ADMINS_ENV_VAR} and AGENTCO_HUMANS.",
+                )
+            if actor not in declared_admins:
+                # A person without the admin ROLE: a role binding failure, which
+                # keeps `capability_mismatch`.
                 raise Refusal(
                     code="capability_mismatch",
-                    message=f"{actor!r} is not a declared human admin; only one may transfer a run",
+                    message=f"{actor!r} is a declared human but not a declared admin; only an admin may transfer a run",
                     remediation=(
                         f"Ask a person listed in both {ownership.ADMINS_ENV_VAR} and AGENTCO_HUMANS. "
                         f"Unset, nobody may transfer: it fails closed."
