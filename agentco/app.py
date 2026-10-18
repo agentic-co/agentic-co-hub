@@ -62,7 +62,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, chains, db, digests, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, chains, db, wire, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
@@ -120,6 +120,57 @@ RUN_NOT_ON_THE_WIRE = {
     "verify": "refused: the gate belongs to the step",
     "assigned_agent": "steps are assigned by `bindings`; a run parent is never pulled",
     "by_plane": "plane-internal",
+}
+
+# Every route's body policy (agentco/wire.py): STRICT refuses an unknown key
+# 422, LENIENT serves the request and reports `ignored`. Strict where a dropped
+# key can silently remove a safety property; the reason travels in the refusal.
+# Keys a route refuses BY NAME with its own code (author, adopted_by, ...) are
+# `refused_by_name`, so that specific refusal is the one a caller sees. `tests/test_wire.py`
+# fails on a route that is not declared here.
+_IDENTITY = ("author", "author_kind")
+ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
+    ("POST", "/scope-claims"): wire.strict(
+        ("repo", "prefixes", "intent", "holder", "ttlSeconds"), "a scope claim's paths and lease"),
+    ("POST", "/scope-claims/{lease_uid}/release"): wire.lenient(("action",)),
+    ("POST", "/snapshots"): wire.lenient(("artifactUri", "purpose", "ttlDays")),
+    ("POST", "/digests"): wire.lenient(("text", "generatedAt", "meta")),
+    ("POST", "/work"): wire.strict(
+        ("title", "requires", "blockedBy", "assignedAgent", "naturalKey", "source", "sourceId",
+         "kind", "subject", "period", "metadata", "verify"),
+        "a misspelt `verify` filed an ungated item"),
+    ("POST", "/work/pull"): wire.strict(("capabilities", "ttlSeconds"), "the capabilities a claim is checked against"),
+    ("POST", "/work/{item_id}/report"): wire.strict(
+        ("status", "attempt", "result", "idempotencyKey", "attestation"),
+        "the fence, the idempotency key and the attestation"),
+    ("POST", "/work/{item_id}/adjudicate"): wire.strict(
+        ("verdict", "evidence"), "the adjudication record", refused_by_name=("adjudicator", "by")),
+    ("POST", "/work/{item_id}/attest"): wire.strict(
+        ("attestation", "capabilities", "adjudication"), "the gate's evidence"),
+    ("POST", "/sops"): wire.strict(("title", *SOP_BODY_KEYS), "a procedure's gates and chaining",
+                                   refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/revise"): wire.strict(("title", *SOP_BODY_KEYS),
+                                                    "a procedure's gates and chaining",
+                                                    refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/activate"): wire.lenient(("version",), refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/retire"): wire.lenient(refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/run"): wire.strict(
+        (*RUN_BODY_FIELDS, "chain"), "a run's blockers, chain pin and bindings",
+        refused_by_name=("verify", "gate")),
+    ("POST", "/runs/{run_id}/promote"): wire.lenient(("taskType", "title"), refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/propose"): wire.lenient(refused_by_name=_IDENTITY),
+    ("POST", "/chains/manifests"): wire.strict(("manifest",), "the pins a chain resolves from"),
+    ("POST", "/chains/{chain}/adoptions"): wire.strict(
+        ("to", "reason"), "a person's adoption record",
+        refused_by_name=("impact", "adopted_by", "adopted_at", "from")),
+    ("POST", "/approvals"): wire.strict(
+        ("artefact", "digest", "subset"), "a person's approval — an absent `subset` approves every subject",
+        refused_by_name=("approved_by", "approved_at")),
+    # Reads take no body. Lenient, so a stray body never fails a read.
+    **{("GET", path): wire.lenient() for path in (
+        "/events", "/work", "/sops/{sop_id}/outcomes", "/runs", "/runs/{run_id}",
+        "/sops/{sop_id}/proposals", "/sops", "/sops/{sop_id}", "/chains/{chain}",
+        "/chains/{chain}/impact", "/approvals", "/metrics", "/divergence")},
 }
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
@@ -324,6 +375,7 @@ def create_app(
     app.state.conn = conn
     app.state.keys = keys
     app.state.operator = resolve_operator(operator)
+    app.state.ignored = wire.Ignored()
 
     async def _handle(
         request: Request,
@@ -403,8 +455,13 @@ def create_app(
             # applied per-handler is a rule the next handler forgets.
             auth.reject_actor_in_body(payload)
             payload["agentLabel"] = auth.normalise_agent_label(payload.get("agentLabel"))
+            route = request.scope.get("route")
+            policy = ROUTE_BODIES.get((request.method, getattr(route, "path", "")))
+            ignored = wire.check(policy, payload, verb=verb, ignored=app.state.ignored) if policy else []
 
             result = work(actor, payload)
+            if ignored and isinstance(result, dict):
+                result = {**result, "ignored": ignored}
             elapsed = (time.perf_counter() - started) * 1000
             metrics.record_call(
                 conn,
@@ -1210,6 +1267,8 @@ def create_app(
                 "latency": metrics.verb_latency(conn),
                 "timeToFirstEvent": metrics.time_to_first_event(conn),
                 "conflictPrecision": metrics.conflict_precision(conn),
+                # Keys lenient routes ignored, per verb, since this process started.
+                "ignoredFields": app.state.ignored.as_dict(),
             }
 
         return await _handle(request, "metrics", work)
