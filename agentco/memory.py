@@ -273,6 +273,7 @@ class MemoryStore:
         self.audit_path = self.path.with_suffix(self.path.suffix + ".audit")
         self.hub_id = resolve_hub_id(hub_id)
         self.quarantined: list[bytes] = []
+        self.announce = None
 
     # -- storage primitives (JSONL) --------------------------------------
 
@@ -344,6 +345,14 @@ class MemoryStore:
         self._put(item)
         self._audit({"item_id": item.item_id, "version": item.version, "action": action,
                      "actor": actor, "at": item.updated_at, "record": asdict(item)})
+        if self.announce is not None:
+            # The label, never the content: the feed filters on the label
+            # (`events.WALLED_KINDS`), and a payload carrying the title would
+            # put content one filter bug away from every reader.
+            self.announce("MemoryChanged", actor, {
+                "itemId": item.item_id, "label": item.label, "layer": item.layer,
+                "version": item.version, "action": action, "authority": item.authority,
+            })
 
     def _visible(self, item: Optional[MemoryItem], clearance: Clearance) -> bool:
         return item is not None and clearance.allows(item.owner, item.level)
@@ -409,6 +418,26 @@ class MemoryStore:
                 continue
             out.append(item)
         return sorted(out, key=lambda i: i.item_id)
+
+    def search(self, clearance: Clearance, query: str, *, limit: int = 50) -> list[MemoryItem]:
+        """Items whose title, body or tags contain every word of `query`,
+        case-insensitively, ranked by how many times they match.
+
+        **The wall runs before the match and before the ranking**: the
+        candidates are `list(clearance)`, so neither the result, its order, nor
+        its count can depend on an item the caller cannot see (ADR 0006 §2).
+        Deliberately plain: ranking by meaning is a later concern, and it will
+        receive the same cleared candidate set.
+        """
+        words = [w for w in (query or "").lower().split() if w]
+        if not words:
+            return []
+        scored = []
+        for item in self.list(clearance):
+            text = " ".join([item.title, item.body, *item.tags]).lower()
+            if all(w in text for w in words):
+                scored.append((-sum(text.count(w) for w in words), item.item_id, item))
+        return [item for _, _, item in sorted(scored)[:max(1, min(limit, 200))]]
 
     def history(self, item_id: str, clearance: Clearance) -> list[dict]:
         self.get(item_id, clearance)
@@ -570,6 +599,7 @@ class SqlMemoryStore(MemoryStore):
         self.path = self._backing.path
         self.hub_id = resolve_hub_id(hub_id)
         self.quarantined = []
+        self.announce = None
         self._in_tx = False
 
     @contextmanager
