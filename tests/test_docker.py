@@ -45,9 +45,10 @@ def test_every_agentco_env_var_the_image_sets_is_one_the_code_reads(dockerfile):
     registry file lands in a layer and vanishes on the next `docker run`. The
     failure looks like data loss, not like a misspelling.
     """
-    from agentco import app, delivery, hook, mcp_server
+    from agentco import app, delivery, hook, mcp_server, memory
 
     known = {
+        memory.MEMORY_STORE_ENV_VAR,
         app.DB_ENV_VAR,
         app.OPERATOR_ENV_VAR,
         hook.WORK_STORE_ENV_VAR,
@@ -66,10 +67,12 @@ def test_every_agentco_env_var_the_image_sets_is_one_the_code_reads(dockerfile):
     assert not unknown, f"the Dockerfile sets env vars nothing reads: {sorted(unknown)}"
 
 
-def test_all_three_stores_are_pinned_to_the_volume_path(dockerfile):
-    """Left to their defaults, the DB/work/SOP stores are cwd-relative — which
-    inside a container means the image layer, not the volume."""
-    for var in ("AGENTCO_REGISTRY_DB", "AGENTCO_WORK_STORE", "AGENTCO_SOP_STORE"):
+def test_every_store_is_pinned_to_the_volume_path(dockerfile):
+    """Left to their defaults, the DB/work/SOP/memory stores are cwd-relative —
+    which inside a container means the image layer, not the volume. For memory
+    it was worse than lost data: /app is not writable by the image's user, so
+    with AGENTCO_MEMORY=on every memory write failed with a PermissionError."""
+    for var in ("AGENTCO_REGISTRY_DB", "AGENTCO_WORK_STORE", "AGENTCO_SOP_STORE", "AGENTCO_MEMORY_STORE"):
         match = re.search(rf"{var}=(\S+)", dockerfile)
         assert match, f"{var} is not set in the image"
         assert match.group(1).startswith("/var/lib/agentco/"), (

@@ -50,13 +50,16 @@ COPY agentco ./agentco
 COPY tools ./tools
 RUN pip install --no-cache-dir --no-deps .
 
-# State lives on a volume, never in the image layer. All three stores are
-# named explicitly rather than left to the CLI's cwd-relative defaults, which
-# would put a registry file inside the container and lose it on the next
-# `docker run`.
+# State lives on a volume, never in the image layer. Every store is named
+# explicitly rather than left to the CLI's cwd-relative defaults, which would
+# put a file inside the container and lose it on the next `docker run`. The
+# memory store was missing from this list until the multi-hub rig switched
+# memory on in the real image: its default `memory.jsonl` resolved to /app,
+# which the non-root user cannot write, and every memory write was a 500.
 ENV AGENTCO_REGISTRY_DB=/var/lib/agentco/registry.sqlite3 \
     AGENTCO_WORK_STORE=/var/lib/agentco/work.jsonl \
     AGENTCO_SOP_STORE=/var/lib/agentco/sops.jsonl \
+    AGENTCO_MEMORY_STORE=/var/lib/agentco/memory.jsonl \
     AGENTCO_REGISTRY_KEYS=/run/secrets/agentco-keys.json
 
 # Non-root, and the state directory is owned by it. `keygen` output is mounted
