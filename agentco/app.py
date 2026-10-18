@@ -62,10 +62,10 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, chains, clearance as clearance_module, db, wire, digests, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, chains, clearance as clearance_module, db, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
-from agentco.memory import memory_disabled, open_memory_store
+from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
 from agentco.memory import memory_enabled as memory_switch
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
 from agentco.refusals import classify
@@ -112,7 +112,7 @@ RUN_BODY_FIELDS = {
     "inputs": "inputs", "bindings": "bindings", "version": "version", "title": "title",
     "metadata": "metadata", "blockedBy": "blocked_by", "requires": "requires",
     "naturalKey": "natural_key", "source": "source", "sourceId": "source_id",
-    "kind": "kind", "subject": "subject", "period": "period",
+    "kind": "kind", "subject": "subject", "period": "period", "ownerStore": "owner_store",
 }
 #: Keywords `run` or `Queue.create` accept that the route deliberately does not
 #: read from the body, each with its reason.
@@ -122,6 +122,7 @@ RUN_NOT_ON_THE_WIRE = {
     "verify": "refused: the gate belongs to the step",
     "assigned_agent": "steps are assigned by `bindings`; a run parent is never pulled",
     "by_plane": "plane-internal",
+    "filed_by": "the signature: who filed the run, recorded on its owner record",
 }
 
 # Every route's body policy (agentco/wire.py): STRICT refuses an unknown key
@@ -160,6 +161,11 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
         (*RUN_BODY_FIELDS, "chain"), "a run's blockers, chain pin and bindings",
         refused_by_name=("verify", "gate")),
     ("POST", "/runs/{run_id}/promote"): wire.lenient(("taskType", "title"), refused_by_name=_IDENTITY),
+    ("POST", "/runs/{run_id}/transfer"): wire.strict(
+        ("to", "reason"), "who owns a run, by a recorded administrative act",
+        refused_by_name=("by", "from", "epoch")),
+    ("POST", "/runs/{run_id}/pack"): wire.strict(
+        ("uri", "sha256"), "a run's pack reference — a location and a digest, never content"),
     ("POST", "/sops/{sop_id}/propose"): wire.lenient(refused_by_name=_IDENTITY),
     ("POST", "/chains/manifests"): wire.strict(("manifest",), "the pins a chain resolves from"),
     ("POST", "/chains/{chain}/adoptions"): wire.strict(
@@ -324,6 +330,8 @@ def create_app(
     clearances: Optional[dict] = None,
     memory_levels: Optional[Iterable[str]] = None,
     memory_enabled: Optional[bool] = None,
+    stores: Optional[dict] = None,
+    admins: Optional[Iterable[str]] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -386,6 +394,12 @@ def create_app(
     # export the env var for the library to agree with the transport.
     library.actors = frozenset(keys) if keys is not None else frozenset(auth.load_keys())
     queue.humans = declared_humans
+    # Run ownership (agentco/ownership.py): this hub's id, the external stores
+    # and who speaks for each, and the admins who may transfer a run.
+    queue.hub_id = resolve_hub_id(hub_id)
+    if stores is not None:
+        queue.stores = {str(k): frozenset(v) for k, v in stores.items()}
+    declared_admins = frozenset(admins) if admins is not None else ownership.admins_from_env()
     if adjudicators is not None:
         queue.adjudicators = frozenset(adjudicators)
     if verifiers is not None:
@@ -1029,7 +1043,7 @@ def create_app(
                 fields["bindings"] = fields.get("bindings") or {}
                 fields["requires"] = fields.get("requires") or ()
                 fields["blocked_by"] = fields.get("blocked_by") or ()
-                run = library.run(sop_id, queue, version=version, chain_pin=chain_pin, **fields)
+                run = library.run(sop_id, queue, version=version, chain_pin=chain_pin, filed_by=actor, **fields)
             except (SopError, WorkError, NaturalKeyError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
             return {"state": "accepted", "run": run}
@@ -1111,6 +1125,46 @@ def create_app(
             return {"state": "drafted", "sop": json.loads(draft.to_json())}
 
         return await _handle(request, "promote", work)
+
+    @app.post("/runs/{run_id}/transfer")
+    async def post_run_transfer(run_id: str, request: Request) -> JSONResponse:
+        """A recorded administrative transfer of a run's ownership (ASOP §7.2 as
+        amended: no run verb moves ownership; this act may). Declared human AND
+        declared admin; needs nothing from the current owner."""
+
+        def work(actor: str, payload: dict) -> dict:
+            if (policy.kind_of(actor, declared_humans) != policy.HUMAN
+                    or actor not in declared_admins):
+                raise Refusal(
+                    code="capability_mismatch",
+                    message=f"{actor!r} is not a declared human admin; only one may transfer a run",
+                    remediation=(
+                        f"Ask a person listed in both {ownership.ADMINS_ENV_VAR} and AGENTCO_HUMANS. "
+                        f"Unset, nobody may transfer: it fails closed."
+                    ),
+                    http_status=403,
+                )
+            for key in ("by", "from", "epoch"):
+                if key in payload:
+                    raise Refusal(code="author_from_signature",
+                                  message=f"the body names {key!r}; the plane records who, from and the epoch",
+                                  remediation="Send `to` and `reason` only.", http_status=400)
+            return {"state": "accepted", **ownership.transfer(
+                queue, run_id, to=payload.get("to"), reason=payload.get("reason"), by=actor,
+                at=events.now_iso())}
+
+        return await _handle(request, "run_transfer", work)
+
+    @app.post("/runs/{run_id}/pack")
+    async def post_run_pack(run_id: str, request: Request) -> JSONResponse:
+        """Where a run's pack lives, and its sha256 — a reference, never content."""
+
+        def work(actor: str, payload: dict) -> dict:
+            return {"state": "accepted", "pack": ownership.set_pack(
+                queue, run_id, uri=payload.get("uri"), sha256=payload.get("sha256"), by=actor,
+                admins=declared_admins, at=events.now_iso())}
+
+        return await _handle(request, "run_pack", work)
 
     @app.get("/sops/{sop_id}/proposals")
     async def get_sop_proposals(sop_id: str, request: Request) -> JSONResponse:

@@ -65,6 +65,8 @@ from agentco.work import (
     Queue,
     WorkItem,
     WorkStatus,
+    _iso,
+    _now,
     pin_of,
     reject_reserved,
     rerun_pending,
@@ -816,6 +818,8 @@ class SopLibrary:
         metadata: Optional[dict] = None,
         chain_pin: Optional[dict] = None,
         blocked_by: Sequence[str] = (),
+        owner_store: Optional[str] = None,
+        filed_by: Optional[str] = None,
         **work_kwargs,
     ) -> dict:
         """File one execution of one ASOP version as a TREE (ASOP.md §5.1).
@@ -868,6 +872,7 @@ class SopLibrary:
         bound = dict(bindings or {})
         plan = self._plan(asop, supplied, bound, depth=1, seen=())
         blockers = self._run_blockers(blocked_by, queue)
+        owner = self._run_owner(owner_store, filed_by, queue)
 
         reject_reserved(metadata, work_kwargs.get("natural_key"))
         parent_metadata = dict(metadata or {})
@@ -881,6 +886,9 @@ class SopLibrary:
         }
         if chain_pin is not None:
             parent_metadata[CHAIN_KEY] = dict(chain_pin)
+        from agentco import ownership
+
+        parent_metadata[ownership.RUN_OWNER_KEY] = ownership.initial_record(owner, filed_by, _iso(_now()))
         parent_metadata[PLAN_KEY] = {
             "title": asop.title,
             **{k: getattr(asop, k) for k in ASOP_TEXT_FIELDS if getattr(asop, k)},
@@ -1123,6 +1131,25 @@ class SopLibrary:
         return plan
 
     @staticmethod
+    def _run_owner(owner_store: object, filed_by: Optional[str], queue: Queue) -> str:
+        """The store that will own the run (ASOP §7.2): this hub, unless the
+        filer speaks for a registered store and names it. Refused before
+        anything is filed."""
+        from agentco import ownership
+
+        if owner_store is None or owner_store == queue.hub_id:
+            return queue.hub_id
+        if not isinstance(owner_store, str) or owner_store not in queue.stores:
+            raise _refuse("not_the_owner", f"ownerStore {owner_store!r} is not a registered store",
+                          f"Register it ({ownership.STORES_ENV_VAR}) or omit ownerStore so this hub owns the run.",
+                          status=403)
+        if not ownership.speaks_for(queue, filed_by, owner_store):
+            raise _refuse("not_the_owner", f"{filed_by!r} does not speak for store {owner_store!r}",
+                          f"Only an actor {ownership.STORES_ENV_VAR} lists for {owner_store!r} may file a run it owns.",
+                          status=403)
+        return owner_store
+
+    @staticmethod
     def _run_blockers(blocked_by: object, queue: Queue) -> list[str]:
         """The run-level `blocked_by`, refused whole before anything is filed."""
         if blocked_by is None or blocked_by == ():
@@ -1286,8 +1313,18 @@ class SopLibrary:
             # of reading as merely pending.
             "blockedBy": list(record.get("blocked_by") or []),
             "waitingOn": self._waiting_on(record.get("blocked_by") or [], queue),
+            # Who owns the run (ASOP §7.2), its ownership history, and the pack
+            # reference — location and digest, never content.
+            "owner": self._owner_view(parent, queue),
+            "pack": (parent.metadata or {}).get("run_pack"),
             "steps": self._step_views(parent.id, index),
         }
+
+    @staticmethod
+    def _owner_view(parent: WorkItem, queue: Queue) -> dict:
+        from agentco import ownership
+
+        return ownership.owner_record(queue, parent)
 
     @staticmethod
     def _waiting_on(blockers: Sequence[str], queue: Queue) -> list[dict]:

@@ -130,6 +130,10 @@ KINDS = (
     # opens the label, and to nobody when no viewer is given — so the digest,
     # the write-back and any internal reader of the feed never carry it.
     "MemoryChanged",
+    # `RunTransferred` — a declared admin moved a run to another owner
+    # (agentco/ownership.py): from, to, the new epoch, the reason, and the leases
+    # it voided. The record of who did it is on the run; this is the notice.
+    "RunTransferred",
 )
 
 #: Kinds whose rows are filtered by the reader's clearance on the way out.
