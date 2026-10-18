@@ -265,6 +265,8 @@ def check_plane(conn: sqlite3.Connection, *, now: datetime) -> tuple[dict, list[
         "lastEventAgeSeconds": int((now - last).total_seconds()) if last else None,
         # Shared memory's switch (AGENTCO_MEMORY), as this process reads it.
         "memory": _memory_state(),
+        # The change feed's retention floor: the oldest seq it still holds.
+        "eventsRetainedFrom": events.retention_floor(conn),
     }
     return facts, findings
 
@@ -370,6 +372,7 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
     # container's does. Not new logic — the same function, applied late.
     stranded = queue.close_finished_runs(dry_run=not apply)
     backfilled = backfill_run_owners(queue, apply=apply)
+    retention = _prune_events(conn, now=now, apply=apply)
     stuck = verifiers.quarantine_digest(queue, now=now)
     status = verifiers.verifier_status(queue, now=now)
 
@@ -402,6 +405,8 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
         },
         "quarantine": {"quarantined": len(quarantine.get("quarantined", []))},
         "strandedRuns": {("closed" if apply else "wouldClose"): len(stranded)},
+        # Change-feed retention (AGENTCO_EVENT_RETENTION; unset = never prune).
+        "eventRetention": retention,
         # Every held lease's age against the cap a renewal cannot pass (decision 10).
         "leases": lease_ages(queue, now=now),
         # Runs filed before ownership existed, recorded as hub-owned (ASOP §7.2).
@@ -414,6 +419,18 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
         "verifier": {"configured": status.get("configured"), "warning": status.get("warning")},
     }
     return facts, findings
+
+
+def _prune_events(conn, *, now: datetime, apply: bool) -> dict:
+    """Prune the change feed to its declared window, if one is declared."""
+    try:
+        days = events.retention_from_env()
+    except ValueError as exc:
+        return {"state": "misconfigured", "reason": str(exc)}
+    if days is None:
+        return {"state": "not-configured", "retainedFrom": events.retention_floor(conn)}
+    before = (now - timedelta(days=days)).isoformat()
+    return {"windowDays": days, **events.prune(conn, before=before, dry_run=not apply)}
 
 
 def lease_ages(queue, *, now: datetime, limit: int = 20) -> dict:

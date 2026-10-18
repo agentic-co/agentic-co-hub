@@ -97,6 +97,24 @@ Opacity is deliberate. A timestamp cursor loses events written inside one clock 
 invites clients to do arithmetic on it, which turns a resumable feed into a windowed query
 — and from then on, changing the storage is a breaking change.
 
+**Retention, without a silent gap** (owner decision 10, 2026-10-18). The feed is kept forever
+unless an operator prunes it — `agentco prune-events --days N [--apply]` (dry by default), or the
+pulse on `--apply` when `AGENTCO_EVENT_RETENTION=<days>` is set (unset: never). A prune deletes only
+a **contiguous prefix** — everything below the first event still inside the window, so an event
+backdated into the window keeps all that follows it — and records the **retention floor**, the oldest
+seq still held (`meta.events_retention_floor`). Then:
+
+- every `GET /events` page carries `retainedFrom: <floor>` (1 means nothing was ever pruned);
+- a cursor at or past `floor - 1` resumes exactly: nothing lost, nothing replayed;
+- a cursor **older** than that is refused **`410 cursor_expired`**, naming the floor, with the remedy:
+  resync current state from the stores (`GET /work`, `/sops`, `/runs`, `/chains`), then resume with
+  `since=v1:<floor - 1>` — or read with no cursor, which begins at the floor. Never a quiet skip;
+- the pulse reports `eventsRetainedFrom` in its plane facts, and what a prune did under
+  `housekeeping.eventRetention`.
+
+The same refusal reaches the MCP `events` tool and the `Registry` client (HTTP 410). The write-back
+pass reads the local feed with a stored cursor, so an expired one fails that pass loudly.
+
 ### Work coordination *(partially extracted)*
 
 A queue with a **fenced lease protocol**: compare-and-swap claim plus a fencing token, so
