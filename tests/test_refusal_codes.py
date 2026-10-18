@@ -85,19 +85,21 @@ def memory_client(tmp_path):
         memory_enabled=True))
 
 
-def test_memory_pin_retire_rate_replay_are_human_required(tmp_path):
+def test_memory_human_only_verbs_keep_their_existing_code(tmp_path):
+    """Spec 0.6.1 §10's table moves only chain_adopt, approve and run_transfer to
+    `human_required` ("No existing code changes"): the hub's memory verbs keep
+    `capability_mismatch`, with no alias."""
     from tests.test_memory_store import http_lesson, post as mpost
 
     client = memory_client(tmp_path)
     item = http_lesson(client).json()["item"]["item_id"]
     for path, body in ((f"/memory/{item}/pin", {"review_by": "2027-01-01"}), (f"/memory/{item}/retire", {}),
                        (f"/memory/{item}/rate", {"rating": "up"}), ("/memory/replay", {})):
-        response = mpost(client, path, "kofi", body)
-        assert response.status_code == 403, path
-        assert_renamed(response, HUMAN_REQUIRED, "capability_mismatch")
+        response = mpost(client, path, "kofi", body).json()
+        assert response["code"] == "capability_mismatch" and "aliases" not in response, path
 
 
-def test_the_run_transfer_splits_not_human_from_not_admin(tmp_path):
+def test_the_run_transfer_codes_follow_the_spec(tmp_path):
     from fastapi.testclient import TestClient
 
     from tests.test_run_ownership import http, http_runtime_run, make_app
@@ -106,8 +108,33 @@ def test_the_run_transfer_splits_not_human_from_not_admin(tmp_path):
     run = http_runtime_run(client)
     path, body = f"/runs/{run['runId']}/transfer", {"to": "hub-a", "reason": "gone"}
     assert_renamed(http(client, "POST", path, "kofi", body), HUMAN_REQUIRED, "capability_mismatch")
-    role = http(client, "POST", path, "eve", body).json()
-    assert role["code"] == "capability_mismatch" and "aliases" not in role, "a role failure is not renamed"
+    assert_renamed(http(client, "POST", path, "eve", body), "transfer_refused:administrator", "capability_mismatch")
+    assert_renamed(http(client, "POST", path, "dana", {"to": "hub-a"}), "transfer_refused:reason", "transfer_invalid")
+    assert_renamed(http(client, "POST", path, "dana", {"to": "runtime-a", "reason": "noop"}),
+                   "transfer_refused:same_owner", "transfer_invalid")
+    # Who is asking comes first (§10): an agent learns nothing about its body.
+    assert http(client, "POST", path, "kofi", {"to": "hub-a"}).json()["code"] == HUMAN_REQUIRED
+    # Then the record's validity, before the administrator rule.
+    assert http(client, "POST", path, "eve", {"to": "", "reason": "x"}).json()["code"] == "transfer_refused:malformed"
+
+
+@needs_v36
+def test_adoption_checks_the_person_before_the_body(client, chain):
+    to = _second_manifest(client, chain)
+    body = post(client, "/chains/C1/adoptions", "kofi", {"to": to, "impact": []}).json()
+    assert body["code"] == HUMAN_REQUIRED, "not author_from_signature: the caller is settled first"
+
+
+def test_the_administrator_registry_reads_the_standard_name_first(monkeypatch):
+    from agentco.ownership import admins_from_env
+
+    monkeypatch.setenv("AGENTCO_ADMINS", "legacy-admin")
+    monkeypatch.delenv("ASOP_ADMINISTRATORS", raising=False)
+    assert admins_from_env() == {"legacy-admin"}, "the deprecated name is the fallback"
+    monkeypatch.setenv("ASOP_ADMINISTRATORS", "standard-admin")
+    assert admins_from_env() == {"standard-admin"}, "both set: the standard name wins, the legacy one is ignored"
+    monkeypatch.setenv("ASOP_ADMINISTRATORS", "")
+    assert admins_from_env() == frozenset(), "declared empty means nobody, not the fallback"
 
 
 def test_a_real_capability_failure_keeps_capability_mismatch():
@@ -130,11 +157,13 @@ def test_live_wire_the_alias_crosses_a_real_socket(tmp_path):
     import threading
 
     import uvicorn
+    from fastapi.testclient import TestClient
 
     from agentco.publish import Registry, RegistryError
-    from tests.test_memory_store import KEYS
+    from tests.test_run_ownership import KEYS, http_runtime_run, make_app
 
-    app = memory_client(tmp_path).app
+    app = make_app(tmp_path)
+    run = http_runtime_run(TestClient(app))
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -147,11 +176,17 @@ def test_live_wire_the_alias_crosses_a_real_socket(tmp_path):
             break
         time.sleep(0.05)
     try:
-        with pytest.raises(RegistryError) as exc:
-            Registry("kofi", KEYS["kofi"], f"http://127.0.0.1:{port}")._call("POST", "/memory/replay", {})
-        assert exc.value.status == 403
-        assert exc.value.payload["code"] == "human_required"
-        assert exc.value.payload["aliases"] == ["capability_mismatch"]
+        url = f"http://127.0.0.1:{port}"
+        for actor, body, status, code, alias in (
+            ("kofi", {"to": "hub-a", "reason": "gone"}, 403, "human_required", "capability_mismatch"),
+            ("eve", {"to": "hub-a", "reason": "gone"}, 403, "transfer_refused:administrator", "capability_mismatch"),
+            ("dana", {"to": "hub-a"}, 400, "transfer_refused:reason", "transfer_invalid"),
+            ("dana", {"to": "runtime-a", "reason": "noop"}, 400, "transfer_refused:same_owner", "transfer_invalid"),
+        ):
+            with pytest.raises(RegistryError) as exc:
+                Registry(actor, KEYS[actor], url)._call("POST", f"/runs/{run['runId']}/transfer", body)
+            assert exc.value.status == status, (actor, body)
+            assert exc.value.payload["code"] == code and exc.value.payload["aliases"] == [alias]
     finally:
         server.should_exit = True
         thread.join(timeout=5)
@@ -176,3 +211,24 @@ def test_the_hub_and_the_installed_contract_agree_on_the_code(code):
         version = importlib.metadata.version("asop-spec")
         pytest.skip(f"asop-spec {version} does not catalog {code!r} yet")
     assert code in catalogued
+
+
+def test_the_hub_renames_match_the_contracts_legacy_uses():
+    """Every (new, old) pair the hub aliases is one the spec lists in LEGACY_USES,
+    and every transfer rule the hub raises is one of the spec's TRANSFER_RULES."""
+    import asop.refusals as refusals
+
+    from agentco.errors import RENAMED
+
+    legacy = getattr(refusals, "LEGACY_USES", None)
+    if legacy is None:
+        pytest.skip(f"asop-spec {importlib.metadata.version('asop-spec')} has no LEGACY_USES yet")
+    pairs = {(old, new) for (old, _situation), new in legacy.items()}
+    for new, old in RENAMED:
+        assert (old, new) in pairs, f"the spec does not list {old!r} -> {new!r} as a legacy use"
+    from asop.ownership import TRANSFER_RULES
+
+    for new, _ in RENAMED:
+        if new.startswith("transfer_refused:"):
+            assert new.split(":", 1)[1] in TRANSFER_RULES, new
+    assert "transfer_refused:<rule>" in refusals.CODES
