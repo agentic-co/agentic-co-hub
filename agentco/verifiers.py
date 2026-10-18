@@ -443,8 +443,9 @@ def sweep_park_clocks(
     this, every one of those becomes an item that blocks its dependents forever,
     and the queue's own answer to "what is stuck" is silence.
 
-    So a deadline resolves. `pass` completes the item, `fail` rejects it, and
-    `escalate` hands it to the named party and keeps it parked — because
+    So a deadline resolves. `pass` completes the item, `proceed_on_default`
+    completes it on its declared default (recorded as taken, v3.6), `fail`
+    rejects it, and `escalate` hands it to the named party and keeps it parked — because
     escalating IS the declared outcome there, and closing it would be answering
     a question the gate explicitly said a person should answer.
 
@@ -518,10 +519,20 @@ def sweep_park_clocks(
                     )
             continue
 
+        # `proceed_on_default` (spec v3.6 §3.3) completes like `pass`, and
+        # records WHICH default was taken — the option, its consequence and its
+        # audience — so a late answer can be compared with what was built on it
+        # (§5.7). It is still not a verdict: the note above says so, and no
+        # attestation is written. Until this branch existed it fell through to
+        # `verify_failed`, failing the very step its author declared should go on.
+        if default == "proceed_on_default":
+            record["on_default"] = dict(gate.get("default") or {})
         resolved.append({"item": item.id, "default": default, "waited": waited})
         if dry_run:
             continue
-        landing = WorkStatus.DONE if default == "pass" else WorkStatus.VERIFY_FAILED
+        landing = (
+            WorkStatus.DONE if default in ("pass", "proceed_on_default") else WorkStatus.VERIFY_FAILED
+        )
         try:
             queue.resolve_by_default(item.id, landing, record)
         except LeaseError as exc:
