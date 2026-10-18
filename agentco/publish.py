@@ -238,9 +238,12 @@ class Registry:
             body["agentLabel"] = agent_label
         return self._call("POST", "/snapshots", body)
 
-    def events(self, since: Optional[str] = None, limit: int = 200) -> dict:
-        """Resume the change feed. Pass the previous `nextCursor` verbatim."""
-        query = f"?limit={limit}" + (f"&since={since}" if since else "")
+    def events(self, since: Optional[str] = None, limit: int = 200, kind: Optional[str] = None) -> dict:
+        """Resume the change feed. Pass the previous `nextCursor` verbatim.
+
+        `kind` narrows the page to one event kind, as `GET /events?kind=` does."""
+        query = (f"?limit={limit}" + (f"&since={since}" if since else "")
+                 + (f"&kind={urllib.parse.quote(kind)}" if kind else ""))
         return self._call("GET", "/events", None, query)
 
     def digest(
