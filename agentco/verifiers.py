@@ -47,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from agentco import events, gates
-from agentco.work import RESOLUTION_KEY, LeaseError, Queue, WorkItem, WorkStatus
+from agentco.work import RESOLUTION_KEY, LeaseError, Queue, WorkItem, WorkStatus, rerun_pending
 
 # Re-exported from `gates` rather than defined twice. `work.attest` enforces it,
 # and work.py cannot import this module without a cycle.
@@ -772,7 +772,10 @@ def sweep_quarantine(
             if deadline is None or deadline > at:
                 continue
             waited = int((at - (_parked_at(item) or at)).total_seconds())
-            reason, to = "re-verify unanswered", (item.verify or {}).get("escalate_to")
+            reason, to = (
+                "re-run unclaimed after could-not-evaluate" if rerun_pending(item) else "re-verify unanswered",
+                (item.verify or {}).get("escalate_to"),
+            )
             note = ("not a resolution — the item is still verify_failed, still blocks its "
                     "dependents, and its own gate still has to pass. It has stopped being "
                     "offered for re-verification.")
