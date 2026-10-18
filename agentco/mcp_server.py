@@ -311,6 +311,11 @@ class _RemoteBackend:
         pulled = self.registry.work_pull(capabilities=capabilities, ttl_seconds=ttl_seconds)
         return pulled.get("item") if pulled.get("state") == "leased" else None
 
+    def work_renew(self, item_id: str, attempt: int, ttl_seconds: int) -> Optional[dict]:
+        # Ready for a `work_renew` tool; not exposed as one: the MCP surface is
+        # at its twelve-tool ceiling and a thirteenth needs ADR 0004's decision.
+        return self.registry.work_renew(item_id, attempt, ttl_seconds=ttl_seconds).get("item")
+
     def work_report(self, item_id: str, attempt: int, status: WorkStatus, result=None,
                     idempotency_key=None, attestation=None, submitted_by=None) -> Optional[dict]:
         # `submitted_by` is deliberately NOT forwarded. Over HTTP the actor comes

@@ -407,6 +407,8 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
         "strandedRuns": {("closed" if apply else "wouldClose"): len(stranded)},
         # Change-feed retention (AGENTCO_EVENT_RETENTION; unset = never prune).
         "eventRetention": retention,
+        # Every held lease's age against the cap a renewal cannot pass (decision 10).
+        "leases": lease_ages(queue, now=now),
         # Runs filed before ownership existed, recorded as hub-owned (ASOP §7.2).
         "ownershipBackfilled": {("written" if apply else "wouldWrite"): len(backfilled)},
         "stuck": stuck["count"],
@@ -429,6 +431,26 @@ def _prune_events(conn, *, now: datetime, apply: bool) -> dict:
         return {"state": "not-configured", "retainedFrom": events.retention_floor(conn)}
     before = (now - timedelta(days=days)).isoformat()
     return {"windowDays": days, **events.prune(conn, before=before, dry_run=not apply)}
+
+
+def lease_ages(queue, *, now: datetime, limit: int = 20) -> dict:
+    """The held leases, oldest first: holder, age since the claim, time left, renewals."""
+    from agentco.work import lease_started_at
+
+    held = []
+    for item in queue.list(WorkStatus.IN_PROGRESS):
+        if not item.leased_by or not item.lease_active_at(now):
+            continue
+        started = lease_started_at(item)
+        expires = _parse(item.lease_expires_at)
+        held.append({
+            "itemId": item.id, "holder": item.leased_by, "attempt": item.lease_attempt,
+            "ageSeconds": int((now - started).total_seconds()) if started else None,
+            "expiresInSeconds": int((expires - now).total_seconds()) if expires else None,
+            "renewals": ((item.metadata or {}).get("lease_renewed") or {}).get("count", 0),
+        })
+    held.sort(key=lambda h: -(h["ageSeconds"] or 0))
+    return {"maxAgeSeconds": getattr(queue, "lease_max_age", None), "held": len(held), "oldest": held[:limit]}
 
 
 def _runs(queue) -> list:

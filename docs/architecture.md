@@ -121,6 +121,24 @@ A queue with a **fenced lease protocol**: compare-and-swap claim plus a fencing 
 a worker whose lease expired cannot report results over the work that replaced it. One
 uniqueness rule on the ingest path, so no source can invent its own idempotency mechanism.
 
+**Renewing a lease** (owner decision 10, 2026-10-18). A long step keeps its lease alive with
+`POST /work/{id}/renew {attempt, ttlSeconds}` (`Registry.work_renew`):
+
+- only the **current fence holder** renews: another actor is `not_the_holder`; a superseded or expired
+  attempt is the stale-fence `work_conflict`; a step of a run moved by an administrative transfer is
+  `not_the_owner`;
+- a renewal changes **only the expiry**: the fence (`lease_attempt`) does not move, so the holder reports
+  on the same attempt afterwards; the repair budget is untouched; nothing is emitted on the change feed;
+- it is **capped** at a maximum total lease age, `AGENTCO_LEASE_MAX_AGE` (seconds or `90m` / `24h` / `2d`;
+  default 24h, an unmeasured default), counted from the claim that took the lease. An expiry is never set
+  past the cap, and a renewal at the cap is refused `lease_max_age`: work that runs longer should report
+  and re-file;
+- the pulse reports every held lease's age, time left and renewals against the cap (`housekeeping.leases`).
+
+There is no MCP `work_renew` tool: the MCP surface is at its twelve-tool ceiling and a thirteenth tool
+needs [ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md)'s decision. The remote MCP backend already
+carries the call for when it is.
+
 ### Hub network *(planned)*
 
 Today a hub has at most one upstream and sends it a digest, nothing more

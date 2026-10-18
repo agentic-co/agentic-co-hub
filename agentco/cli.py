@@ -188,9 +188,10 @@ def cmd_prune(args) -> int:
     from datetime import datetime, timedelta, timezone
 
     from agentco import db, metrics
-    from agentco.stores import resolve_db_path
 
-    conn = db.connect(resolve_db_path(args.db))
+    # `app_module.resolve_db_path`, as `_conn` uses: it is not in agentco.stores,
+    # and importing it from there made every `agentco prune` an ImportError.
+    conn = db.connect(app_module.resolve_db_path(args.db))
     before = datetime.now(timezone.utc) - timedelta(days=args.days)
 
     kept = conn.execute(

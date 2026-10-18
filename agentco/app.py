@@ -63,7 +63,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from agentco import auth, chains, clearance as clearance_module, db, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
-from agentco.errors import Refusal, human_required
+from agentco.errors import Refusal, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
 from agentco.memory import memory_enabled as memory_switch
@@ -143,6 +143,8 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
          "kind", "subject", "period", "metadata", "verify"),
         "a misspelt `verify` filed an ungated item"),
     ("POST", "/work/pull"): wire.strict(("capabilities", "ttlSeconds"), "the capabilities a claim is checked against"),
+    ("POST", "/work/{item_id}/renew"): wire.strict(
+        ("attempt", "ttlSeconds"), "the fence a renewal is conditioned on"),
     ("POST", "/work/{item_id}/report"): wire.strict(
         ("status", "attempt", "result", "idempotencyKey", "attestation"),
         "the fence, the idempotency key and the attestation"),
@@ -332,6 +334,7 @@ def create_app(
     memory_enabled: Optional[bool] = None,
     stores: Optional[dict] = None,
     admins: Optional[Iterable[str]] = None,
+    lease_max_age: Optional[int] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -399,6 +402,8 @@ def create_app(
     queue.hub_id = resolve_hub_id(hub_id)
     if stores is not None:
         queue.stores = {str(k): frozenset(v) for k, v in stores.items()}
+    if lease_max_age is not None:
+        queue.lease_max_age = int(lease_max_age)
     declared_admins = frozenset(admins) if admins is not None else ownership.admins_from_env()
     if adjudicators is not None:
         queue.adjudicators = frozenset(adjudicators)
@@ -727,6 +732,39 @@ def create_app(
             return {"state": "empty", "item": None}
 
         return await _handle(request, "work_pull", work)
+
+    @app.post("/work/{item_id}/renew")
+    async def post_work_renew(item_id: str, request: Request) -> JSONResponse:
+        """Extend the lease you hold — the heartbeat of a long step. Fenced on
+        `attempt`; never moves the fence; capped at the maximum lease age."""
+
+        def work(actor: str, payload: dict) -> dict:
+            attempt = _int(payload, "attempt", -1)
+            if attempt < 0:
+                raise Refusal(
+                    code="attempt_required",
+                    message="a renewal must carry the lease attempt it holds",
+                    remediation="Send the `attempt` returned by /work/pull — the fence this lease was issued under.",
+                    http_status=400,
+                )
+            ttl = _int(payload, "ttlSeconds", DEFAULT_LEASE_TTL_S)
+            try:
+                item = queue.renew(item_id, attempt, actor, ttl_seconds=ttl)
+            except (WorkError, ValueError) as exc:
+                raise _work_refusal(exc) from exc
+            if item is None:
+                raise unknown_item(item_id, "renew")
+            from datetime import datetime, timezone
+
+            from agentco.work import lease_started_at
+
+            started = lease_started_at(item)
+            age = int((datetime.now(timezone.utc) - started).total_seconds()) if started else None
+            return {"state": "renewed", "item": json.loads(item.to_json()), "attempt": item.lease_attempt,
+                    "leaseExpiresAt": item.lease_expires_at, "leaseAgeSeconds": age,
+                    "maxLeaseAgeSeconds": queue.lease_max_age}
+
+        return await _handle(request, "work_renew", work)
 
     @app.post("/work/{item_id}/report")
     async def post_work_report(item_id: str, request: Request) -> JSONResponse:
@@ -1137,19 +1175,17 @@ def create_app(
                 # Not a person at all: the human-only half (decision 9).
                 raise human_required(
                     f"{actor!r} is not a declared human; only a person may transfer a run",
-                    f"Ask a person listed in both {ownership.ADMINS_ENV_VAR} and AGENTCO_HUMANS.",
+                    f"Ask a person listed in both {ownership.ADMINISTRATORS_ENV_VAR} and AGENTCO_HUMANS.",
                 )
+            ownership.check_shape(payload.get("to"))  # the record's validity, before the role (§10)
             if actor not in declared_admins:
-                # A person without the admin ROLE: a role binding failure, which
-                # keeps `capability_mismatch`.
-                raise Refusal(
-                    code="capability_mismatch",
-                    message=f"{actor!r} is a declared human but not a declared admin; only an admin may transfer a run",
-                    remediation=(
-                        f"Ask a person listed in both {ownership.ADMINS_ENV_VAR} and AGENTCO_HUMANS. "
-                        f"Unset, nobody may transfer: it fails closed."
-                    ),
-                    http_status=403,
+                # A person who is not an administrator (spec 0.6.1 §10).
+                raise transfer_refused(
+                    "administrator",
+                    f"{actor!r} is a declared human but not a declared administrator",
+                    f"Have a person the operator declared in {ownership.ADMINISTRATORS_ENV_VAR} (and "
+                    f"AGENTCO_HUMANS) record it. Unset, nobody may transfer: it fails closed.",
+                    alias="capability_mismatch", http_status=403,
                 )
             for key in ("by", "from", "epoch"):
                 if key in payload:
@@ -1544,6 +1580,8 @@ def create_app(
         computed here; a body carrying one, or naming who adopted, is refused."""
 
         def work(actor: str, payload: dict) -> dict:
+            # Who is asking, before what they sent (spec 0.6.1 §10's order).
+            chains.require_person(actor, declared_humans, "record an adoption")
             named = sorted({"impact", "adopted_by", "adopted_at", "from"} & set(payload))
             if named:
                 raise Refusal(
@@ -1570,6 +1608,7 @@ def create_app(
         subset of its subjects (`asop.approval/1`)."""
 
         def work(actor: str, payload: dict) -> dict:
+            chains.require_person(actor, declared_humans, "record an approval")
             named = sorted({"approved_by", "approved_at"} & set(payload))
             if named:
                 raise Refusal(
