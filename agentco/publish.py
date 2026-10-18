@@ -310,6 +310,14 @@ class Registry:
             body["ttlSeconds"] = ttl_seconds
         return self._call("POST", "/work/pull", body)
 
+    def work_renew(self, item_id: str, attempt: int, ttl_seconds: Optional[int] = None) -> dict:
+        """Extend the lease you hold on `item_id`, fenced on `attempt`. The heartbeat of a long step:
+        the fence does not move, so report with the same attempt afterwards."""
+        body: dict[str, Any] = {"attempt": attempt}
+        if ttl_seconds is not None:
+            body["ttlSeconds"] = ttl_seconds
+        return self._call("POST", f"/work/{item_id}/renew", body)
+
     def work_report(
         self,
         item_id: str,
