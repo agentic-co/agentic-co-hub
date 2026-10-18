@@ -60,6 +60,14 @@ except ImportError:  # 0.4.x / 0.5.x
 APPROVAL_SCHEMA = "asop.approval/1"
 
 
+def require_person(actor: str, humans: Iterable[str], what: str) -> None:
+    """`human_required` for a non-human caller — checked first on the human-only
+    chain verbs, before anything about the record (spec 0.6.1 §10)."""
+    if policy.kind_of(actor, frozenset(humans)) != policy.HUMAN:
+        raise human_required(f"{actor!r} is not a declared human; only a person may {what}",
+                             "Ask a person the operator declared in AGENTCO_HUMANS.")
+
+
 def _require_contract() -> None:
     if not SUPPORTED:
         raise Refusal(

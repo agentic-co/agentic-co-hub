@@ -49,23 +49,35 @@ attestation and chaining fields against the table and the ASOP record's columns,
 issue — `asop-spec X.Y.Z adds fields the hub does not forward: …` — with the update checklist (lock,
 allowlists, columns, provenance table, docs). An open issue with the same title is never duplicated.
 
-## Renamed refusal codes (owner decision 9, 2026-10-18)
+## Renamed refusal codes (owner decision 9, 2026-10-18; spec 0.6.1 §10)
 
-| Situation | Code now | Formerly | `aliases` in the payload |
-|---|---|---|---|
-| a non-human actor attempts a human-only verb: chain adoption, an approval, a run transfer, memory pin / retire / rate / replay | **`human_required`** (403) | `capability_mismatch` | `["capability_mismatch"]` |
-| an impact or adoption names a target manifest not recorded for the chain | **`manifest_unknown`** (404) | `manifest_member_unknown` | `["manifest_member_unknown"]` |
+The hub follows the spec's 0.6.1 text (mabidoli/asop PR #9, c6aad52). Order: **who is asking is
+settled before what they sent** — a non-human gets `human_required` before any refusal about the body.
 
-Unchanged, with no alias: `capability_mismatch` for a capability or role binding failure (a claim or
-verdict by a node lacking a declared capability; a declared human who is not an admin attempting a
-run transfer); `manifest_member_unknown` for a manifest that pins an absent or draft version.
+| Situation | Code now | Formerly (deprecated `aliases`) |
+|---|---|---|
+| a non-human attempts `chain_adopt`, `approve` or `run_transfer` | **`human_required`** (403) | `capability_mismatch` |
+| a declared human who is not an administrator attempts `run_transfer` | **`transfer_refused:administrator`** (403) | `capability_mismatch` |
+| a transfer with no reason | **`transfer_refused:reason`** (400) | `transfer_invalid` |
+| a transfer to the store that already owns the run | **`transfer_refused:same_owner`** (400) | `transfer_invalid` |
+| a transfer whose `to` is not an exact name, or not this hub or a registered store | **`transfer_refused:malformed`** (400) | `transfer_invalid` |
+| an impact or adoption naming a target manifest not recorded for the chain | **`manifest_unknown`** (404) | `manifest_member_unknown` |
 
-**`aliases` is deprecated on arrival** and is removed after one minor release: a client that branched on
-the old code reads `aliases`, and should move to the new code now. The codes live in the hub's own
-`agentco/errors.py`, because the spec release that catalogs them (asop-spec 0.6.1) was not out when
-they shipped; `tests/test_refusal_codes.py` fails if the installed contract spells them differently.
+The administrator registry is `ASOP_ADMINISTRATORS`; the deprecated `AGENTCO_ADMINS` is read only when
+it is unset, and is ignored when both are set (docs/asop.md, run ownership).
 
-**Known divergence from the spec PR, not in this change:** the spec's 0.6.1 draft maps a declared human
-who is not an admin attempting a run transfer to `transfer_refused:administrator`, and the hub's
-`transfer_invalid` to `transfer_refused:<rule>` (reason, same_owner, malformed, stale). The hub still
-raises `capability_mismatch` and `transfer_invalid` there; aligning them is a follow-up.
+`transfer_refused:stale` (the spec's rule for a `from`/`epoch` that is not the run's current owner and
+epoch + 1) cannot arise here: the route computes `from` and the epoch and refuses either in the body.
+
+**Unchanged, per §10's table of human-only verbs ("No existing code changes"):** `sop_retire` and
+`promote` → `revision_policy:human_only`; a `human` gate's attestation → its existing codes; a `human`
+role's step → `capability_mismatch`; and the hub's own memory verbs — pin, retire, rate, replay — keep
+`capability_mismatch`, the code they shipped with. `capability_mismatch` otherwise means a capability or
+role binding failure; `manifest_member_unknown` means an absent or draft member.
+
+**Legacy uses and `aliases`.** Each renamed refusal's payload carries the old code in `aliases`,
+deprecated on arrival. The spec lists the same pairs in `asop.refusals.LEGACY_USES`, which readers must
+accept through v3.7 (`LEGACY_UNTIL`); the hub drops `aliases` after one minor. The codes live in the
+hub's own `agentco/errors.py` (`RENAMED`), because 0.6.1 was unreleased when they shipped;
+`tests/test_refusal_codes.py` fails if the installed contract spells them differently or does not list a
+hub rename as a legacy use (skipped while the installed contract predates them).
