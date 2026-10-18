@@ -68,6 +68,7 @@ from agentco.keys import NaturalKeyError
 from agentco.policy import RevisionPolicyError  # noqa: F401 - re-exported for tests
 from agentco.refusals import classify
 from agentco.sop import (
+    CHAIN_FIELDS,
     SopError,
     SopLibrary,
     resolve_sop_store,
@@ -92,8 +93,13 @@ from agentco.work import (
 # the half the author just wrote. `steps` carries the gates, so the wire shape
 # of a procedure is one object rather than a body plus a gate the filer supplies
 # — which is the v3 change this list is the wire half of.
+#
+# The chaining fields (v3.5 hand-offs, v3.6 entry gates and rework) come from
+# the installed contract's own `CHAIN_FIELDS`. They were missing from this list
+# until a live chain run found every one of them dropped on the way in, with a
+# 200; `tests/test_sop_wire_fields.py` now pins this list to the dataclass.
 SOP_BODY_KEYS = (*ASOP_TEXT_FIELDS, "task_type", "inputs", "roles", "constraints",
-                 "steps", "proposals")
+                 "steps", "proposals", *CHAIN_FIELDS)
 
 DB_ENV_VAR = "AGENTCO_REGISTRY_DB"
 DEFAULT_DB = "registry.sqlite3"
