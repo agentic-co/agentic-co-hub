@@ -148,6 +148,10 @@ migration 0014; `<store>.state` / `<store>.credits` for JSONL).
 | `replay_batch` | 5 | items one replay pass revives |
 | `pinned_review_days` | 90 | suggested calendar review interval |
 
+**Status: open** (owner, decision 8, 2026-10-18; ADR 0006). *Revisit when* real action traces measure
+them. The three-valued outcome they act on (verified success / verified failure / unverified) is
+**confirmed** by the owner the same day.
+
 **Origin: engineering defaults chosen for this implementation, from no measurement.** ADR 0006
 says no parameter is validated, and these are not. Override with `AGENTCO_MEMORY_PARAMS` (JSON)
 and record where any value you set came from. One thing the tests already show: the power law's

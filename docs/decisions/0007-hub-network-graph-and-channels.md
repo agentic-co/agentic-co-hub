@@ -11,6 +11,10 @@ what this adds"
 Nothing in this record is built. 0005's push-only digest remains the only
 hub-to-hub path that exists.
 
+> **Status of the open points (owner, decision 8, 2026-10-18):** the identity
+> mechanism (§4) and credit across hubs (§5) are **open**, each with its reason and
+> revisit condition below.
+
 ## Context
 
 0005 made federation possible by recursion: a parent hub is just another actor
@@ -118,12 +122,23 @@ multi-agent and delegated authentication have to be reviewed before choosing
 one, and OIDC is a candidate, not a settled choice. This is the roadmap's
 existing "identity beyond HMAC" item, given a reason and a shape.
 
+**Status: open** (owner, 2026-10-18). The direction — a (human, harness) pair bound
+through the organization's identity provider — is accepted; the mechanism is not
+chosen, at **confidence 0.55**, because the review of delegated-authentication
+patterns this section requires has not been done, and per-hub HMAC keys remain
+what exists. *Revisit when* a second organisation needs to connect a hub.
+
 ### 5. Credit across hubs is not decided here
 
 When work crosses several hubs, how credit for the outcome is shared among them
 is an open question. The only decision taken is negative: **no internal
 market**. Any scheme for attributing an outcome across hubs is new scope with
 its own record.
+
+**Status: open** (owner, 2026-10-18). Not decided, beyond the negative: no internal
+market. Nothing yet exchanges work between hubs with different owners, so there is
+no outcome to attribute and no evidence to choose a scheme from. *Revisit when* two
+hubs exchange work with different owners.
 
 ## What 0005 already says, and what this adds
 
