@@ -221,9 +221,10 @@ class _LocalBackend:
         # Walled kinds open only to this actor's effective clearance, read the
         # same way the HTTP app reads it. The remote backend needs nothing: the
         # hub it proxies to filters by the signature this server signs with.
-        from agentco import clearance
+        from agentco import clearance, digests
 
-        return events_module.read(self.conn, viewer=clearance.build().effective(self.actor), **kw)
+        return events_module.read(self.conn, viewer=clearance.build().effective(self.actor), reader=self.actor,
+                                  children=digests.federators_from_env(), **kw)
 
     def work_pull(self, agent: str, capabilities, ttl_seconds: int) -> Optional[dict]:
         for item in self.queue.ready(agent=agent):

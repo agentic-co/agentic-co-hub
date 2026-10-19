@@ -647,6 +647,9 @@ def create_app(
                 # Memory off: no viewer, so no walled event is ever shown (and
                 # none exists, since no store was opened to announce one).
                 viewer=walls.effective(actor) if walls is not None else None,
+                # A declared child reads only its own digests (ADR 0005).
+                reader=actor,
+                children=declared_federators,
             )
 
         return await _handle(request, "events", work)
