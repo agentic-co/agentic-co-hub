@@ -13,7 +13,7 @@ on `POST /work` filed an **ungated** item with a 200.
 | `POST /work` | the gate (`verify`), blockers, assignment |
 | `POST /work/pull` | the capabilities a claim is checked against |
 | `POST /work/{id}/report` | the fence, the idempotency key, the attestation |
-| `POST /work/{id}/attest`, `/adjudicate` | the gate's evidence, the adjudication |
+| `POST /work/{id}/attest`, `/adjudicate` | the gate's evidence, the ownership epoch, the idempotency key, the adjudication |
 | `POST /scope-claims` | a claim's paths and lease |
 | `POST /sops`, `/sops/{id}/revise` | a procedure's gates and chaining fields |
 | `POST /sops/{id}/run` | a run's blockers, chain pin, bindings |

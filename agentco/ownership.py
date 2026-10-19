@@ -206,6 +206,39 @@ def check_epoch(queue, item) -> None:
                             f"epoch {current} after a transfer", epoch=current)
 
 
+def check_attest_epoch(queue, item, claimed: object) -> None:
+    """ASOP §7.2: every attestation carries the epoch its store believes it holds.
+
+    `claimed` is the epoch the attester read (this hub's numbering, as
+    `GET /runs/{id}` shows it and `not_the_owner` states it). Absent, or 0, is a
+    store that predates epochs: accepted only until the run's first transfer.
+    Anything else must equal the run's current epoch. An item outside a run has
+    no owner record and nothing to check.
+    """
+    if claimed is not None and (isinstance(claimed, bool) or not isinstance(claimed, int) or claimed < 0):
+        raise _refuse(
+            "epoch_invalid",
+            f"epoch must be a non-negative integer, got {claimed!r}",
+            "Send the run's ownership epoch as you read it (`owner.epoch` on GET /runs/{id}), or omit it "
+            "on a run that has never been transferred.",
+            400,
+        )
+    root = run_root(queue, item)
+    if root is None:
+        return
+    current = int(owner_record(queue, root).get("epoch", 1))
+    if claimed in (None, 0):
+        if current == 1:
+            return
+        raise not_the_owner(
+            f"an attestation on {item.id} carries no ownership epoch (a store that predates epochs claims 0), "
+            f"and run {root.id} has been transferred since", epoch=current)
+    if claimed != current:
+        raise not_the_owner(
+            f"an attestation on {item.id} was made at ownership epoch {claimed}; run {root.id} is now at "
+            f"epoch {current} after a transfer", epoch=current)
+
+
 # --------------------------------------------------------------------------- #
 # the administrative transfer, and the pack reference
 # --------------------------------------------------------------------------- #
