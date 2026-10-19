@@ -236,6 +236,10 @@ one person working for several companies, pull first, one partition per company,
 signed envelopes (the person's per-company key, verified by its public half). Not built. The
 envelope is defined in this hub as the v1 contract, to be proposed to asop-spec 0.7.0 as an
 additive change with no change to 0.6.x semantics (Decision 1 = A, 2026-10-19).
+Every open point of 0008 is decided (owner, 2026-10-19): keys held per company hub, a 24 h
+envelope window with a confirm-by-fresh-signature grace to 36 h, removed people's gates
+reassigned by an administrator, titles shown with a per-company switch, presence check
+optional and off, push after v1.
 
 Still open (owner decision 8, 2026-10-18): the **identity mechanism** — direction accepted, mechanism
 not chosen, confidence 0.55; revisit when a second organisation needs to connect a hub — and **credit
