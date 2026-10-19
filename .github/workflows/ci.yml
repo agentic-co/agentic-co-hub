@@ -69,8 +69,8 @@ jobs:
     # stopped importing on 0.5.0 — the SQL column guard fired — and nothing
     # here could have said so, because nothing here installed 0.5.0.
     #
-    # The floor, the version that once broke the plane (0.5.0) and the newest
-    # (0.6.0, on PyPI since 2026-10-17). One Python: this is a contract
+    # The floor, the version that once broke the plane (0.5.0), 0.6.0 and the newest
+    # (0.6.1, on PyPI since 2026-10-18). One Python: this is a contract
     # question, and the matrix above answers the language one.
     runs-on: ubuntu-latest
     strategy:
@@ -80,6 +80,7 @@ jobs:
           - "asop-spec==0.4.0"
           - "asop-spec==0.5.0"
           - "asop-spec==0.6.0"
+          - "asop-spec==0.6.1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0

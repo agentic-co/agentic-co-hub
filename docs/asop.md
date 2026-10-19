@@ -30,7 +30,8 @@ that range. What it can store and serve depends on which one is installed:
 |---|---|---|---|
 | 0.4.0 / 0.4.1 | v3.4 | the v3 record: steps, gates, roles, constraints | supported, CI-tested |
 | 0.5.0 | v3.5 | plus the chaining fields `outcomes`, `outputs`, `handoffs`, `on_escalate`, `requires` (§3.7) | supported, CI-tested |
-| 0.6.0 | v3.6 | plus `entry_gates` and `rework` (§3.8, §3.9), and the v3.6 fields that live inside existing ones: hand-off `preflight`, `subject_from.order_by` / `concurrency` / `approved_subset`, gate `on_timeout: proceed_on_default` with `default`, `cannot_evaluate_exit`, `min_cases`, and `human_approved.binds_digest` | supported, the locked version, CI-tested (on PyPI since 2026-10-17) |
+| 0.6.0 | v3.6 | plus `entry_gates` and `rework` (§3.8, §3.9), and the v3.6 fields that live inside existing ones: hand-off `preflight`, `subject_from.order_by` / `concurrency` / `approved_subset`, gate `on_timeout: proceed_on_default` with `default`, `cannot_evaluate_exit`, `min_cases`, and `human_approved.binds_digest` | supported, CI-tested (on PyPI since 2026-10-17) |
+| 0.6.1 | v3.6.1 | the same record fields as 0.6.0 (additive release): the chain-member digest is normative (`body_digest`), the chain refusal codes incl. `human_required` are in the vocabulary, and §7.2 allows a recorded administrative ownership transfer | supported, the locked version, CI-tested (on PyPI since 2026-10-18) |
 
 How that is kept true:
 
@@ -133,7 +134,7 @@ forward it. `RUN_BODY_FIELDS` in `agentco/app.py` is the route's wire map, and
 
 ## Run ownership and the administrative transfer (ASOP §7.2; owner decision 2026-10-18)
 
-**Spec wording this implements** (asked of the spec's 0.6.1 amendment): *ownership is recorded on the
+**Spec wording this implements** (now normative in asop-spec 0.6.1, section 7.2): *ownership is recorded on the
 run when it is filed and no **run** verb moves it; a recorded administrative transfer may.*
 
 | Setting | Meaning |
@@ -174,11 +175,7 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
   --apply`), or whose actors are all silent past their declared cadence (`AGENTCO_CADENCE`) — naming the
   run, the owner, and the remedy: the transfer verb.
 
-**If the spec lands differently.** Should 0.6.1 keep "no verb moves it" without the administrative
-exception, the hub is non-conforming in exactly these places: the `POST /runs/{id}/transfer` route
-(`agentco/app.py`), `ownership.transfer` and `Queue.release_for_transfer`, the `RunTransferred` event
-kind, and the orphan finding's remedy text. Ownership at filing, `not_the_owner`, the epoch and the
-pack reference do not depend on it.
+**Status of the spec wording.** The administrative transfer landed in asop-spec 0.6.1 (§7.2, 2026-10-18) as written above, so the hub conforms in these places: the `POST /runs/{id}/transfer` route (`agentco/app.py`), `ownership.transfer` and `Queue.release_for_transfer`, the `RunTransferred` event kind, and the orphan finding's remedy text. Ownership at filing, `not_the_owner`, the epoch and the pack reference do not depend on the transfer.
 
 **Compatibility note (refusal codes, owner decision 9; spec 0.6.1 §10).** `chain_adopt`, `approve` and
 `run_transfer` refuse a non-human with `human_required` (formerly `capability_mismatch`); a transfer is
