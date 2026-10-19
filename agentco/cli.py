@@ -700,6 +700,27 @@ def _drain_text(result: dict) -> str:
     return "\n".join(lines)
 
 
+def cmd_hub_id(args) -> int:
+    """Print this hub's generated id and its configured label.
+
+    The id (128 bits, generated at first start, stored in the registry database)
+    is what an envelope will name; the label (`AGENTCO_HUB_ID`) is only a name
+    for people. Generating on first call is deliberate: the same function
+    `serve` runs, so the printed id is the one the hub will have.
+    """
+    from agentco import hubid
+    from agentco.memory import resolve_hub_id
+
+    conn = _conn(args)
+    uid, label = hubid.ensure(conn), resolve_hub_id(None)
+    if args.json:
+        print(json.dumps({"hubId": uid, "label": label}))
+    else:
+        print(f"id:    {uid}")
+        print(f"label: {label}")
+    return 0
+
+
 def cmd_verifiers(args) -> int:
     """The L3 operator surface: who is answering gates, and what is overdue.
 
@@ -1280,6 +1301,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_drain.add_argument("--json", action="store_true", help="machine-readable output")
     p_drain.set_defaults(func=cmd_drain)
+
+    p_hub = sub.add_parser(
+        "hub-id", help="print this hub's generated id (what envelopes name) and its configured label"
+    )
+    p_hub.add_argument("--db", default=None, help="registry database (default: $AGENTCO_REGISTRY_DB)")
+    p_hub.add_argument("--json", action="store_true", help="machine-readable output")
+    p_hub.set_defaults(func=cmd_hub_id)
 
     p_ver = sub.add_parser(
         "verifiers",

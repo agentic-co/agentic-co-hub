@@ -379,12 +379,15 @@ class Registry:
         adjudication: Optional[dict] = None,
         epoch: Optional[int] = None,
         idempotency_key: Optional[str] = None,
+        attempt: Optional[int] = None,
     ) -> dict:
         """Answer a gate on a parked item. The submitter comes from the signature.
 
         `epoch` is the run's ownership epoch as you read it (ASOP §7.2); omit
         it only for a run never transferred. `idempotency_key` makes a retry
-        after a lost response return the recorded outcome.
+        after a lost response return the recorded outcome. `attempt` is the
+        item's `answer_attempt` as you read it: a pass typed before a failing
+        verdict or a re-run is then refused `stale` instead of landing after it.
 
         The verb a verifier uses, as distinct from the executor's `work_report`:
         a judged gate exists precisely because the party that did the work may
@@ -400,6 +403,8 @@ class Registry:
             body["adjudication"] = adjudication
         if epoch is not None:
             body["epoch"] = epoch
+        if attempt is not None:
+            body["attempt"] = attempt
         if idempotency_key:
             body["idempotencyKey"] = idempotency_key
         return self._call("POST", f"/work/{item_id}/attest", body)

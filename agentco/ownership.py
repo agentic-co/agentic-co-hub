@@ -303,6 +303,33 @@ def check_attest_epoch(queue, item, claimed: object) -> None:
             f"epoch {current} after a transfer", epoch=current)
 
 
+def check_answer_attempt(item, claimed: object) -> None:
+    """ADR 0008 §3.3: an answer names the slot it answers, and the slot moves.
+
+    `claimed` is the item's `answer_attempt` as the attester read it. It moves on
+    every re-execution (a new lease) and on every failing verdict, so a pass typed
+    before a fail is refused `stale` even when no transfer happened for the epoch
+    to see. Checked inside the store lock, beside the epoch.
+    """
+    if isinstance(claimed, bool) or not isinstance(claimed, int) or claimed < 0:
+        raise _refuse(
+            "attempt_invalid",
+            f"attempt must be a non-negative integer, got {claimed!r}",
+            "Send the item's `answer_attempt` as you read it, or omit it.",
+            400,
+        )
+    current = item.answer_attempt
+    if claimed != current:
+        raise _refuse(
+            "stale",
+            f"an answer to {item.id} was made at attempt {claimed}; the item is now at attempt {current}",
+            f"Read the item again (its `answer_attempt` is {current}) and answer what it shows now. The "
+            "attempt moves on every re-run and every failing verdict, so an answer typed before one "
+            "must not land after it.",
+            409,
+        )
+
+
 # --------------------------------------------------------------------------- #
 # the administrative transfer, and the pack reference
 # --------------------------------------------------------------------------- #

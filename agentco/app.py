@@ -62,7 +62,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, chains, clearance as clearance_module, db, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
@@ -151,8 +151,8 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     ("POST", "/work/{item_id}/adjudicate"): wire.strict(
         ("verdict", "evidence"), "the adjudication record", refused_by_name=("adjudicator", "by")),
     ("POST", "/work/{item_id}/attest"): wire.strict(
-        ("attestation", "capabilities", "adjudication", "epoch", "idempotencyKey"),
-        "the gate's evidence, the ownership epoch and the idempotency key"),
+        ("attestation", "capabilities", "adjudication", "epoch", "attempt", "idempotencyKey"),
+        "the gate's evidence, the ownership epoch, the answer attempt and the idempotency key"),
     ("POST", "/sops"): wire.strict(("title", *SOP_BODY_KEYS), "a procedure's gates and chaining",
                                    refused_by_name=_IDENTITY),
     ("POST", "/sops/{sop_id}/revise"): wire.strict(("title", *SOP_BODY_KEYS),
@@ -437,6 +437,7 @@ def create_app(
         ),
     )
     app.state.conn = conn
+    app.state.hub_uid = hubid.ensure(conn)  # generated, persisted; `hub_id` stays a label
     app.state.keys = keys
     app.state.operator = resolve_operator(operator)
     app.state.ignored = wire.Ignored()
@@ -897,6 +898,10 @@ def create_app(
                     # as the spec allows: absent claims epoch 0, which holds
                     # only until the run's first transfer.
                     epoch=payload.get("epoch"),
+                    # ADR 0008 §3.3: the item's `answer_attempt` as read. Optional
+                    # on the wire (asop-spec has no such field); present, it must
+                    # be current or the answer is `stale`.
+                    attempt=payload.get("attempt"),
                     idempotency_key=payload.get("idempotencyKey"),
                 )
             except (WorkError, ValueError) as exc:

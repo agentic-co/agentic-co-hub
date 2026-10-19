@@ -380,9 +380,25 @@ class WorkItem:
         """
         return [dep for dep in self.blocked_by if dep not in done_ids]
 
+    @property
+    def answer_attempt(self) -> int:
+        """The slot a gate answer addresses: it moves whenever an earlier answer
+        could have been typed against a state that no longer exists.
+
+        `lease_attempt` (every claim and every report advance it) plus the
+        failing verdicts this item's gate has given (`FAILED_VERDICTS_KEY`).
+        Both only grow, so the sum only grows: a pass read before a fail can
+        never equal the attempt after it, with or without an ownership
+        transfer. Derived, never stored as truth, so it cannot drift from the
+        two counters it is made of; `to_json` shows it so a verifier can read
+        the slot it is answering.
+        """
+        return self.lease_attempt + int((self.metadata or {}).get(FAILED_VERDICTS_KEY) or 0)
+
     def to_json(self) -> str:
         payload = asdict(self)
         payload["status"] = self.status.value
+        payload["answer_attempt"] = self.answer_attempt
         return json.dumps(payload, sort_keys=True)
 
     @classmethod
@@ -411,6 +427,11 @@ class WorkItem:
 ATTEST_KEYS_KEY = "attest_keys"
 ATTEST_KEYS_KEPT = 20
 
+#: How many failing verdicts `Queue.attest` has recorded on an item: the half of
+#: `WorkItem.answer_attempt` a lease does not already count (ADR 0008 §3.3, a
+#: failing verdict advances the attempt).
+FAILED_VERDICTS_KEY = "failed_verdicts"
+
 RESERVED_METADATA_KEYS = frozenset({
     "verifies", "claims", "lease_report", "verify_parked_at", "verify_resolution",
     "verify_history", "verify_escalated", "verify_quarantined", "verify_retry",
@@ -431,6 +452,9 @@ RESERVED_METADATA_KEYS = frozenset({
     # lost response returns the recorded item instead of a refusal. A caller who
     # could set them could make a real attestation read as a retry of one.
     "attest_keys",
+    # Failing verdicts given on this item (`WorkItem.answer_attempt`). A caller
+    # who could set it could move the attempt a pass must name.
+    FAILED_VERDICTS_KEY,
     # How many times the current lease was renewed, and when last (owner
     # decision 10). A caller who could set it could disguise a lease's age.
     "lease_renewed",
@@ -2153,8 +2177,18 @@ class Queue:
         now: Optional[datetime] = None,
         epoch: Optional[int] = None,
         idempotency_key: Optional[str] = None,
+        attempt: Optional[int] = None,
     ) -> Optional[WorkItem]:
         """Answer a gate. The only transition out of a verify state.
+
+        **The answer attempt (ADR 0008 §3.3).** `attempt` is the slot the attester
+        read (`answer_attempt` on the item): `lease_attempt` plus the failing
+        verdicts the gate has given. Present, it must equal the current one or the
+        answer is refused `stale` stating it, so a pass typed before a fail
+        cannot land after it, even with no transfer for the epoch to see. Absent
+        keeps the earlier behaviour, because the spec's attest has no such field.
+        A second answer to a gate that already passed is `not_terminal`; a retry
+        with the same idempotency key still returns the recorded item.
 
         **The ownership epoch (ASOP §7.2).** For a step of a run, `epoch` is the
         run's ownership epoch as the attester last read it (`GET /runs/{id}`,
@@ -2293,6 +2327,18 @@ class Queue:
             )
 
         def verdict(item: WorkItem) -> dict:
+            if item.is_gated and item.status == WorkStatus.DONE:
+                # First valid answer wins (ADR 0008 §3.3, §6): the gate already
+                # passed, so a different answer finds nothing to answer.
+                raise Refusal(
+                    code="not_terminal",
+                    message=f"{item.id} is already done: its gate passed, so a second answer has no slot",
+                    remediation=(
+                        "Nothing to do: the first valid answer stands. To record the same answer "
+                        "again after a lost response, resend it with its original idempotencyKey."
+                    ),
+                    http_status=409,
+                )
             if not item.is_gated:
                 raise Refusal(
                     code=gates.ATTESTATION_INVALID,
@@ -2538,7 +2584,15 @@ class Queue:
             from agentco import ownership
 
             ownership.check_attest_epoch(self, item, epoch)
+            if attempt is not None:
+                ownership.check_answer_attempt(item, attempt)
             update = answer(item)
+            if update.get("status") == WorkStatus.VERIFY_FAILED:
+                # A failing verdict advances the answer attempt, so an answer
+                # typed against the state before it is stale from here on.
+                metadata = dict(update.get("metadata") or item.metadata or {})
+                metadata[FAILED_VERDICTS_KEY] = int(metadata.get(FAILED_VERDICTS_KEY) or 0) + 1
+                update["metadata"] = metadata
             if idempotency_key:
                 metadata = dict(update.get("metadata") or item.metadata or {})
                 status = update.get("status", item.status)
