@@ -94,8 +94,8 @@ not the operator gets no exception.
 **Signed queries.** Set `ASOP_REQUIRE_SIGNED_QUERY=1` on every hub in a control-loop topology (the
 rig does). A signature over the old string, without the canonical query line, is then refused `401`.
 The client library (`Registry._call`, and so the MCP remote backend and the federation push) signs
-the query already. `agentco/conformance.py`'s loopback client and `tools/loadtest.py` still sign
-without it and must not be pointed at a hub that sets the variable.
+the query already, and so do `agentco/conformance.py`'s loopback client and `tools/loadtest.py`;
+a test runs both against a hub that sets the variable.
 
 ## Ownership epochs
 
