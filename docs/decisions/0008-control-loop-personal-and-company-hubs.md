@@ -10,6 +10,11 @@ owns the work also executes it (§2)
 Nothing in this record is built. 0005's push-only digest is still the only
 hub-to-hub path that exists.
 
+**Decided so far:** the topology and pull first (owner decision 2026-10-18,
+option C), and where the envelope is defined (Decision 1, owner 2026-10-19,
+option A: §3 and Open 1). The other open points below are still being decided
+one at a time; nothing is built until they are.
+
 ## Context
 
 One person works for several organisations at once — a consultant with three or
@@ -95,6 +100,16 @@ amends 0007's direction table, which sends answers back toward the hub that sent
 the work, for the case where the owning hub also executes it.
 
 ### 3. Answers are signed envelopes
+
+**Where it is defined (Decision 1 = A, owner 2026-10-19).** The envelope is
+defined in this hub, in its documentation and its code, and that definition is
+the **v1 contract**: payload, signing rule, test vectors and refusal codes as
+stated here. It is to be proposed to the ASOP spec for **0.7.0, as an additive
+change with no change to existing 0.6.x semantics**: an 0.6.x store or client
+that never sends an envelope behaves exactly as it does today, and the
+attestation record keeps naming the person as `submitted_by`. Until the spec
+adopts it, the envelope is hub-local and conformance-neutral; if the spec
+adopts it with changes, the hub follows the spec and states the migration.
 
 **What is signed.** A payload of `type` (`asop.answer/1`), `hub` (the owning
 company hub's id, §3.1), `item`, `attempt`, `stage`, `epoch`, `verdict` (`{passed,
@@ -229,11 +244,13 @@ work.
 
 ## Open
 
-1. **Spec placement of the envelope.** Built hub-local first — the attestation
-   record still names the person as `submitted_by`, so this is conformance-neutral —
-   and proposed for asop-spec as a minimal additive change: an optional `envelope` on
-   the attestation, the two payload schemas and their vectors, the signing rule,
-   `attempt` on the attestation, and the refusal codes.
+1. **Spec placement of the envelope — decided (Decision 1 = A, owner
+   2026-10-19).** Defined in the hub now, docs and code, as the v1 contract (§3).
+   To be proposed to asop-spec 0.7.0 as an additive change, with no change to
+   existing 0.6.x semantics: an optional `envelope` on the attestation, the two
+   payload schemas and their vectors, the signing rule, `attempt` on the
+   attestation, and the refusal codes. Hub-local and conformance-neutral until
+   then, because the attestation record still names the person as `submitted_by`.
 2. **Where public keys are published.** Detection of a substituted key rests, in the
    first version, on the person's own records and the hub's feed. A directory the
    person controls, readable by companies, is the candidate for when the spec field
