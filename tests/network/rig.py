@@ -48,6 +48,7 @@ ACTORS = {
         "ana": None,
         "operator": None,
         "hub-b": None,                      # the declared federated child
+        "hub-d": None,                      # a second declared child, a key only
         "hub-c": None,                      # a valid key, NOT a declared child
         "rt-agent": None,                   # speaks for the external store runtime-a
     },

@@ -10,6 +10,8 @@ sees every digest exactly once: no loss, no replay.
 
 from __future__ import annotations
 
+import json
+
 ART = "/var/lib/agentco/artifacts"
 DIGEST = ("python3", "-m", "agentco", "digest", "--deliver", "--post", "--via", "hub")
 
@@ -100,3 +102,21 @@ def test_federation_is_one_way(rig):
     assert "hub-a" not in rig.secrets["hub-b"]
     status, payload = rig.call("hub-b", "worker-b", "GET", "/events", query="kind=DigestReceived")
     assert status == 200 and payload["events"] == [], payload
+
+
+def test_a_child_reads_only_its_own_digests_on_the_parent(rig):
+    """G4: hub-b's key on hub-a must not read hub-d's digests (meta included);
+    the parent's own readers read both."""
+    status, _ = rig.call("hub-a", "hub-d", "POST", "/digests",
+                         {"text": "hub-d rollup", "meta": {"marginNote": "hub-d-only"}})
+    assert status == 200
+
+    def actors(reader):
+        status, page = rig.call("hub-a", reader, "GET", "/events", query="kind=DigestReceived&limit=500")
+        assert status == 200, page
+        return page
+
+    as_b, as_d = actors("hub-b"), actors("hub-d")
+    assert {e["actor"] for e in as_b["events"]} == {"hub-b"} and "hub-d-only" not in json.dumps(as_b)
+    assert [e["actor"] for e in as_d["events"]] == ["hub-d"]
+    assert {e["actor"] for e in actors("dana")["events"]} == {"hub-b", "hub-d"}

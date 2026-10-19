@@ -29,6 +29,20 @@ Every other route: release a scope claim, snapshots, digests, activate, retire, 
 and every `GET`. The response carries `ignored`, the key is logged, and `GET /metrics` counts it
 under `ignoredFields` (per process: it starts at zero on restart).
 
+## Who reads what on `GET /events`
+
+The feed is one table, filtered on the way out by who is reading:
+
+- `MemoryChanged` opens only to a reader cleared for its label (ADR 0006); with memory off there
+  are none.
+- `DigestReceived` (federation, ADR 0005) is **sender-scoped**: a declared federated child
+  (`ASOP_FEDERATED_CHILDREN`) reads only the digests it sent; every other reader reads all of them.
+- Everything else is visible to every signed reader.
+
+A hidden row is left out of `events` and `count`, and `nextCursor` still moves past it, so a page
+the reader cannot see does not stall a poller. The MCP `events` tool reads the same function, so
+the same rules apply locally and over the relay.
+
 ## What the message says
 
 Each unknown key gets the closest valid key and its **provenance**, from the bundled table
