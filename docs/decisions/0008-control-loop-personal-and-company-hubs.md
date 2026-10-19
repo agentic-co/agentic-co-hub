@@ -43,9 +43,12 @@ Four facts about the code and the contract shape the answer:
    attestation across organisations: both parties hold the secret, so neither can
    show a third party who wrote a verdict, and the stored record carries no
    signature.
-4. **Any key on a hub is full access today**, the attestation path does not
-   check the ownership epoch that §7.2 requires on every attestation, and a hub's
-   id defaults to the same string on every hub.
+4. **Any key on a hub was full access**, the attestation path did not check the
+   ownership epoch that §7.2 requires on every attestation, and a hub's id
+   defaulted to the same string on every hub. Since this record was written the
+   epoch is checked on every attestation and counted as §7.2 counts it (#54,
+   #56), and a generated hub id and an attempt fence exist (#58); the route
+   allowlist is §8's B2.
 
 ## Alternatives
 
@@ -84,7 +87,9 @@ age only (Decision 5).
 The **switchboard is deterministic and holds no model credential and no company
 credential.** On selection it passes `ref` to the partition named by `label`.
 Drill-in is a live read by that partition from its own hub. The personal hub holds
-no company content and is not on the loop.
+no company content and is not on the loop. Content from different companies meets
+only in this deterministic display, never in a model context; what it shows is not
+nothing: `ref` exposes item ids and failure counts.
 
 ### 2. "Parent" is per channel
 
@@ -113,7 +118,8 @@ adopts it, the envelope is hub-local and conformance-neutral; if the spec
 adopts it with changes, the hub follows the spec and states the migration.
 
 **What is signed.** A payload of `type` (`asop.answer/1`), `hub` (the owning
-company hub's id, §3.1), `item`, `attempt`, `stage`, `epoch`, `verdict` (`{passed,
+company hub's id, §3.1), `item` (the original item, §8 S1), `verify_attempt`, `stage`,
+`epoch` (0 outside a run, §8 S2), `verdict` (`{passed,
 reason}`, §5.3's shape), an optional `choice`, `signer`, `key_id`, a 128-bit
 `nonce` and an integer `issued_at`. The bytes signed are the type line followed by
 the payload serialized with the spec's **normative canonical JSON** (§3.10: keys by
@@ -129,7 +135,14 @@ Today a hub's id is an operator string whose default is `local` on every hub, so
 binds nothing. The envelope's `hub` is a **128-bit id generated at first start and
 persisted**, exposed by the hub, pinned by the person's partition when a key is
 enrolled and stored beside the enrolled key. The configured name stays a label.
-**Envelopes cannot be enabled while a hub's id is `local`.**
+**Envelopes cannot be enabled while no generated id is persisted.** The id is a
+**new field beside the configured name**, not a replacement for it: the configured
+name (`AGENTCO_HUB_ID`, default `local`) is also the run-ownership store name and
+the authority that memory items carry, and replacing it would make every run
+`not_the_owner` and every memory item a replica. A registry restored from backup
+onto a second machine carries the same id; restoring a hub as a second, live hub
+regenerates the id (and re-enrols its keys) rather than running two hubs under one
+id (§8, S10).
 
 #### 3.2 Keys, and what they do and do not give
 
@@ -141,7 +154,10 @@ person's verdict, which is fact 3.
 
 Stated exactly: **the company hub cannot produce a signature that verifies under the
 key the person published. It owns the key directory, so it can enrol a key it
-controls — a substitution that is detectable, not prevented.** The person keeps
+controls. A substitution is detectable only by someone who holds the person's key
+fingerprints AND can read the hub's records independently** — the hub filters its
+feed per reader, so the person's own view is not independent. Until 0.7.0's
+directory, substitution is prevented only by the operator's honesty. The person keeps
 every envelope they signed and the fingerprint of every key they published; every
 enrolment and revocation is an event on the hub's feed (`HumanKeyEnrolled`,
 `HumanKeyRevoked`), and the partition compares the keys the hub reports for the
@@ -175,7 +191,7 @@ transfer of §7.2. Automatic reassignment waits for spec 0.7.0.
 Before any state changes: the transport credential and its route allowlist; the
 envelope schema; the envelope names **this** hub's id; the key is enrolled for the
 signer and not revoked now; the signature; the envelope's age (below); the nonce;
-the signer is the gate's named human; the item is answerable at this `attempt` and
+the signer is the gate's named human; the item is answerable at this `verify_attempt` and
 `epoch`. Then it attests with `submitted_by` = the person, and **the attestation
 carries the envelope, its `key_id` and `nonce`, and the transport actor (`via`)**.
 
@@ -220,8 +236,12 @@ by default; when switched on, a failed check warns and never blocks answering**
 (Decision 6).
 
 This closes the known issue "attestations are not signed" **inside this hub, for
-human-gate answers**. It does not by itself make cross-organisation attestation
-real (see 3.2). Agent attestations stay as the known issue describes.
+human-gate answers, only once the unsigned path is closed for the same gates**
+(§8, B1): while `POST /work/{id}/attest` accepts `submitted_by` equal to the named
+person over HMAC, and the company hub holds that person's HMAC secret, the hub
+can still write the person's verdict without an envelope. It does not by itself
+make cross-organisation attestation real (see 3.2). Agent attestations stay as
+the known issue describes.
 
 ### 4. Instructions are ordinary work, and the whole body is signed
 
@@ -249,25 +269,116 @@ target** — a company hub may also have its own parent.
   one high. One migration decrements the run owner's epoch, every history entry and
   every step's stamped epoch on every work-store backend. No "0 or 1" leniency: a
   fence with two right answers is not a fence.
-- **Epoch on every attestation** (§7.2). The hub checks it on renew and report only.
-- **`not_terminal`** for a second answer (§7.3); the hub answers
-  `attestation_invalid`.
+- **Epoch on every attestation** (§7.2) — done (#54); the count above — done (#56).
+- **`not_terminal`** for a second answer (§7.3) — done (#58).
 - **Signed queries on** (`ASOP_REQUIRE_SIGNED_QUERY=1`) on every hub in this
   topology.
 - **Read credentials name no agent of their own choosing**: the agent a ready-work
   read is filtered by is derived from the credential on the server, never taken
-  from the query.
+  from the query; for the partition's credential that is the credential's PARTY
+  (§8, B2).
 
 ### 7. Order
 
 The envelope depends on the epoch and attempt fence, the generated hub id and a
 per-actor route allowlist, so it is built after them and before push: fence and hub
-id, route and read allowlist, envelope and the runner's signer, then the first loop,
-then signed instructions, then push. The first tests decide whether the two-store
+id (built), route and read allowlist with the partition credential's route set and
+the routes it needs (§8, B2: the hub-id route, the single-item read, the
+party-filtered ready read, the HumanKey-only feed read); then the operator's enrol
+and revoke verbs with their `HumanKey*` events; the envelope, its nonce table and
+nonce GC, `envelope_required` (B1) and the runner's signer; the grace state and its
+confirmation flow (S4); the gate-reassignment verb Decision 4 needs (nothing
+reassigns a verifier today); then the first loop, then signed instructions, then
+push. The first tests decide whether the two-store
 recovery holds — a crash between the attestation and the nonce update, and two
 envelopes racing for one slot, on every backend — then cross-hub replay with default
 ids, then the published vectors against a second signer, before any secure-enclave
 work.
+
+### 8. Rules added by the adversarial review (2026-10-19)
+
+A read-only adversarial review of this record against the code on main found two
+blockers and a set of underspecified points. No owner decision is overturned;
+these are the rules the build follows. Each code citation was re-checked on main.
+
+**B1. The unsigned path closes when the signed one opens.** (a) The partition's
+transport credential is a distinct actor with `owner: <person>` in the key table,
+never the person's own key. (b) Once a human has an enrolled key, an unsigned
+`POST /work/{id}/attest` on a gate naming them is refused **`envelope_required`**;
+until then the unsigned path behaves as today. (c) The stored attestation carries
+the envelope (with `key_id`, `nonce` and the transport actor), or reads as
+`legacy` when it was not signed.
+
+**B2. The partition credential's routes, exactly.** A credential of this class
+reaches only:
+
+- `GET` the hub's generated id (a new route);
+- `GET /work?ready=1`, filtered on the server to items assigned to the
+  credential's **party** (`auth.owner_of`), never to unassigned items: today
+  `ready(agent=X)` also returns every unassigned ready item;
+- `GET /work/{id}` (a new single-item read) for that party's vehicles and the item
+  each one `verifies`, and nothing else;
+- `GET /events` restricted to `HumanKey*` kinds;
+- `POST` the answer route;
+- `GET` its own receipts.
+
+Nothing else: not the unfiltered `GET /work`, which lists the whole queue.
+
+**S1. What `item` and `attempt` name.** `item` is the vehicle's `verifies` id: the
+answer targets the original item. The attempt field is named **`verify_attempt`**
+and equals the item's `verify_failures` (a failing verdict advances it; a lease
+does not), replacing the ambiguous `attempt`. The published vectors include one for
+each field. The attempt fence built in #58 (`answer_attempt` = lease attempt plus
+failing verdicts) is brought to this definition before the envelope uses it.
+
+**S2. The epoch of an item outside a run is 0**, stated and checked equal to 0;
+null is not a value of the field.
+
+**S3. Time.** An envelope with `issued_at` more than 300 s after arrival (the
+transport's `MAX_SKEW_S`) is refused **`envelope_future`**. Nonces are kept for at
+least fresh + grace measured from arrival, then collected.
+
+**S4. The grace confirmation.** It is a complete NEW `asop.answer/1`, whose verdict
+the partition takes from its OWN stored envelope for `(item, verify_attempt)`.
+With no local envelope for that slot the partition shows "the hub reports an
+answer you did not send" and offers no confirm. The late envelope's nonce is
+recorded `expired`, and nothing of its content touches the item.
+
+**S5. Two-store recovery, precisely.** A nonce row `received` whose item is still
+answerable at `(verify_attempt, epoch)` with the same canonical payload: resume
+and attest. A row `received` whose item has advanced and carries the same
+`(key_id, nonce)`: success. Anything else: the slot's normal refusal.
+
+**S6.** The key-substitution wording in §3.2 is corrected above. The revisit
+condition names who finds a substituted key.
+
+**S7. `owner:` natural keys.** A `naturalKey` starting `owner:` is refused on every
+route except the signed-instruction route: today a duplicate natural key returns
+the EXISTING item as `accepted`, so an unsigned filing could pre-empt a signed
+one. The instruction route's response echoes the canonical digest of what it filed.
+
+**S8. `asop.instruction/1` carries the same header as `asop.answer/1`** (`hub`,
+`signer`, `key_id`, `nonce`, `issued_at`); its `naturalKey` is mandatory.
+
+**S9.** §7's order and §6's status are corrected above; the stale "renew and report
+only" wording is gone.
+
+**S10.** The generated id is a new field (§3.1, corrected above); the ownership
+store name and memory authority keep the configured name.
+
+**Notes.**
+- N1: each partition reaches its hub over TLS with a pinned endpoint; HMAC
+  authenticates requests, not the channel.
+- N2: the display wording in §1 is corrected above.
+- N3: partition labels are unique, checked at configuration load.
+- N4: refusing a key for a non-human needs `ASOP_HUMANS`; the enrolled-key table
+  is the registry for human gates.
+- N5: the signed bytes are the type line, one `\n`, then the canonical JSON; the
+  nonce is 32 lowercase hex characters; `check`, `exit_status` and `at` on the
+  stored attestation are written by the hub and are outside the signature.
+- N6: the person's machine is the root of trust. Malware on it holds every key,
+  and a signed instruction may file UNGATED work: arbitrary runner execution on
+  every company the person serves.
 
 ## Decided (formerly open; owner, 2026-10-19)
 
@@ -275,7 +386,7 @@ work.
    docs and code, as the v1 contract (§3). To be proposed to asop-spec 0.7.0 as an
    additive change, with no change to existing 0.6.x semantics: an optional
    `envelope` on the attestation, the two payload schemas and their vectors, the
-   signing rule, `attempt` on the attestation, and the refusal codes. Hub-local and
+   signing rule, `verify_attempt` on the attestation, and the refusal codes. Hub-local and
    conformance-neutral until then, because the attestation record still names the
    person as `submitted_by`.
 2. **Where public keys are held.** In each company hub's own records; enrolment and
@@ -329,4 +440,7 @@ stated here); if the spec comes to permit a delegate to answer a human gate
 signer did not intend and the presence check would not have stopped it (that would
 mean the hardening is load-bearing and must stop being optional); or if a company
 hub is ever found to have enrolled a key the person did not create (that would make
-an external key directory a requirement rather than an open item).
+an external key directory a requirement rather than an open item) — found by the
+person's partition comparing the keys the hub reports against its own fingerprints,
+by an auditor reading the hub's database directly rather than its filtered feed, or
+by a second company finding a key it did not enrol.
