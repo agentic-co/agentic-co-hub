@@ -17,6 +17,10 @@
 #   chain-sqlite / chain-pg
 #           the automated live chain proof, one per durable backend
 #
+# Every hub sets ASOP_REQUIRE_SIGNED_QUERY=1 (ADR 0008 §6): a signature that
+# does not cover the query string is refused, so the topology runs with known
+# issue 6b shut.
+#
 # Host ports are ephemeral on loopback ("127.0.0.1::8787"); the rig asks
 # compose which port each hub got. Addresses on the rig network are fixed, in a
 # subnet the rig picks per run: a partitioned hub rejoins at its own address.
@@ -43,6 +47,7 @@ services:
       - ${RIG_KEYS:?}/hub-a:/run/secrets/rig:ro
     environment:
       AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      ASOP_REQUIRE_SIGNED_QUERY: "1"
       AGENTCO_REGISTRY_OPERATOR: operator
       AGENTCO_HUB_ID: hub-a
       AGENTCO_HUMANS: dana
@@ -63,6 +68,7 @@ services:
       - ${RIG_KEYS:?}/hub-b:/run/secrets/rig:ro
     environment:
       AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      ASOP_REQUIRE_SIGNED_QUERY: "1"
       AGENTCO_HUB_ID: hub-b
       AGENTCO_PARENT_HUB_URL: http://hub-a:8787
       AGENTCO_PARENT_HUB_ACTOR: hub-b
@@ -80,6 +86,7 @@ services:
       - ${RIG_KEYS:?}/hub-c:/run/secrets/rig:ro
     environment:
       AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      ASOP_REQUIRE_SIGNED_QUERY: "1"
       AGENTCO_HUB_ID: hub-c
       AGENTCO_PARENT_HUB_URL: http://hub-a:8787
       AGENTCO_PARENT_HUB_ACTOR: hub-c
@@ -96,6 +103,7 @@ services:
       - ${RIG_KEYS:?}/chain-sqlite:/run/secrets/rig:ro
     environment:
       AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      ASOP_REQUIRE_SIGNED_QUERY: "1"
       AGENTCO_REGISTRY_OPERATOR: operator
       AGENTCO_HUMANS: dana
       AGENTCO_DB: /var/lib/agentco/hub.sqlite3
@@ -113,6 +121,7 @@ services:
       - ${RIG_KEYS:?}/chain-pg:/run/secrets/rig:ro
     environment:
       AGENTCO_REGISTRY_KEYS: /run/secrets/rig/keys.json
+      ASOP_REQUIRE_SIGNED_QUERY: "1"
       AGENTCO_REGISTRY_OPERATOR: operator
       AGENTCO_HUMANS: dana
       AGENTCO_DB: postgresql://agentco:${RIG_PG_PASSWORD:?}@postgres:5432/agentco

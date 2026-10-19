@@ -29,6 +29,50 @@ Every other route: release a scope claim, snapshots, digests, activate, retire, 
 and every `GET`. The response carries `ignored`, the key is logged, and `GET /metrics` counts it
 under `ignoredFields` (per process: it starts at zero on restart).
 
+## Per-actor routes, the derived read agent, signed queries
+
+ADR 0008 §3.3 and §6. A credential can be confined to named routes, and a read is made *as the
+signer*.
+
+**Route allowlist** (`agentco/authz.py`). In the key table's object form, next to `owner` and
+`clearance`:
+
+```json
+{"relay-1": {"secret": "…", "routes": ["attest", "events"]}}
+```
+
+`routes` names the verbs `_handle` is called with (`events`, `attest`, `work_pull`, `work_list`, …;
+`authz.VERBS` is the complete list and a test keeps it equal to the verbs `app.py` uses). Checked
+right after authentication and **before the body is read**; a refusal is `403 route_not_allowed`
+whose remediation names the operator act (add the verb to that entry's `routes`, or remove `routes`).
+
+- No `routes`: unrestricted, as every table written earlier. An empty list reaches nothing.
+- A malformed `routes` (not a list of strings) fails closed for that actor only; signing for everyone
+  else is unaffected. An unknown name grants nothing, so a typo narrows access, never widens it.
+- Read on every request, so an edit applies on the next request, as revocation does.
+- `transport` is a **reserved group** for the answer route and its receipts. Neither exists yet, so it
+  expands to nothing today and `["transport"]` reaches nothing; name the verbs you mean until the
+  envelope work fills the group in.
+
+A transport credential therefore cannot reach `GET /work`, which returns every item's `result` and
+gate metadata.
+
+**The agent of a ready-work read is the signer.** `GET /work?ready=1` filters by the actor that signed
+the request; the query's `agent` is never used to choose. Naming anyone else, on `?ready=1` or on a
+plain list, is `400 agent_from_signature`; naming oneself is accepted. Behaviour change: a
+non-operator `?ready=1` used to return the whole ready set; it now returns what that actor could pull
+(unassigned items and its own), the same set `POST /work/pull` offers.
+*Exception:* the registry's declared operator (`AGENTCO_REGISTRY_OPERATOR`) may name any agent or
+none. It already reads the whole queue through the unfiltered list, so the filter protects nothing
+from it, and it is how an operator sees queue health across lanes. A human or an administrator who is
+not the operator gets no exception.
+
+**Signed queries.** Set `ASOP_REQUIRE_SIGNED_QUERY=1` on every hub in a control-loop topology (the
+rig does). A signature over the old string, without the canonical query line, is then refused `401`.
+The client library (`Registry._call`, and so the MCP remote backend and the federation push) signs
+the query already. `agentco/conformance.py`'s loopback client and `tools/loadtest.py` still sign
+without it and must not be pointed at a hub that sets the variable.
+
 ## Ownership epochs
 
 `owner.epoch` on `GET /runs/{id}`, the `epoch` a transfer returns, the one a `not_the_owner`
