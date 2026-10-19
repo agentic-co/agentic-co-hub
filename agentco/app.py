@@ -151,7 +151,8 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     ("POST", "/work/{item_id}/adjudicate"): wire.strict(
         ("verdict", "evidence"), "the adjudication record", refused_by_name=("adjudicator", "by")),
     ("POST", "/work/{item_id}/attest"): wire.strict(
-        ("attestation", "capabilities", "adjudication"), "the gate's evidence"),
+        ("attestation", "capabilities", "adjudication", "epoch", "idempotencyKey"),
+        "the gate's evidence, the ownership epoch and the idempotency key"),
     ("POST", "/sops"): wire.strict(("title", *SOP_BODY_KEYS), "a procedure's gates and chaining",
                                    refused_by_name=_IDENTITY),
     ("POST", "/sops/{sop_id}/revise"): wire.strict(("title", *SOP_BODY_KEYS),
@@ -886,6 +887,11 @@ def create_app(
                     # call. Written under `adjudicate`'s rules with the signed
                     # actor as adjudicator.
                     adjudication=payload.get("adjudication"),
+                    # ASOP §7.2: the ownership epoch the attester read. Optional,
+                    # as the spec allows: absent claims epoch 0, which holds
+                    # only until the run's first transfer.
+                    epoch=payload.get("epoch"),
+                    idempotency_key=payload.get("idempotencyKey"),
                 )
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc

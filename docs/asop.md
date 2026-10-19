@@ -170,6 +170,19 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
   `not_the_owner` naming both epochs, and the former store's actors may no longer claim, report or
   attest the run's steps. Transferred to the hub, the run's open steps are worked through the hub's own
   queue under normal fencing.
+- **The epoch on every attestation** (§7.2: *"every flip, completion and attestation carries the epoch
+  its store believes it holds"*). `POST /work/{id}/attest` takes `epoch`, the run's `owner.epoch` as the
+  attester read it, and so do the client, the MCP `attest` tool and the outbox. Checked inside the
+  write's lock: a mismatch is `not_the_owner` stating the current epoch, whoever sends it and even
+  after a transfer back. **Optional on the wire because the spec makes it so:** absent (or 0) is a
+  store that predates epochs, accepted until the run's first transfer and refused after it. Applies
+  to every gate kind, hub-owned runs included; an item outside a run has no epoch. Before this the
+  check ran on renew and report only, and an answer read before a hub → runtime → hub round trip
+  landed after it.
+- **Numbering.** This hub counts from 1 at filing (`owner.epoch` 1, +1 per transfer); the spec's
+  run-ownership schema counts transfers (0 for a run never transferred). Every number this hub
+  shows and accepts is its own; a client that computes spec epochs instead is refused after the
+  first transfer. Open for the owner: renumber to the spec's count, or map at the wire.
 - **Orphans.** The pulse reports an attention finding (`ownership.orphaned-run`) for every open run whose
   owner store is not registered, none of whose actors still holds a key (after `agentco revoke
   --apply`), or whose actors are all silent past their declared cadence (`AGENTCO_CADENCE`) — naming the

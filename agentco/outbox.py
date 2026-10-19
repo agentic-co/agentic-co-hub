@@ -36,8 +36,8 @@ silently dropped stops pushing and is right to.
 **Delivery is at-least-once, and that is a choice with a reason.** Lines are
 removed from the outbox only after they have a terminal receipt. A drainer that
 dies between publishing and truncating will publish those lines again on the
-next run, and `work_report` carries the line id as its idempotency key so that
-retry is free. For `claim_scope` and `snapshot` a duplicate costs a redundant
+next run, and `work_report` and `attest` carry the line id as their idempotency
+key so that retry is free. For `claim_scope` and `snapshot` a duplicate costs a redundant
 row; the alternative ordering — truncate first, then publish — loses the write
 outright on the same crash. A silently dropped claim is the failure the registry
 exists to prevent, and a duplicate one is visible and harmless.
@@ -616,6 +616,12 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
                 agent_label=label,
                 capabilities=payload.get("capabilities"),
                 adjudication=payload.get("adjudication"),
+                epoch=payload.get("epoch"),
+                # The line id is the idempotency key, as for `work_report`: a
+                # drainer that died after the call and before settling
+                # republishes, and gets the recorded item back instead of an
+                # `attestation_invalid` for answering a gate twice.
+                idempotency_key=record["line_id"],
             )
         if verb == "adjudicate":
             return registry.adjudicate(
