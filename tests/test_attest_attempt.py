@@ -52,6 +52,10 @@ def test_a_new_lease_does_not_advance_the_attempt(queue):
     assert queue.get(item.id).verify_failures == 1
 
 
+@pytest.mark.skipif(
+    not hasattr(pytest.importorskip("asop.gates"), "gate_outcome"),
+    reason="cannot_evaluate gate fields arrive with asop-spec 0.6.0 (v3.6)",
+)
 def test_cannot_evaluate_does_not_advance_the_attempt(queue):
     """What the code does: a could-not-evaluate result does not increment
     `verify_failures` (agentco/work.py, the gate outcome), so the attempt a
