@@ -74,6 +74,10 @@ def _unauthenticated(message: str, remediation: str) -> Unauthenticated:
     )
 
 
+#: Credential classes a key-table entry may declare with `"class"`.
+CREDENTIAL_CLASSES = frozenset({"transport"})
+
+
 @dataclass(frozen=True)
 class Identity:
     """One entry in the key table: who this actor is, and who answers for it.
@@ -103,6 +107,11 @@ class Identity:
     secret: str
     owner: Optional[str] = None
     label: Optional[str] = None
+    #: A credential class, or None for an ordinary actor. `"transport"` is the
+    #: partition relay (ADR 0008 §8 B1/B2, agentco/authz.py): it must carry an
+    #: `owner` (the person it acts for), and it reaches only the routes
+    #: `authz.TRANSPORT_VERBS` names.
+    klass: Optional[str] = None
 
     @property
     def owned(self) -> bool:
@@ -219,12 +228,20 @@ def _parse_identities(data: dict) -> dict[str, "Identity"]:
         owner = str(owner).strip() if isinstance(owner, str) and owner.strip() else None
         label = value.get("label")
         label = str(label).strip() if isinstance(label, str) and label.strip() else None
+        klass = value.get("class")
+        if klass is not None:
+            # Fails CLOSED, and only for this entry: a class this build does not
+            # know, or a transport with no owner, is not loaded, so it
+            # authenticates nobody. Guessing "ordinary" would hand an
+            # unrestricted key to an entry its operator meant to restrict.
+            if klass not in CREDENTIAL_CLASSES or (klass == "transport" and owner is None):
+                continue
         if owner == actor:
             raise AmbiguousIdentityError(
                 f"{actor!r} is listed as its own owner. An identity cannot answer "
                 f"for itself — that is what having an owner means."
             )
-        out[actor] = Identity(actor=actor, secret=secret, owner=owner, label=label)
+        out[actor] = Identity(actor=actor, secret=secret, owner=owner, label=label, klass=klass)
 
     # ONE LEVEL, never a chain. An agent owned by an agent makes "who do I
     # revoke" a graph walk, and "is this the same party" a transitive question

@@ -57,6 +57,30 @@ whose remediation names the operator act (add the verb to that entry's `routes`,
 A transport credential therefore cannot reach `GET /work`, which returns every item's `result` and
 gate metadata.
 
+**The partition transport class** (ADR 0008 §8 B1/B2). A relay that carries a person's answers
+across a partition is declared with `"class": "transport"` and a REQUIRED `owner`, the person it acts
+for (its *party*, `auth.owner_of`):
+
+```json
+{"relay-a": {"secret": "…", "owner": "dana", "class": "transport"}}
+```
+
+An entry with no `owner`, or a `class` this build does not know, is not loaded: it authenticates
+nobody. It cannot be the owner's own key (an entry may not own itself). A `routes` list beside it can
+only narrow what follows. The class reaches only:
+
+| Route | What it gets |
+|---|---|
+| `GET /hub` | `{hubId, label}`: the generated 32-hex id and the configured label (every actor may read it) |
+| `GET /work?ready=1` | ready items assigned to the party or to an actor the party owns; never unassigned, never anyone else's. Any other query parameter (`agent`, `status`, …) is `400 transport_query_refused`; without `ready=1` it is `403 route_not_allowed` |
+| `GET /work/{id}` | the party's vehicles (`metadata.verifies` set) and the item each verifies; anything else answers exactly like a missing id (`404 work_item_unknown`) |
+| `GET /events` | `HumanKeyEnrolled` and `HumanKeyRevoked` rows only; other rows are dropped from the page (the cursor still advances) and `?kind=` naming another kind returns nothing |
+
+The answer route and its receipts will join this set (`authz.TRANSPORT_ANSWER_VERBS`, empty today).
+Every other route, including `POST /work/{id}/attest`, `POST /work`, `POST /work/pull`, `GET /runs`,
+`GET /sops` and memory, is `403 route_not_allowed`. For every other actor `GET /work/{id}` returns the
+item or `404 work_item_unknown`.
+
 **The agent of a ready-work read is the signer.** `GET /work?ready=1` filters by the actor that signed
 the request; the query's `agent` is never used to choose. Naming anyone else, on `?ready=1` or on a
 plain list, is `400 agent_from_signature`; naming oneself is accepted. Behaviour change: a

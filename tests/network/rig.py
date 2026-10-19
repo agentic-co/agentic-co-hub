@@ -51,7 +51,8 @@ ACTORS = {
         "hub-d": None,                      # a second declared child, a key only
         "hub-c": None,                      # a valid key, NOT a declared child
         "rt-agent": None,                   # speaks for the external store runtime-a
-        "relay": None,                      # a transport: carries answers, reaches ROUTES["hub-a"]["relay"] only
+        "relay": None,                      # the partition transport: class transport, acts for dana (EXTRA)
+        "scribe": None,                     # a plain routes allowlist: ROUTES["hub-a"]["scribe"] only
     },
     "hub-b": {"worker-b": None},
     "hub-c": {"worker-c": None},
@@ -61,7 +62,11 @@ ACTORS = {
 
 #: Per-actor route allowlists written into the key table's object form
 #: (agentco/authz.py). An actor not named here is unrestricted.
-ROUTES = {"hub-a": {"relay": ["attest", "events"]}}
+ROUTES = {"hub-a": {"scribe": ["attest", "events"]}}
+
+#: Extra object-form fields per actor. `relay` is a partition transport
+#: credential (ADR 0008 §8 B1/B2): it acts for `dana`, a declared human on hub-a.
+EXTRA = {"hub-a": {"relay": {"owner": "dana", "class": "transport"}}}
 
 
 class Rig:
@@ -118,6 +123,7 @@ class Rig:
                 self.secrets[hub][actor] = secret
                 routes = ROUTES.get(hub, {}).get(actor)
                 entry = {"secret": secret, **({"clearance": clearance} if clearance else {}),
+                         **EXTRA.get(hub, {}).get(actor, {}),
                          **({"routes": routes} if routes is not None else {})}
                 table[actor] = entry if len(entry) > 1 else secret
             path = hub_dir / "keys.json"
