@@ -176,19 +176,22 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
   write's lock: a mismatch is `not_the_owner` stating the current epoch, whoever sends it and even
   after a transfer back. **Optional on the wire because the spec makes it so:** absent is a store
   that predates epochs, claiming epoch 0, so it is accepted exactly while the run is at 0. Applies
-  to every gate kind, hub-owned runs included; an item outside a run has no epoch. Before this the
+  to every gate kind, hub-owned runs included; an item outside a run is at **epoch 0** (ADR 0008 §8 S2): `epoch` absent or 0 is accepted, any
+  other value is `not_the_owner` stating epoch 0, and JSON null reads as absent. Before this the
   check ran on renew and report only, and an answer read before a hub → runtime → hub round trip
   landed after it.
-- **The answer attempt** (ADR 0008 §3.3). The epoch moves only on a transfer, so a pass typed
+- **The verify attempt** (ADR 0008 §3.3, §8 S1). The epoch moves only on a transfer, so a pass typed
   before a fail still landed after it when nothing was transferred. `POST /work/{id}/attest` therefore
-  also takes `attempt`, the item's **`answer_attempt`** as the attester read it (shown on every item
-  view). It is `lease_attempt` plus the failing verdicts the gate has given, so it advances on every
-  re-execution (a new lease) and on every failing verdict. Derived from those two counters (the second
-  is the reserved metadata key `failed_verdicts`), never a third stored number that could drift. Checked
-  inside the same lock as the epoch: a value that is not the current one is refused **`stale`** (409)
-  stating the current attempt, and a value that is not a count is `attempt_invalid` (400). **Optional on
-  the wire:** asop-spec 0.6.x has no such field, so absent keeps the earlier behaviour. The client, the
-  MCP `attest` tool and the outbox carry it.
+  also takes **`verifyAttempt`**, the item's **`verify_failures`** as the attester read it (already on
+  every item view). A failing verdict advances it; a lease does not, and neither does a
+  could-not-evaluate result (it leaves `verify_failures` alone). No third counter exists. Checked inside
+  the same lock as the epoch: a value that is not the current one is refused **`stale`** (409) stating
+  the current `verify_failures`, and a value that is not a count is **`verify_attempt_invalid`** (400).
+  **Optional on the wire:** asop-spec 0.6.x has no such field, so absent keeps the earlier behaviour.
+  The client (`verify_attempt=`), the MCP `attest` tool (`verify_attempt`) and the outbox carry it.
+  The `attempt` body field and the `answer_attempt` item field of the first version (#58) are
+  **removed, not aliased**: they shipped only on main, never in a release, and `attempt` is now
+  refused `unknown_field`. The reserved metadata key `failed_verdicts` is no longer written.
 - **A second answer is `not_terminal`** (ADR 0008 §6). Once a gate has passed, another answer to it is
   refused `not_terminal` (409), not `attestation_invalid`. The idempotent retry is unchanged: the same
   `idempotencyKey` from the same submitter returns the recorded item and writes nothing.

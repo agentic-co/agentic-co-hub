@@ -277,7 +277,9 @@ def check_attest_epoch(queue, item, claimed: object) -> None:
     or the one `not_the_owner` states), counted as the spec counts: 0 for a run
     never transferred, +1 per transfer. Absent is a store that predates epochs,
     which claims 0, so it is accepted exactly while the run is at 0. Anything
-    else must equal the current epoch. An item outside a run has nothing to check.
+    else must equal the current epoch. An item outside a run is at epoch 0 (ADR 0008
+    §8 S2): absent or 0 is accepted, any other value is `not_the_owner` stating 0.
+    Null in JSON is absent.
     """
     if claimed is not None and (isinstance(claimed, bool) or not isinstance(claimed, int) or claimed < 0):
         raise _refuse(
@@ -289,6 +291,10 @@ def check_attest_epoch(queue, item, claimed: object) -> None:
         )
     root = run_root(queue, item)
     if root is None:
+        if claimed:
+            raise not_the_owner(
+                f"an attestation on {item.id} was made at ownership epoch {claimed}; "
+                f"{item.id} is outside a run, whose epoch is 0", epoch=0)
         return
     current = int(owner_record(queue, root)["epoch"])
     if claimed is None:
@@ -303,29 +309,29 @@ def check_attest_epoch(queue, item, claimed: object) -> None:
             f"epoch {current} after a transfer", epoch=current)
 
 
-def check_answer_attempt(item, claimed: object) -> None:
-    """ADR 0008 §3.3: an answer names the slot it answers, and the slot moves.
+def check_verify_attempt(item, claimed: object) -> None:
+    """ADR 0008 §8 S1: an answer names the failing verdicts it was typed after.
 
-    `claimed` is the item's `answer_attempt` as the attester read it. It moves on
-    every re-execution (a new lease) and on every failing verdict, so a pass typed
-    before a fail is refused `stale` even when no transfer happened for the epoch
-    to see. Checked inside the store lock, beside the epoch.
+    `claimed` is the item's `verify_failures` as the attester read it. A failing
+    verdict advances it and a lease does not, so a pass typed before a fail is
+    refused `stale` even when no transfer happened for the epoch to see. Checked
+    inside the store lock, beside the epoch.
     """
     if isinstance(claimed, bool) or not isinstance(claimed, int) or claimed < 0:
         raise _refuse(
-            "attempt_invalid",
-            f"attempt must be a non-negative integer, got {claimed!r}",
-            "Send the item's `answer_attempt` as you read it, or omit it.",
+            "verify_attempt_invalid",
+            f"verifyAttempt must be a non-negative integer, got {claimed!r}",
+            "Send the item's `verify_failures` as you read it, or omit the field.",
             400,
         )
-    current = item.answer_attempt
+    current = item.verify_failures
     if claimed != current:
         raise _refuse(
             "stale",
-            f"an answer to {item.id} was made at attempt {claimed}; the item is now at attempt {current}",
-            f"Read the item again (its `answer_attempt` is {current}) and answer what it shows now. The "
-            "attempt moves on every re-run and every failing verdict, so an answer typed before one "
-            "must not land after it.",
+            f"an answer to {item.id} was made at verify attempt {claimed}; the item has "
+            f"verify_failures {current}",
+            f"Read the item again (its `verify_failures` is {current}) and answer what it shows now. "
+            "Each failing verdict advances it, so an answer typed before one must not land after it.",
             409,
         )
 

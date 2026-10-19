@@ -380,25 +380,9 @@ class WorkItem:
         """
         return [dep for dep in self.blocked_by if dep not in done_ids]
 
-    @property
-    def answer_attempt(self) -> int:
-        """The slot a gate answer addresses: it moves whenever an earlier answer
-        could have been typed against a state that no longer exists.
-
-        `lease_attempt` (every claim and every report advance it) plus the
-        failing verdicts this item's gate has given (`FAILED_VERDICTS_KEY`).
-        Both only grow, so the sum only grows: a pass read before a fail can
-        never equal the attempt after it, with or without an ownership
-        transfer. Derived, never stored as truth, so it cannot drift from the
-        two counters it is made of; `to_json` shows it so a verifier can read
-        the slot it is answering.
-        """
-        return self.lease_attempt + int((self.metadata or {}).get(FAILED_VERDICTS_KEY) or 0)
-
     def to_json(self) -> str:
         payload = asdict(self)
         payload["status"] = self.status.value
-        payload["answer_attempt"] = self.answer_attempt
         return json.dumps(payload, sort_keys=True)
 
     @classmethod
@@ -427,9 +411,10 @@ class WorkItem:
 ATTEST_KEYS_KEY = "attest_keys"
 ATTEST_KEYS_KEPT = 20
 
-#: How many failing verdicts `Queue.attest` has recorded on an item: the half of
-#: `WorkItem.answer_attempt` a lease does not already count (ADR 0008 §3.3, a
-#: failing verdict advances the attempt).
+#: Written by the first #58 fence (`answer_attempt`), which the ADR 0008 §8 S1 fence
+#: (`verify_attempt` = `verify_failures`) replaced. Nothing writes it now; it stays
+#: reserved so a caller still cannot plant it on an item, and rows written by the
+#: earlier build keep refusing it.
 FAILED_VERDICTS_KEY = "failed_verdicts"
 
 RESERVED_METADATA_KEYS = frozenset({
@@ -452,8 +437,7 @@ RESERVED_METADATA_KEYS = frozenset({
     # lost response returns the recorded item instead of a refusal. A caller who
     # could set them could make a real attestation read as a retry of one.
     "attest_keys",
-    # Failing verdicts given on this item (`WorkItem.answer_attempt`). A caller
-    # who could set it could move the attempt a pass must name.
+    # No longer written (see the constant). Kept so it cannot be set by a caller.
     FAILED_VERDICTS_KEY,
     # How many times the current lease was renewed, and when last (owner
     # decision 10). A caller who could set it could disguise a lease's age.
@@ -2177,18 +2161,20 @@ class Queue:
         now: Optional[datetime] = None,
         epoch: Optional[int] = None,
         idempotency_key: Optional[str] = None,
-        attempt: Optional[int] = None,
+        verify_attempt: Optional[int] = None,
     ) -> Optional[WorkItem]:
         """Answer a gate. The only transition out of a verify state.
 
-        **The answer attempt (ADR 0008 §3.3).** `attempt` is the slot the attester
-        read (`answer_attempt` on the item): `lease_attempt` plus the failing
-        verdicts the gate has given. Present, it must equal the current one or the
-        answer is refused `stale` stating it, so a pass typed before a fail
-        cannot land after it, even with no transfer for the epoch to see. Absent
-        keeps the earlier behaviour, because the spec's attest has no such field.
-        A second answer to a gate that already passed is `not_terminal`; a retry
-        with the same idempotency key still returns the recorded item.
+        **The verify attempt (ADR 0008 §8 S1).** `verify_attempt` is the item's
+        `verify_failures` as the attester read it. Present, it must equal the
+        current count or the answer is refused `stale` stating it, so a pass typed
+        before a fail cannot land after it, even with no transfer for the epoch to
+        see. A failing verdict advances it; a lease does not, and neither does a
+        could-not-evaluate result (that does not increment `verify_failures`, so
+        the same answer is still addressed to the same slot). Absent keeps the
+        earlier behaviour, because the spec's attest has no such field. A second
+        answer to a gate that already passed is `not_terminal`; a retry with the
+        same idempotency key still returns the recorded item.
 
         **The ownership epoch (ASOP §7.2).** For a step of a run, `epoch` is the
         run's ownership epoch as the attester last read it (`GET /runs/{id}`,
@@ -2197,8 +2183,10 @@ class Queue:
         sends it, so an answer read before a transfer cannot land after one,
         even when the run was transferred back. Absent means a store that
         predates epochs, which the spec treats as claiming epoch 0: accepted
-        until the run's first transfer, refused after it. Checked inside the
-        lock, so it is the epoch at the moment of the write.
+        until the run's first transfer, refused after it. An item outside a run
+        is at epoch 0 (S2): `epoch` absent or 0 is accepted, any other value is
+        refused `not_the_owner` stating 0. Checked inside the lock, so it is the
+        epoch at the moment of the write.
 
         **`idempotency_key`** makes a retry after a lost response safe: the
         same key from the same submitter returns the item as it stands, writes
@@ -2584,15 +2572,9 @@ class Queue:
             from agentco import ownership
 
             ownership.check_attest_epoch(self, item, epoch)
-            if attempt is not None:
-                ownership.check_answer_attempt(item, attempt)
+            if verify_attempt is not None:
+                ownership.check_verify_attempt(item, verify_attempt)
             update = answer(item)
-            if update.get("status") == WorkStatus.VERIFY_FAILED:
-                # A failing verdict advances the answer attempt, so an answer
-                # typed against the state before it is stale from here on.
-                metadata = dict(update.get("metadata") or item.metadata or {})
-                metadata[FAILED_VERDICTS_KEY] = int(metadata.get(FAILED_VERDICTS_KEY) or 0) + 1
-                update["metadata"] = metadata
             if idempotency_key:
                 metadata = dict(update.get("metadata") or item.metadata or {})
                 status = update.get("status", item.status)

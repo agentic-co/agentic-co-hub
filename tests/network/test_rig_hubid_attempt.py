@@ -2,7 +2,7 @@
 
 The two chain hubs run with the default label `local`, so the label cannot tell
 them apart; their generated ids must differ, be 128 bits of hex, and survive a
-restart. An attest carrying a stale attempt is refused `stale` over a real
+restart. An attest carrying a stale verifyAttempt is refused `stale` over a real
 socket, whichever durable backend holds the queue.
 """
 
@@ -40,7 +40,7 @@ def test_the_chain_hubs_share_a_label_and_have_different_generated_ids(rig):
 
 
 @pytest.mark.parametrize("hub", CHAIN)
-def test_a_stale_attempt_is_refused_on_a_real_hub(rig, hub):
+def test_a_stale_verify_attempt_is_refused_on_a_real_hub(rig, hub):
     # Assigned to `operator`, who holds no open work after the chain proof has run
     # on the same hub: an unassigned item would race the proof's leftovers for
     # whoever pulls next.
@@ -53,13 +53,13 @@ def test_a_stale_attempt_is_refused_on_a_real_hub(rig, hub):
     status, parked = rig.call(hub, "operator", "POST", f"/work/{item}/report",
                               {"status": "done", "attempt": pulled["attempt"], "attestation": att(1)})
     assert status == 200 and parked["item"]["status"] == "verify_failed", parked
-    read = parked["item"]["answer_attempt"]
+    read = parked["item"]["verify_failures"]
 
-    status, failed = rig.call(hub, "dana", "POST", f"/work/{item}/attest", {"attestation": att(1), "attempt": read})
-    assert status == 200 and failed["item"]["answer_attempt"] == read + 1, failed
-    status, refused = rig.call(hub, "dana", "POST", f"/work/{item}/attest", {"attestation": att(0), "attempt": read})
+    status, failed = rig.call(hub, "dana", "POST", f"/work/{item}/attest", {"attestation": att(1), "verifyAttempt": read})
+    assert status == 200 and failed["item"]["verify_failures"] == read + 1, failed
+    status, refused = rig.call(hub, "dana", "POST", f"/work/{item}/attest", {"attestation": att(0), "verifyAttempt": read})
     assert (status, refused["code"]) == (409, "stale") and str(read + 1) in refused["message"], refused
-    status, done = rig.call(hub, "dana", "POST", f"/work/{item}/attest", {"attestation": att(0), "attempt": read + 1})
+    status, done = rig.call(hub, "dana", "POST", f"/work/{item}/attest", {"attestation": att(0), "verifyAttempt": read + 1})
     assert status == 200 and done["item"]["status"] == "done", done
-    status, again = rig.call(hub, "dana", "POST", f"/work/{item}/attest", {"attestation": att(0), "attempt": read + 1})
+    status, again = rig.call(hub, "dana", "POST", f"/work/{item}/attest", {"attestation": att(0), "verifyAttempt": read + 1})
     assert (status, again["code"]) == (409, "not_terminal"), again

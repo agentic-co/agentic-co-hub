@@ -13,7 +13,7 @@ on `POST /work` filed an **ungated** item with a 200.
 | `POST /work` | the gate (`verify`), blockers, assignment |
 | `POST /work/pull` | the capabilities a claim is checked against |
 | `POST /work/{id}/report` | the fence, the idempotency key, the attestation |
-| `POST /work/{id}/attest`, `/adjudicate` | the gate's evidence, the ownership epoch, the answer attempt, the idempotency key, the adjudication |
+| `POST /work/{id}/attest`, `/adjudicate` | the gate's evidence, the ownership epoch, `verifyAttempt` (the item's `verify_failures`), the idempotency key, the adjudication |
 | `POST /scope-claims` | a claim's paths and lease |
 | `POST /sops`, `/sops/{id}/revise` | a procedure's gates and chaining fields |
 | `POST /sops/{id}/run` | a run's blockers, chain pin, bindings |
@@ -77,7 +77,7 @@ without it and must not be pointed at a hub that sets the variable.
 
 `owner.epoch` on `GET /runs/{id}`, the `epoch` a transfer returns, the one a `not_the_owner`
 refusal states, and the `epoch` `POST /work/{id}/attest` takes are all in the ASOP 0.6.1 §7.2
-count: 0 for a run never transferred, +1 per transfer. An attest without `epoch` claims 0. Records
+count: 0 for a run never transferred, +1 per transfer. An attest without `epoch` claims 0; an item outside a run is at epoch 0 and refuses any other value (`not_the_owner`). Records
 stored in this hub's earlier count (1 at filing) are rebased once at start (`docs/asop.md`).
 
 ## Who reads what on `GET /events`

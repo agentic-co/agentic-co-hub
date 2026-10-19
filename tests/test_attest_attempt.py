@@ -1,10 +1,10 @@
-"""The attempt fence on the attestation path, and a second answer to a passed gate.
+"""The verify-attempt fence on the attestation path, and a second answer to a passed gate.
 
-ADR 0008 §3.3 and §6. The ownership epoch moves only on a transfer, so a pass
-typed before a fail landed after it with no transfer at all (the control-loop
-review's stale-pass probe). The answer attempt closes that: `lease_attempt`
-plus the failing verdicts the gate has given, so it advances on every re-run and
-every fail. Optional on the wire (asop-spec 0.6.x has no such field): absent
+ADR 0008 §3.3, §6 and §8 S1. The ownership epoch moves only on a transfer, so a
+pass typed before a fail landed after it with no transfer at all (the
+control-loop review's stale-pass probe). `verifyAttempt` closes that: it equals
+the item's `verify_failures`, so a failing verdict advances it and a lease does
+not. Optional on the wire (asop-spec 0.6.x has no such field): absent
 keeps the earlier behaviour.
 
 Synthetic actors as in tests/test_attest_epoch.py.
@@ -28,26 +28,48 @@ from tests.test_attest_epoch import (  # noqa: F401  (fixtures and helpers are s
 
 def test_a_pass_typed_before_a_fail_cannot_land_after_it(failed_step):
     queue, _, step = failed_step
-    read = queue.get(step).answer_attempt
-    queue.attest(step, det(1), "hub-worker", attempt=read)           # a fail lands first
-    assert queue.get(step).answer_attempt == read + 1, "a failing verdict advances the attempt"
+    read = queue.get(step).verify_failures
+    queue.attest(step, det(1), "hub-worker", verify_attempt=read)    # a fail lands first
+    assert queue.get(step).verify_failures == read + 1, "a failing verdict advances the attempt"
     with pytest.raises(Refusal) as exc:
-        queue.attest(step, det(0), "hub-worker", attempt=read)        # the pass typed earlier
+        queue.attest(step, det(0), "hub-worker", verify_attempt=read)  # the pass typed earlier
     assert (exc.value.code, exc.value.http_status) == ("stale", 409)
-    assert str(read + 1) in exc.value.message, "the refusal states the current attempt"
+    assert f"verify_failures {read + 1}" in exc.value.message, "the refusal states the current count"
     assert queue.get(step).status is WorkStatus.VERIFY_FAILED, "a refused answer writes nothing"
-    assert queue.attest(step, det(0), "hub-worker", attempt=read + 1).status is WorkStatus.DONE
+    assert queue.attest(step, det(0), "hub-worker", verify_attempt=read + 1).status is WorkStatus.DONE
 
 
-def test_a_new_lease_advances_the_attempt(queue):
+def test_a_new_lease_does_not_advance_the_attempt(queue):
     from datetime import datetime, timedelta, timezone
 
     item = queue.create("loose", verify=DET)
     first = queue.claim(item.id, "hub-worker", ttl_seconds=60)
-    assert first.answer_attempt == first.lease_attempt
     queue.reap_expired_leases(datetime.now(timezone.utc) + timedelta(hours=1))
     second = queue.claim(item.id, "hub-worker", ttl_seconds=60)
-    assert second.answer_attempt > first.answer_attempt, "a re-execution moves the slot"
+    assert second.lease_attempt > first.lease_attempt, "a re-execution is a new fence"
+    assert second.verify_failures == first.verify_failures == 0, "and not a new verify attempt"
+    queue.report_result(item.id, second.lease_attempt, WorkStatus.DONE, attestation=det(1))
+    assert queue.get(item.id).verify_failures == 1
+
+
+@pytest.mark.skipif(
+    not hasattr(pytest.importorskip("asop.gates"), "gate_outcome"),
+    reason="cannot_evaluate gate fields arrive with asop-spec 0.6.0 (v3.6)",
+)
+def test_cannot_evaluate_does_not_advance_the_attempt(queue):
+    """What the code does: a could-not-evaluate result does not increment
+    `verify_failures` (agentco/work.py, the gate outcome), so the attempt a
+    verifier read is still current after one."""
+    gate = {**DET, "cannot_evaluate_exit": 3, "min_cases": 1}
+    pytest.importorskip("asop.gates")
+    item = queue.create("run the suite", verify=gate)
+    claimed = queue.claim(item.id, "hub-worker")
+    cannot = {**det(3), "cases_run": 5}
+    landed = queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE, attestation=cannot)
+    assert landed.verify_failures == 0 and landed.metadata.get("verify_cannot_evaluate")
+    again = queue.attest(item.id, cannot, "hub-worker", verify_attempt=0)
+    assert again.verify_failures == 0, "still addressed to slot 0"
+    assert queue.attest(item.id, {**det(0), "cases_run": 5}, "hub-worker", verify_attempt=0).status is WorkStatus.DONE
 
 
 def test_absent_attempt_is_todays_behaviour(failed_step):
@@ -59,18 +81,20 @@ def test_absent_attempt_is_todays_behaviour(failed_step):
 def test_an_attempt_that_is_not_a_count_is_refused(failed_step, bad):
     queue, _, step = failed_step
     with pytest.raises(Refusal) as exc:
-        queue.attest(step, det(0), "hub-worker", attempt=bad)
-    assert (exc.value.code, exc.value.http_status) == ("attempt_invalid", 400)
+        queue.attest(step, det(0), "hub-worker", verify_attempt=bad)
+    assert (exc.value.code, exc.value.http_status) == ("verify_attempt_invalid", 400)
 
 
-def test_the_item_shows_the_slot_it_is_answering(failed_step):
+def test_the_item_has_no_answer_attempt_field_and_nothing_writes_failed_verdicts(failed_step):
     import json
 
     queue, _, step = failed_step
-    item = queue.get(step)
-    assert json.loads(item.to_json())["answer_attempt"] == item.lease_attempt + 0
     queue.attest(step, det(1), "hub-worker")
-    assert json.loads(queue.get(step).to_json())["answer_attempt"] == item.answer_attempt + 1
+    item = queue.get(step)
+    shown = json.loads(item.to_json())
+    assert "answer_attempt" not in shown and not hasattr(item, "answer_attempt")
+    assert shown["verify_failures"] == 2
+    assert "failed_verdicts" not in (item.metadata or {})
 
 
 def test_callers_cannot_forge_the_failed_verdict_counter(queue):
@@ -100,7 +124,7 @@ def item_of(call, step):
     return next(i for i in call("dana", "GET", "/work")[1]["items"] if i["id"] == step)
 
 
-def test_http_the_stale_pass_is_refused_and_attempt_is_a_declared_field(tmp_path):
+def test_http_the_stale_pass_is_refused_and_verify_attempt_is_a_declared_field(tmp_path):
     client = TestClient(make_app(tmp_path))
 
     def call(actor, method, path, body=None):
@@ -108,18 +132,20 @@ def test_http_the_stale_pass_is_refused_and_attempt_is_a_declared_field(tmp_path
         return response.status_code, response.json()
 
     _, step = parked_human_step(call)
-    read = item_of(call, step)["answer_attempt"]
-    status, failed = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(False), "attempt": read})
-    assert status == 200 and failed["item"]["answer_attempt"] == read + 1
-    status, refused = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True), "attempt": read})
+    read = item_of(call, step)["verify_failures"]
+    status, failed = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(False), "verifyAttempt": read})
+    assert status == 200 and failed["item"]["verify_failures"] == read + 1
+    status, refused = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True), "verifyAttempt": read})
     assert (status, refused["code"]) == (409, "stale") and str(read + 1) in refused["message"]
-    status, bad = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True), "attempt": "1"})
-    assert (status, bad["code"]) == (400, "attempt_invalid")
+    status, bad = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True), "verifyAttempt": "1"})
+    assert (status, bad["code"]) == (400, "verify_attempt_invalid")
     status, odd = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True), "attemps": 1})
     assert (status, odd["code"]) == (422, "unknown_field"), "a misspelt field is not silently ignored"
-    status, done = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True), "attempt": read + 1})
+    status, old = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True), "attempt": read + 1})
+    assert (status, old["code"]) == (422, "unknown_field"), "the first version's `attempt` is gone, not aliased"
+    status, done = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True), "verifyAttempt": read + 1})
     assert status == 200 and done["item"]["status"] == "done"
-    status, second = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(False), "attempt": read + 1})
+    status, second = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(False), "verifyAttempt": read + 1})
     assert (status, second["code"]) == (409, "not_terminal")
 
 
@@ -151,20 +177,20 @@ def test_live_socket_attempt_and_the_outbox(tmp_path):
                 return exc.status, exc.payload
 
         _, step = parked_human_step(call)
-        read = item_of(call, step)["answer_attempt"]
-        clients["dana"].attest(step, human(False), attempt=read)
+        read = item_of(call, step)["verify_failures"]
+        clients["dana"].attest(step, human(False), verify_attempt=read)
         with pytest.raises(RegistryError) as exc:
-            clients["dana"].attest(step, human(True), attempt=read)
+            clients["dana"].attest(step, human(True), verify_attempt=read)
         assert exc.value.status == 409 and exc.value.payload["code"] == "stale"
 
         # a line queued before the fail is refused stale when it drains, and is
         # settled as refused (not retried forever)
         box = Outbox(tmp_path / ".agentco")
-        box.push("attest", {"itemId": step, "attestation": human(True), "attempt": read})
+        box.push("attest", {"itemId": step, "attestation": human(True), "verifyAttempt": read})
         publish = registry_publisher(clients["dana"])
         assert drain(box, publish)["published"] == 0
         assert box.read_receipts()[-1].get("code") == "stale"
-        assert clients["dana"].attest(step, human(True), attempt=read + 1)["item"]["status"] == "done"
+        assert clients["dana"].attest(step, human(True), verify_attempt=read + 1)["item"]["status"] == "done"
     finally:
         server.should_exit = True
         thread.join(timeout=5)

@@ -244,10 +244,10 @@ class _LocalBackend:
         return json.loads(self.queue.create(title, **kw).to_json())
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
-               capabilities=None, adjudication=None, epoch=None, attempt=None) -> Optional[dict]:
+               capabilities=None, adjudication=None, epoch=None, verify_attempt=None) -> Optional[dict]:
         updated = self.queue.attest(
             item_id, attestation, submitted_by=submitted_by, capabilities=capabilities,
-            adjudication=adjudication, epoch=epoch, attempt=attempt,
+            adjudication=adjudication, epoch=epoch, verify_attempt=verify_attempt,
         )
         return json.loads(updated.to_json()) if updated is not None else None
 
@@ -329,10 +329,10 @@ class _RemoteBackend:
         ).get("item")
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
-               capabilities=None, adjudication=None, epoch=None, attempt=None) -> Optional[dict]:
+               capabilities=None, adjudication=None, epoch=None, verify_attempt=None) -> Optional[dict]:
         return self.registry.attest(
             item_id, attestation, capabilities=list(capabilities or ()) or None,
-            adjudication=adjudication, epoch=epoch, attempt=attempt,
+            adjudication=adjudication, epoch=epoch, verify_attempt=verify_attempt,
         ).get("item")
 
     def work_create(self, title: str, requires=(), blocked_by=(), assigned_agent=None,
@@ -729,7 +729,7 @@ def create_server(
 
     @mcp.tool(name="attest")
     def attest(item_id: str, attestation: dict, adjudication: Optional[dict] = None,
-               epoch: Optional[int] = None, attempt: Optional[int] = None) -> dict:
+               epoch: Optional[int] = None, verify_attempt: Optional[int] = None) -> dict:
         """Answer a gate on an item parked in `awaiting_verify` (or re-run a failed one).
 
         The verifier's verb, as distinct from the executor's `work_report`: a
@@ -749,7 +749,7 @@ def create_server(
         `adjudication` — optional `{verdict: good|bad, evidence}` — tags the
         divergence you saw while verifying. You may not be the executor.
 
-        `epoch`: a run step's `owner.epoch` as read. `attempt`: `answer_attempt` as read.
+        `epoch`: a run step's `owner.epoch` as read. `verify_attempt`: `verify_failures` as read.
         """
         try:
             updated = backend.attest(
@@ -758,7 +758,7 @@ def create_server(
                 submitted_by=who,
                 adjudication=adjudication,
                 epoch=epoch,
-                attempt=attempt,
+                verify_attempt=verify_attempt,
                 # The NODE's declared capabilities, from its own configuration —
                 # not an argument on the tool. A model that could pass this
                 # would be declaring, per call, what the machine it runs on is
