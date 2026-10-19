@@ -232,8 +232,8 @@ extending the built push-only digest of [0005](decisions/0005-federated-hub-topo
   HMAC" item above, given a shape).
 
 Proposed for one topology in [`decisions/0008-control-loop-personal-and-company-hubs.md`](decisions/0008-control-loop-personal-and-company-hubs.md):
-one person working for several companies, pull first, one partition per company, answers as the
-person's own attestation. Not built.
+one person working for several companies, pull first, one partition per company, answers as
+signed envelopes (the person's per-company key, verified by its public half). Not built.
 
 Still open (owner decision 8, 2026-10-18): the **identity mechanism** — direction accepted, mechanism
 not chosen, confidence 0.55; revisit when a second organisation needs to connect a hub — and **credit
