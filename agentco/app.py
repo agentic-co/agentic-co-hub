@@ -154,8 +154,8 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     ("POST", "/work/{item_id}/adjudicate"): wire.strict(
         ("verdict", "evidence"), "the adjudication record", refused_by_name=("adjudicator", "by")),
     ("POST", "/work/{item_id}/attest"): wire.strict(
-        ("attestation", "capabilities", "adjudication", "epoch", "attempt", "idempotencyKey"),
-        "the gate's evidence, the ownership epoch, the answer attempt and the idempotency key"),
+        ("attestation", "capabilities", "adjudication", "epoch", "verifyAttempt", "idempotencyKey"),
+        "the gate's evidence, the ownership epoch, the verify attempt and the idempotency key"),
     ("POST", "/sops"): wire.strict(("title", *SOP_BODY_KEYS), "a procedure's gates and chaining",
                                    refused_by_name=_IDENTITY),
     ("POST", "/sops/{sop_id}/revise"): wire.strict(("title", *SOP_BODY_KEYS),
@@ -925,10 +925,10 @@ def create_app(
                     # as the spec allows: absent claims epoch 0, which holds
                     # only until the run's first transfer.
                     epoch=payload.get("epoch"),
-                    # ADR 0008 §3.3: the item's `answer_attempt` as read. Optional
+                    # ADR 0008 §8 S1: the item's `verify_failures` as read. Optional
                     # on the wire (asop-spec has no such field); present, it must
                     # be current or the answer is `stale`.
-                    attempt=payload.get("attempt"),
+                    verify_attempt=payload.get("verifyAttempt"),
                     idempotency_key=payload.get("idempotencyKey"),
                 )
             except (WorkError, ValueError) as exc:

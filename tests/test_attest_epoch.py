@@ -102,11 +102,38 @@ def test_an_epoch_that_is_not_a_count_is_refused(failed_step, bad):
     assert exc.value.code == "epoch_invalid"
 
 
-def test_an_item_outside_a_run_has_no_epoch_to_check(queue):
+def test_an_item_outside_a_run_is_at_epoch_zero(queue):
+    """ADR 0008 §8 S2: absent or 0 accepted, anything else `not_the_owner` stating 0."""
     item = queue.create("loose", verify=DET)
     claimed = queue.claim(item.id, "hub-worker")
     queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE, attestation=det(1))
-    assert queue.attest(item.id, det(0), "hub-worker", epoch=7).status is WorkStatus.DONE
+    for wrong in (7, 1):
+        with pytest.raises(Refusal) as exc:
+            queue.attest(item.id, det(0), "hub-worker", epoch=wrong)
+        assert (exc.value.code, exc.value.http_status) == ("not_the_owner", 403)
+        assert "(ownership epoch 0)" in exc.value.message
+    assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED, "a refused answer writes nothing"
+    assert queue.attest(item.id, det(1), "hub-worker", epoch=0).status is WorkStatus.VERIFY_FAILED
+    assert queue.attest(item.id, det(0), "hub-worker", epoch=None).status is WorkStatus.DONE
+
+
+def test_http_an_item_outside_a_run_is_at_epoch_zero(tmp_path):
+    client = TestClient(make_app(tmp_path))
+
+    def call(actor, method, path, body=None):
+        response = http(client, method, path, actor, body)
+        return response.status_code, response.json()
+
+    status, filed = call("dana", "POST", "/work", {"title": "loose", "verify": HUMAN})
+    assert status == 200, filed
+    item = filed["item"]["id"]
+    status, pulled = call("hub-worker", "POST", "/work/pull", {})
+    assert pulled["item"]["id"] == item, pulled
+    call("hub-worker", "POST", f"/work/{item}/report", {"status": "done", "attempt": pulled["attempt"]})
+    status, refused = call("dana", "POST", f"/work/{item}/attest", {"attestation": human(True), "epoch": 3})
+    assert (status, refused["code"]) == (403, "not_the_owner") and "(ownership epoch 0)" in refused["message"]
+    status, done = call("dana", "POST", f"/work/{item}/attest", {"attestation": human(True), "epoch": None})
+    assert status == 200 and done["item"]["status"] == "done", "null is absent"
 
 
 def test_the_same_key_from_the_same_submitter_is_a_retry_not_a_second_answer(failed_step):
@@ -125,14 +152,14 @@ def test_the_same_key_from_the_same_submitter_is_a_retry_not_a_second_answer(fai
 
 def test_the_same_owner_stale_pass_is_refused_by_the_attempt_not_the_epoch(failed_step):
     """The review's first probe had no transfer: a pass typed before a fail lands
-    after it. The epoch cannot see that (it moves only on a transfer); the answer
-    attempt does, because a failing verdict advances it. Full coverage in
+    after it. The epoch cannot see that (it moves only on a transfer); `verify_attempt`
+    does, because a failing verdict advances it. Full coverage in
     tests/test_attest_attempt.py."""
     queue, _, step = failed_step
-    typed_at = queue.get(step).answer_attempt
-    assert queue.attest(step, det(1), "hub-worker", epoch=0, attempt=typed_at).status is WorkStatus.VERIFY_FAILED
+    typed_at = queue.get(step).verify_failures
+    assert queue.attest(step, det(1), "hub-worker", epoch=0, verify_attempt=typed_at).status is WorkStatus.VERIFY_FAILED
     with pytest.raises(Refusal) as exc:
-        queue.attest(step, det(0), "hub-worker", epoch=0, attempt=typed_at)
+        queue.attest(step, det(0), "hub-worker", epoch=0, verify_attempt=typed_at)
     assert exc.value.code == "stale" and exc.value.http_status == 409
     assert queue.get(step).status is WorkStatus.VERIFY_FAILED
     assert queue.attest(step, det(0), "hub-worker", epoch=0).status is WorkStatus.DONE, "no attempt: as before"
