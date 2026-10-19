@@ -66,15 +66,16 @@ class Actor(threading.Thread):
     def _call(self, method, path, body=None):
         raw = json.dumps(body).encode() if body is not None else b""
         ts = str(int(time.time()))
-        # The signature covers the PATH, not the query string, so a poll signs
-        # the same path every time and the cursor rides in the query.
-        sig_path = path.split("?")[0]
+        # The path and the query are signed separately, as `Registry._call` signs
+        # them: a hub with ASOP_REQUIRE_SIGNED_QUERY=1 refuses a signature that
+        # leaves the query (the cursor) out.
+        sig_path, _, query = path.partition("?")
         req = urllib.request.Request(
             self.url + path, data=raw if body is not None else None, method=method,
             headers={
                 "X-AgentCo-Actor": self.name,
                 "X-AgentCo-Timestamp": ts,
-                "X-AgentCo-Signature": auth.sign(self.secret, method, sig_path, ts, raw),
+                "X-AgentCo-Signature": auth.sign(self.secret, method, sig_path, ts, raw, query=query or None),
                 "Content-Type": "application/json",
             },
         )

@@ -62,6 +62,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from agentco import verifiers as verifiers_module
 from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
@@ -133,6 +134,8 @@ RUN_NOT_ON_THE_WIRE = {
 # fails on a route that is not declared here.
 _IDENTITY = ("author", "author_kind")
 ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
+    ("GET", "/hub"): wire.lenient(),
+    ("GET", "/work/{item_id}"): wire.lenient(),
     ("POST", "/scope-claims"): wire.strict(
         ("repo", "prefixes", "intent", "holder", "ttlSeconds"), "a scope claim's paths and lease"),
     ("POST", "/scope-claims/{lease_uid}/release"): wire.lenient(("action",)),
@@ -337,6 +340,7 @@ def create_app(
     admins: Optional[Iterable[str]] = None,
     lease_max_age: Optional[int] = None,
     actor_routes: Optional[dict] = None,
+    transports: Optional[dict] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -438,12 +442,16 @@ def create_app(
         ),
     )
     app.state.conn = conn
+    app.state.queue = queue
     app.state.hub_uid = hubid.ensure(conn)  # generated, persisted; `hub_id` stays a label
     app.state.keys = keys
     app.state.operator = resolve_operator(operator)
     # Per-actor route allowlist (agentco/authz.py): injected, or read from the
     # key table per request so an edit applies like a revocation.
-    app.state.routes = authz.build(actor_routes)
+    # `transports` (actor -> the person it acts for) injects transport-class
+    # credentials the way `actor_routes` injects allowlists; otherwise the class
+    # is read from the key table's `"class": "transport"` entries.
+    app.state.routes = authz.build(actor_routes, transports=transports)
     app.state.ignored = wire.Ignored()
     app.state.memory_enabled = memory_on
 
@@ -648,6 +656,15 @@ def create_app(
 
         return await _handle(request, "digest_receive", work)
 
+    @app.get("/hub")
+    async def get_hub(request: Request) -> JSONResponse:
+        """The hub's generated id and its configured label (ADR 0008 §3.1)."""
+
+        def work(actor: str, payload: dict) -> dict:
+            return {"state": "accepted", "hubId": app.state.hub_uid, "label": queue.hub_id}
+
+        return await _handle(request, "hub_get", work)
+
     @app.get("/events")
     async def get_events(request: Request) -> JSONResponse:
         def work(actor: str, payload: dict) -> dict:
@@ -663,6 +680,8 @@ def create_app(
                 # A declared child reads only its own digests (ADR 0005).
                 reader=actor,
                 children=declared_federators,
+                # A transport credential reads the human-key kinds and nothing else.
+                only_kinds=events.HUMAN_KEY_KINDS if app.state.routes.transport_party(actor) else None,
             )
 
         return await _handle(request, "events", work)
@@ -927,7 +946,19 @@ def create_app(
         def work(actor: str, payload: dict) -> dict:
             params = request.query_params
             asked = params.get("agent")
-            if params.get("ready"):
+            party = app.state.routes.transport_party(actor)
+            if party is not None:
+                # A transport reads the ready items assigned to its party, never
+                # unassigned ones and never anyone else's. Any other parameter
+                # could widen that, so it is refused rather than ignored.
+                if not params.get("ready"):
+                    raise authz.route_not_allowed(actor, "work_list")
+                extra = [k for k in params.keys() if k != "ready"]
+                if extra:
+                    raise authz.transport_query_refused(actor, extra)
+                identities = auth.load_identities()
+                items = queue.ready_assigned(lambda a: authz.party_owns(party, a, identities))
+            elif params.get("ready"):
                 # The agent is the SIGNER, never the query (ADR 0008 §6); see
                 # `authz.read_agent` for the operator exception.
                 items = queue.ready(agent=authz.read_agent(actor, asked, app.state.operator))
@@ -953,6 +984,28 @@ def create_app(
             return {"state": "accepted", "items": [json.loads(i.to_json()) for i in items]}
 
         return await _handle(request, "work_list", work)
+
+    @app.get("/work/{item_id}")
+    async def get_work_item(item_id: str, request: Request) -> JSONResponse:
+        """One item. A transport credential reads only its party's vehicles and
+        the item each verifies; anything else answers exactly like a missing id."""
+
+        def work(actor: str, payload: dict) -> dict:
+            item = queue.get(item_id)
+            party = app.state.routes.transport_party(actor)
+            if item is not None and party is not None:
+                identities = auth.load_identities()
+
+                def mine(i) -> bool:
+                    return verifiers_module.is_vehicle(i) and authz.party_owns(party, i.assigned_agent, identities)
+
+                if not (mine(item) or any(mine(v) and verifiers_module.verifies(v) == item_id for v in queue.list())):
+                    item = None
+            if item is None:
+                raise unknown_item(item_id, "read")
+            return {"state": "accepted", "item": json.loads(item.to_json())}
+
+        return await _handle(request, "work_get", work)
 
     # -- the SOP library, over the wire ------------------------------------
     #

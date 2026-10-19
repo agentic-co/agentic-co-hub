@@ -493,7 +493,9 @@ class _LoopbackRegistry(Registry):
         headers = {
             "X-AgentCo-Actor": self.actor,
             "X-AgentCo-Timestamp": ts,
-            "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw),
+            # The query is signed too, as `Registry._call` signs it: a hub with
+            # ASOP_REQUIRE_SIGNED_QUERY=1 refuses a signature that leaves it out.
+            "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw, query=query.lstrip("?") or None),
             "Content-Type": "application/json",
         }
         if self.via:
