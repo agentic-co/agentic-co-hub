@@ -41,12 +41,16 @@ def test_the_chain_hubs_share_a_label_and_have_different_generated_ids(rig):
 
 @pytest.mark.parametrize("hub", CHAIN)
 def test_a_stale_attempt_is_refused_on_a_real_hub(rig, hub):
-    status, filed = rig.call(hub, "dana", "POST", "/work", {"title": "rig: one gated item", "verify": GATE})
+    # Assigned to `operator`, who holds no open work after the chain proof has run
+    # on the same hub: an unassigned item would race the proof's leftovers for
+    # whoever pulls next.
+    status, filed = rig.call(hub, "dana", "POST", "/work",
+                             {"title": "rig: one gated item", "verify": GATE, "assignedAgent": "operator"})
     assert status == 200, filed
     item = filed["item"]["id"]
-    status, pulled = rig.call(hub, "kofi", "POST", "/work/pull", {"ttlSeconds": 600})
+    status, pulled = rig.call(hub, "operator", "POST", "/work/pull", {"ttlSeconds": 600})
     assert status == 200 and pulled["item"]["id"] == item, pulled
-    status, parked = rig.call(hub, "kofi", "POST", f"/work/{item}/report",
+    status, parked = rig.call(hub, "operator", "POST", f"/work/{item}/report",
                               {"status": "done", "attempt": pulled["attempt"], "attestation": att(1)})
     assert status == 200 and parked["item"]["status"] == "verify_failed", parked
     read = parked["item"]["answer_attempt"]
