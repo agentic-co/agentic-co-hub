@@ -140,6 +140,12 @@ KINDS = (
 #: Each carries `payload.label = {owner, level}`.
 WALLED_KINDS = frozenset({"MemoryChanged"})
 
+#: Kinds a declared federated child reads only when it sent them (ADR 0005).
+#: A parent holds one key per child, and every child's digest is that child's
+#: company: without this, any child key read every other child's rollups, `meta`
+#: included. The parent's own readers (anyone not a declared child) read all.
+SENDER_SCOPED_KINDS = frozenset({"DigestReceived"})
+
 # Events the PLANE observes rather than an actor performing. A reserved name
 # rather than borrowing whoever happened to run the pass: attributing a
 # routing observation to a person would put their name on a row they did not
@@ -315,8 +321,14 @@ def read(
     limit: int = DEFAULT_LIMIT,
     kind: Optional[str] = None,
     viewer: Any = None,
+    reader: Optional[str] = None,
+    children: frozenset = frozenset(),
 ) -> dict:
     """`GET /events?since=` — events strictly after the cursor, plus the next one.
+
+    **Sender-scoped kinds** (`SENDER_SCOPED_KINDS`): when `reader` is one of the
+    declared federated `children`, it sees only the rows it sent. Dropped rows
+    behave as walled ones do: out of the page and `count`, cursor still moving.
 
     **Walled kinds are filtered here, in the one function every reader calls**
     (`WALLED_KINDS`). `viewer` is the reader's effective clearance
@@ -366,7 +378,7 @@ def read(
 
     rows = conn.execute(sql, args).fetchall()
     scanned = rows
-    rows = [r for r in rows if _visible(r, viewer)]
+    rows = [r for r in rows if _visible(r, viewer) and _own(r, reader, children)]
     events = [
         {
             "seq": r["seq"],
@@ -390,6 +402,12 @@ def read(
         # stores cursors can tell how close it is to expiring.
         "retainedFrom": floor,
     }
+
+
+def _own(row, reader: Optional[str], children: frozenset) -> bool:
+    if row["kind"] not in SENDER_SCOPED_KINDS or reader not in children:
+        return True
+    return row["actor"] == reader
 
 
 def _visible(row, viewer: Any) -> bool:

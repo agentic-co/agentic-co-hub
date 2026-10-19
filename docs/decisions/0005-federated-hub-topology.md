@@ -165,6 +165,22 @@ extended one layer up.
   No code change was needed — this was a documentation-accuracy fix once
   someone actually traced the call graph instead of leaving the question open.
 
+- **(3) A child reads only its own digests — fixed 2026-10-18 (control-loop
+  review, G4).** "No new read surface" had a cost nobody wrote down: the
+  existing `GET /events` cursor served every `DigestReceived` row to every
+  signed reader, so a child's key on the parent read every OTHER child's
+  rollup, `meta` included. Only `MemoryChanged` was filtered on the way out.
+  Now `DigestReceived` is sender-scoped (`events.SENDER_SCOPED_KINDS`): a
+  declared child (`ASOP_FEDERATED_CHILDREN`) sees only the rows it sent, on
+  HTTP and the MCP `events` tool, locally and over the relay. Every reader that
+  is not a declared child (the operator, the parent's own people and agents)
+  reads them all, which is the rollup this ADR exists for. Hidden rows leave
+  the page and `count`; the cursor moves past them, the same known limit as a
+  walled memory event (a `seq` gap says something happened). A child removed
+  from the declared list stops being scoped, so offboarding a child means
+  revoking its key, not only undeclaring it. Covered by
+  `tests/test_digest_wall.py` and the multi-hub rig.
+
 ## Revisit condition
 
 Revisit if a real deployment needs a *live* (not digest-cadence) view at the

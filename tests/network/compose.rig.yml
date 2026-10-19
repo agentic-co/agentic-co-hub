@@ -11,6 +11,9 @@
 #   hub-b   a child that pushes digests to hub-a; memory OFF (the default)
 #   hub-c   holds a valid key on hub-a but is NOT a declared child; memory
 #           switched OFF explicitly
+#   hub-d   a second declared child of hub-a, as a key only (no container): it
+#           files digests from the host, so the rig can show one child cannot
+#           read another's
 #   chain-sqlite / chain-pg
 #           the automated live chain proof, one per durable backend
 #
@@ -46,7 +49,7 @@ services:
       AGENTCO_ADMINS: dana
       ASOP_ADMINISTRATORS: dana
       AGENTCO_STORES: runtime-a=rt-agent
-      ASOP_FEDERATED_CHILDREN: hub-b
+      ASOP_FEDERATED_CHILDREN: hub-b,hub-d
       AGENTCO_MEMORY: "on"
       AGENTCO_HUB_CLEARANCE: acme:confidential
 

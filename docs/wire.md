@@ -36,6 +36,20 @@ refusal states, and the `epoch` `POST /work/{id}/attest` takes are all in the AS
 count: 0 for a run never transferred, +1 per transfer. An attest without `epoch` claims 0. Records
 stored in this hub's earlier count (1 at filing) are rebased once at start (`docs/asop.md`).
 
+## Who reads what on `GET /events`
+
+The feed is one table, filtered on the way out by who is reading:
+
+- `MemoryChanged` opens only to a reader cleared for its label (ADR 0006); with memory off there
+  are none.
+- `DigestReceived` (federation, ADR 0005) is **sender-scoped**: a declared federated child
+  (`ASOP_FEDERATED_CHILDREN`) reads only the digests it sent; every other reader reads all of them.
+- Everything else is visible to every signed reader.
+
+A hidden row is left out of `events` and `count`, and `nextCursor` still moves past it, so a page
+the reader cannot see does not stall a poller. The MCP `events` tool reads the same function, so
+the same rules apply locally and over the relay.
+
 ## What the message says
 
 Each unknown key gets the closest valid key and its **provenance**, from the bundled table
