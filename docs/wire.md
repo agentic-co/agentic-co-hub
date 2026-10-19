@@ -29,6 +29,13 @@ Every other route: release a scope claim, snapshots, digests, activate, retire, 
 and every `GET`. The response carries `ignored`, the key is logged, and `GET /metrics` counts it
 under `ignoredFields` (per process: it starts at zero on restart).
 
+## Ownership epochs
+
+`owner.epoch` on `GET /runs/{id}`, the `epoch` a transfer returns, the one a `not_the_owner`
+refusal states, and the `epoch` `POST /work/{id}/attest` takes are all in the ASOP 0.6.1 §7.2
+count: 0 for a run never transferred, +1 per transfer. An attest without `epoch` claims 0. Records
+stored in this hub's earlier count (1 at filing) are rebased once at start (`docs/asop.md`).
+
 ## Who reads what on `GET /events`
 
 The feed is one table, filtered on the way out by who is reading:

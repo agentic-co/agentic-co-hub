@@ -33,7 +33,8 @@ def test_transfer_across_a_revoked_key(rig):
                              {"inputs": {}, "bindings": {"w": "rt-agent"}, "ownerStore": "runtime-a"})
     assert status == 200, filed
     run_id, step = filed["run"]["runId"], filed["run"]["steps"][0]["itemId"]
-    assert rig.call("hub-a", "kofi", "GET", f"/runs/{run_id}")[1]["run"]["owner"]["store"] == "runtime-a"
+    filed_owner = rig.call("hub-a", "kofi", "GET", f"/runs/{run_id}")[1]["run"]["owner"]
+    assert filed_owner["store"] == "runtime-a" and filed_owner["epoch"] == 0
     assert rig.call("hub-a", "kofi", "POST", "/work/pull", {})[1]["state"] == "empty", "not offered to a non-owner"
     status, held = rig.call("hub-a", "rt-agent", "POST", "/work/pull", {"ttlSeconds": 600})
     assert status == 200 and held["item"]["id"] == step, held
@@ -47,7 +48,7 @@ def test_transfer_across_a_revoked_key(rig):
     status, refused = rig.call("hub-a", "kofi", "POST", path, body)
     assert status == 403, "an agent may not transfer a run"
     status, moved = rig.call("hub-a", "dana", "POST", path, body)
-    assert status == 200 and moved["epoch"] == 2 and moved["to"] == "hub-a", moved
+    assert status == 200 and moved["epoch"] == 1 and moved["to"] == "hub-a", moved
     voided = item(rig, step)
     assert voided["status"] == "pending" and voided["lease_attempt"] > held["attempt"] and not voided.get("leased_by")
 
@@ -66,7 +67,8 @@ def test_transfer_across_a_revoked_key(rig):
     assert status == 200 and done["item"]["status"] == "done", done
 
     view = rig.call("hub-a", "ana", "GET", f"/runs/{run_id}")[1]["run"]
-    assert view["owner"]["store"] == "hub-a" and view["owner"]["epoch"] == 2
+    assert view["owner"]["store"] == "hub-a" and view["owner"]["epoch"] == 1
     assert [h["by"] for h in view["owner"]["history"]] == ["rt-agent", "dana"]
+    assert [h["epoch"] for h in view["owner"]["history"]] == [0, 1], "ASOP §7.2: filed at 0, first transfer 1"
     feed = rig.call("hub-a", "ana", "GET", "/events", query="kind=RunTransferred")[1]["events"]
     assert [e["payload"]["runId"] for e in feed] == [run_id]

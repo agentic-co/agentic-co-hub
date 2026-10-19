@@ -13,7 +13,7 @@ anymore").
 
     run_owner = {store, epoch, since, filed_by, history: [{at, by, from, to, reason, epoch}]}
 
-A run filed before this existed reads as hub-owned at epoch 1, `backfilled`,
+A run filed before this existed reads as hub-owned at epoch 0, `backfilled`,
 and the pulse writes that record down (`--apply`).
 
 **Who may flip a step.** For a run owned by another store, only that store's
@@ -61,6 +61,14 @@ RUN_OWNER_KEY = "run_owner"
 RUN_PACK_KEY = "run_pack"
 OWNER_EPOCH_KEY = "owner_epoch"
 LEASE_VOID_KEY = "lease_voided"
+#: The epoch count, ASOP 0.6.1 §7.2: a run never transferred is at epoch 0 and
+#: each transfer is the current epoch + 1. This hub first counted from 1 at
+#: filing; every record it writes now says which count it uses, so a record
+#: from before (no marker) is rebased exactly once and never twice:
+#: `epoch_base: 0` inside `run_owner` and inside a `lease_voided` note, and the
+#: item key `owner_epoch_base: 0` beside an `owner_epoch` stamp.
+EPOCH_BASE_KEY = "epoch_base"
+STAMP_BASE_KEY = "owner_epoch_base"
 
 STORES_ENV_VAR = "AGENTCO_STORES"
 #: The standard's name for the administrator registry (spec 0.6.1 §9).
@@ -142,14 +150,70 @@ def run_root(queue, item) -> Optional[object]:
 def owner_record(queue, root) -> dict:
     record = (root.metadata or {}).get(RUN_OWNER_KEY)
     if isinstance(record, dict) and record.get("store"):
-        return record
-    return {"store": queue.hub_id, "epoch": 1, "since": root.created_at, "filed_by": None,
-            "history": [], "backfilled": True}
+        return rebased(record)
+    return {"store": queue.hub_id, "epoch": 0, "since": root.created_at, "filed_by": None,
+            "history": [], "backfilled": True, EPOCH_BASE_KEY: 0}
+
+
+def rebased(record: Mapping) -> dict:
+    """A run-owner record in the spec's count. One written before the count
+    changed (no `epoch_base`) is one higher everywhere, so it is lowered by
+    one, history included; one that carries the marker is returned as is."""
+    if record.get(EPOCH_BASE_KEY) == 0:
+        return dict(record)
+    history = [{**entry, "epoch": int(entry["epoch"]) - 1}
+               if isinstance(entry, dict) and isinstance(entry.get("epoch"), int) else entry
+               for entry in (record.get("history") or [])]
+    return {**record, "epoch": int(record.get("epoch", 1)) - 1, "history": history, EPOCH_BASE_KEY: 0}
+
+
+def stamped_epoch(item) -> Optional[int]:
+    """The epoch a step's lease was taken under, in the spec's count."""
+    meta = item.metadata or {}
+    stamped = meta.get(OWNER_EPOCH_KEY)
+    if stamped is None:
+        return None
+    return int(stamped) if meta.get(STAMP_BASE_KEY) == 0 else int(stamped) - 1
 
 
 def initial_record(store: str, filed_by: Optional[str], at: str) -> dict:
-    return {"store": store, "epoch": 1, "since": at, "filed_by": filed_by,
-            "history": [{"at": at, "by": filed_by, "from": None, "to": store, "reason": "filed", "epoch": 1}]}
+    return {"store": store, "epoch": 0, "since": at, "filed_by": filed_by, EPOCH_BASE_KEY: 0,
+            "history": [{"at": at, "by": filed_by, "from": None, "to": store, "reason": "filed", "epoch": 0}]}
+
+
+def rebase_epochs(queue, *, apply: bool) -> dict:
+    """The one-time move to the spec's count, for every backend: lower by one
+    each stored epoch written before it (run-owner records with their history,
+    claim stamps, lease-void notes) and mark it. Each record is rewritten inside
+    the store's own lock, from the row as it is at that moment, and the marker
+    is what makes a second run (or a crash and a re-run) change nothing."""
+    pending: list[str] = []
+    for item in queue.list():
+        if _legacy_epoch_fields(item):
+            pending.append(item.id)
+    if apply:
+        def rebase(item) -> dict:
+            changes = _legacy_epoch_fields(item)
+            return {"metadata": {**(item.metadata or {}), **changes}} if changes else {}
+
+        for item_id in pending:
+            queue._mutate(item_id, rebase)
+    return {"state": "rebased" if apply else "dry-run", "items": len(pending)}
+
+
+def _legacy_epoch_fields(item) -> dict:
+    meta = item.metadata or {}
+    changes: dict = {}
+    record = meta.get(RUN_OWNER_KEY)
+    if isinstance(record, dict) and record.get(EPOCH_BASE_KEY) != 0:
+        changes[RUN_OWNER_KEY] = rebased(record)
+    if meta.get(OWNER_EPOCH_KEY) is not None and meta.get(STAMP_BASE_KEY) != 0:
+        changes[OWNER_EPOCH_KEY] = int(meta[OWNER_EPOCH_KEY]) - 1
+        changes[STAMP_BASE_KEY] = 0
+    note = meta.get(LEASE_VOID_KEY)
+    if isinstance(note, dict) and isinstance(note.get("epoch"), int) and note.get(EPOCH_BASE_KEY) != 0:
+        changes[LEASE_VOID_KEY] = {**note, "epoch": note["epoch"] - 1, EPOCH_BASE_KEY: 0}
+    return changes
 
 
 def speaks_for(queue, actor: Optional[str], store: str) -> bool:
@@ -194,13 +258,13 @@ def check_actor(queue, item, actor: Optional[str], verb: str) -> Optional[dict]:
 
 def check_epoch(queue, item) -> None:
     """A report under an older ownership epoch than the run's is refused."""
-    stamped = (item.metadata or {}).get(OWNER_EPOCH_KEY)
+    stamped = stamped_epoch(item)
     if stamped is None:
         return
     root = run_root(queue, item)
     if root is None:
         return
-    current = owner_record(queue, root).get("epoch", 1)
+    current = owner_record(queue, root)["epoch"]
     if int(stamped) != int(current):
         raise not_the_owner(f"{item.id} was claimed under ownership epoch {stamped}; run {root.id} is now at "
                             f"epoch {current} after a transfer", epoch=current)
@@ -209,11 +273,11 @@ def check_epoch(queue, item) -> None:
 def check_attest_epoch(queue, item, claimed: object) -> None:
     """ASOP §7.2: every attestation carries the epoch its store believes it holds.
 
-    `claimed` is the epoch the attester read (this hub's numbering, as
-    `GET /runs/{id}` shows it and `not_the_owner` states it). Absent, or 0, is a
-    store that predates epochs: accepted only until the run's first transfer.
-    Anything else must equal the run's current epoch. An item outside a run has
-    no owner record and nothing to check.
+    `claimed` is the epoch the attester read (`owner.epoch` on `GET /runs/{id}`,
+    or the one `not_the_owner` states), counted as the spec counts: 0 for a run
+    never transferred, +1 per transfer. Absent is a store that predates epochs,
+    which claims 0, so it is accepted exactly while the run is at 0. Anything
+    else must equal the current epoch. An item outside a run has nothing to check.
     """
     if claimed is not None and (isinstance(claimed, bool) or not isinstance(claimed, int) or claimed < 0):
         raise _refuse(
@@ -226,9 +290,9 @@ def check_attest_epoch(queue, item, claimed: object) -> None:
     root = run_root(queue, item)
     if root is None:
         return
-    current = int(owner_record(queue, root).get("epoch", 1))
-    if claimed in (None, 0):
-        if current == 1:
+    current = int(owner_record(queue, root)["epoch"])
+    if claimed is None:
+        if current == 0:
             return
         raise not_the_owner(
             f"an attestation on {item.id} carries no ownership epoch (a store that predates epochs claims 0), "
@@ -277,7 +341,7 @@ def transfer(queue, run_id: str, *, to: object, reason: object, by: str, at: str
         raise transfer_refused("malformed", f"{to!r} is not this hub ({queue.hub_id!r}) or a registered store",
                                f"Transfer to {queue.hub_id!r} or to one of {sorted(queue.stores)} ({STORES_ENV_VAR}).",
                                alias="transfer_invalid")
-    epoch = int(record.get("epoch", 1)) + 1
+    epoch = int(record["epoch"]) + 1
     entry = {"at": at, "by": by, "from": record["store"], "to": to, "reason": reason.strip(), "epoch": epoch}
     updated = {**{k: v for k, v in record.items() if k != "backfilled"},
                "store": to, "epoch": epoch, "since": at,
@@ -286,7 +350,8 @@ def transfer(queue, run_id: str, *, to: object, reason: object, by: str, at: str
 
     voided, released, kept = [], [], []
     former_actors = frozenset(queue.stores.get(record["store"], frozenset()))
-    note = {"at": at, "epoch": epoch, "by": by, "reason": "run transferred", "from": record["store"]}
+    note = {"at": at, "epoch": epoch, EPOCH_BASE_KEY: 0, "by": by, "reason": "run transferred",
+            "from": record["store"]}
     for step in descendants(queue, run_id):
         if step.status is WorkStatus.DONE:
             kept.append(step.id)

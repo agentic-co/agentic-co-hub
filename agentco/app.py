@@ -406,6 +406,9 @@ def create_app(
     if lease_max_age is not None:
         queue.lease_max_age = int(lease_max_age)
     declared_admins = frozenset(admins) if admins is not None else ownership.admins_from_env()
+    # The one-time move to the spec's epoch count (ASOP 0.6.1 §7.2), before the
+    # first request: marked per record, so every later start finds nothing.
+    ownership.rebase_epochs(queue, apply=True)
     if adjudicators is not None:
         queue.adjudicators = frozenset(adjudicators)
     if verifiers is not None:

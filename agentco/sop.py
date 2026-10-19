@@ -1324,7 +1324,9 @@ class SopLibrary:
     def _owner_view(parent: WorkItem, queue: Queue) -> dict:
         from agentco import ownership
 
-        return ownership.owner_record(queue, parent)
+        record = ownership.owner_record(queue, parent)
+        record.pop(ownership.EPOCH_BASE_KEY, None)  # storage bookkeeping, not part of the record
+        return record
 
     @staticmethod
     def _waiting_on(blockers: Sequence[str], queue: Queue) -> list[dict]:

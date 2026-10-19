@@ -147,7 +147,7 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
 - **At filing.** A run is owned by this hub, unless the filer speaks for a registered store and sends
   `ownerStore` (`POST /sops/{id}/run`); a filer who does not is refused `not_the_owner` before anything
   is filed. The record is on the run: `owner = {store, epoch, since, filed_by, history[]}`
-  (`GET /runs/{id}`). A run filed before this existed reads as hub-owned, epoch 1, `backfilled`; the
+  (`GET /runs/{id}`). A run filed before this existed reads as hub-owned, epoch 0, `backfilled`; the
   pulse writes the record down on `--apply`.
 - **Who may flip a step.** For a run owned by another store, only that store's actors may claim, report or
   attest its steps — anyone else is refused **`not_the_owner`** (403, with the ownership epoch; distinct
@@ -174,15 +174,24 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
   its store believes it holds"*). `POST /work/{id}/attest` takes `epoch`, the run's `owner.epoch` as the
   attester read it, and so do the client, the MCP `attest` tool and the outbox. Checked inside the
   write's lock: a mismatch is `not_the_owner` stating the current epoch, whoever sends it and even
-  after a transfer back. **Optional on the wire because the spec makes it so:** absent (or 0) is a
-  store that predates epochs, accepted until the run's first transfer and refused after it. Applies
+  after a transfer back. **Optional on the wire because the spec makes it so:** absent is a store
+  that predates epochs, claiming epoch 0, so it is accepted exactly while the run is at 0. Applies
   to every gate kind, hub-owned runs included; an item outside a run has no epoch. Before this the
   check ran on renew and report only, and an answer read before a hub → runtime → hub round trip
   landed after it.
-- **Numbering.** This hub counts from 1 at filing (`owner.epoch` 1, +1 per transfer); the spec's
-  run-ownership schema counts transfers (0 for a run never transferred). Every number this hub
-  shows and accepts is its own; a client that computes spec epochs instead is refused after the
-  first transfer. Open for the owner: renumber to the spec's count, or map at the wire.
+- **The count (§7.2).** A run never transferred is at **epoch 0**; each transfer makes it the
+  current epoch + 1, so the first transfer is epoch 1. The `filed` history entry carries 0. Every
+  epoch the hub shows, stamps on a claim, states in a refusal and accepts is in this count, with no
+  "0 or 1" leniency anywhere: absent is the spec's epoch 0 and nothing else.
+- **The rebase.** This hub first counted from 1 at filing. `ownership.rebase_epochs` lowers every
+  epoch stored in the old count by one (the run-owner record and its whole history, each claim's
+  `owner_epoch` stamp, each `lease_voided` note) on JSONL, SQLite and Postgres alike. Each rewritten
+  record is marked (`epoch_base: 0`, or the item key `owner_epoch_base: 0` beside a stamp), and the
+  marker is the guard: a second run, or a re-run after a crash, changes nothing. The hub runs it at
+  start, before the first request; the pulse runs it too (`epochsRebased`) for a node no hub has
+  opened. Until it has run, reads already apply the same rule, so an unmigrated record is never
+  read in the old count. `RunTransferred` events already on the feed keep the number they were
+  emitted with: the feed is append-only.
 - **Orphans.** The pulse reports an attention finding (`ownership.orphaned-run`) for every open run whose
   owner store is not registered, none of whose actors still holds a key (after `agentco revoke
   --apply`), or whose actors are all silent past their declared cadence (`AGENTCO_CADENCE`) — naming the
