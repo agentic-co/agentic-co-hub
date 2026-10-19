@@ -372,6 +372,11 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
     # container's does. Not new logic — the same function, applied late.
     stranded = queue.close_finished_runs(dry_run=not apply)
     backfilled = backfill_run_owners(queue, apply=apply)
+    from agentco import ownership
+
+    # The same epoch rebase the hub runs at start, for a store a hub has not
+    # opened since (a CLI-only or MCP-only node). Marked, so it is a no-op after.
+    epochs = ownership.rebase_epochs(queue, apply=apply)
     retention = _prune_events(conn, now=now, apply=apply)
     stuck = verifiers.quarantine_digest(queue, now=now)
     status = verifiers.verifier_status(queue, now=now)
@@ -411,6 +416,7 @@ def housekeeping(queue, conn: sqlite3.Connection, *, now: datetime, apply: bool)
         "leases": lease_ages(queue, now=now),
         # Runs filed before ownership existed, recorded as hub-owned (ASOP §7.2).
         "ownershipBackfilled": {("written" if apply else "wouldWrite"): len(backfilled)},
+        "epochsRebased": {("written" if apply else "wouldWrite"): epochs["items"]},
         "stuck": stuck["count"],
         # Items whose check could not judge them (v3.6), offered for a re-run
         # and not charged. Counted so a check that keeps failing to evaluate is

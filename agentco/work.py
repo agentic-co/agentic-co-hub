@@ -424,6 +424,9 @@ RESERVED_METADATA_KEYS = frozenset({
     # A caller who could set any of them could make itself a run's owner, or
     # forge the evidence of a transfer.
     "run_owner", "run_pack", "owner_epoch", "lease_voided",
+    # Which epoch count an `owner_epoch` stamp uses (ownership.py). A caller
+    # who could set it could shift its own stamp by one and pass the fence.
+    "owner_epoch_base",
     # The idempotency keys of the attestations that landed, so a retry after a
     # lost response returns the recorded item instead of a refusal. A caller who
     # could set them could make a real attestation read as a retry of one.
@@ -1965,7 +1968,8 @@ class Queue:
             if owned is not None:
                 # The ownership epoch this lease was taken under: a report after
                 # a transfer is refused on it (`ownership.check_epoch`).
-                stamped[ownership.OWNER_EPOCH_KEY] = owned.get("epoch", 1)
+                stamped[ownership.OWNER_EPOCH_KEY] = owned["epoch"]
+                stamped[ownership.STAMP_BASE_KEY] = 0
             return {
                 "status": WorkStatus.IN_PROGRESS,
                 "metadata": stamped,

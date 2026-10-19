@@ -57,7 +57,7 @@ def test_a_hub_filed_run_is_owned_by_the_hub(world):
     library, queue, asop_id = world
     run = library.run(asop_id, queue, bindings={"w": "hub-worker"}, filed_by="dana")
     owner = library.run_get(run["runId"], queue)["owner"]
-    assert owner["store"] == "hub-a" and owner["epoch"] == 1 and owner["filed_by"] == "dana"
+    assert owner["store"] == "hub-a" and owner["epoch"] == 0 and owner["filed_by"] == "dana"
     assert owner["history"][0]["reason"] == "filed"
 
 
@@ -99,7 +99,7 @@ def test_only_the_owner_store_may_flip_its_steps(world):
     assert step not in {i.id for i in queue.ready(agent="kofi")}
     assert code_of(lambda: queue.claim(step, "kofi")) == "not_the_owner"
     claimed = queue.claim(step, "rt-agent")
-    assert claimed.metadata[ownership.OWNER_EPOCH_KEY] == 1
+    assert claimed.metadata[ownership.OWNER_EPOCH_KEY] == 0
     done = queue.report_result(step, claimed.lease_attempt, WorkStatus.DONE, attestation=ATT)
     assert done.status is WorkStatus.DONE
 
@@ -110,7 +110,7 @@ def test_not_the_owner_is_not_not_the_holder(world):
     with pytest.raises(Refusal) as exc:
         queue.claim(run["steps"][0]["itemId"], "kofi")
     assert exc.value.code == "not_the_owner" and "runtime-a" in exc.value.message
-    assert "epoch 1" in exc.value.message
+    assert "epoch 0" in exc.value.message
 
 
 # --------------------------------------------------------------------------- #
@@ -150,11 +150,11 @@ def test_a_transfer_fences_the_old_owner_and_makes_the_steps_workable_by_the_hub
 
     moved = ownership.transfer(queue, run["runId"], to="hub-a", reason="the runtime is decommissioned",
                                by="dana", at="2026-10-18T02:00:00+00:00")
-    assert moved["epoch"] == 2 and moved["voidedLeases"] == [two] and moved["keptDone"] == [one]
+    assert moved["epoch"] == 1 and moved["voidedLeases"] == [two] and moved["keptDone"] == [one]
     owner = library.run_get(run["runId"], queue)["owner"]
     assert owner["store"] == "hub-a"
     assert owner["history"][-1] == {"at": "2026-10-18T02:00:00+00:00", "by": "dana", "from": "runtime-a",
-                                    "to": "hub-a", "reason": "the runtime is decommissioned", "epoch": 2}
+                                    "to": "hub-a", "reason": "the runtime is decommissioned", "epoch": 1}
 
     step_two = queue.get(two)
     assert step_two.status is WorkStatus.PENDING and step_two.lease_attempt > held.lease_attempt
@@ -163,11 +163,11 @@ def test_a_transfer_fences_the_old_owner_and_makes_the_steps_workable_by_the_hub
 
     with pytest.raises(Refusal) as exc:
         queue.report_result(two, held.lease_attempt, WorkStatus.DONE, attestation=ATT)
-    assert exc.value.code == "not_the_owner" and "epoch 1" in exc.value.message and "epoch 2" in exc.value.message
+    assert exc.value.code == "not_the_owner" and "epoch 0" in exc.value.message and "epoch 1" in exc.value.message
     assert code_of(lambda: queue.claim(two, "rt-agent")) == "not_the_owner", "the former owner is fenced out"
 
     taken = queue.claim(two, "hub-worker")
-    assert taken.metadata[ownership.OWNER_EPOCH_KEY] == 2
+    assert taken.metadata[ownership.OWNER_EPOCH_KEY] == 1
     done = queue.report_result(two, taken.lease_attempt, WorkStatus.DONE, attestation=ATT)
     assert done.status is WorkStatus.DONE
 
@@ -184,7 +184,7 @@ def test_a_transfer_needs_a_reason_and_a_real_new_owner(world, to, reason, code)
     with pytest.raises(Refusal) as exc:
         ownership.transfer(queue, run["runId"], to=to, reason=reason, by="dana", at="t")
     assert exc.value.code == code and exc.value.to_dict()["aliases"] == ["transfer_invalid"]
-    assert ownership.owner_record(queue, queue.get(run["runId"]))["epoch"] == 1
+    assert ownership.owner_record(queue, queue.get(run["runId"]))["epoch"] == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -266,7 +266,7 @@ def test_http_ownership_transfer_and_refusals(tmp_path):
     assert http(client, "POST", path, "dana", {"to": "hub-a"}).json()["code"] == "transfer_refused:reason"
     assert http(client, "POST", path, "dana", {**body, "by": "eve"}).json()["code"] == "author_from_signature"
     moved = http(client, "POST", path, "dana", body)
-    assert moved.status_code == 200 and moved.json()["epoch"] == 2
+    assert moved.status_code == 200 and moved.json()["epoch"] == 1
     feed = http(client, "GET", "/events", "kofi").json()["events"]
     assert any(e["kind"] == "RunTransferred" and e["payload"]["runId"] == run["runId"] for e in feed)
 
