@@ -352,3 +352,32 @@ def test_the_hub_rebases_at_start_and_the_pulse_finds_nothing_after(tmp_path):
     facts, _ = pulse.housekeeping(open_queue(str(tmp_path / "work.jsonl")), db.connect(tmp_path / "api.sqlite3"),
                                   now=datetime.now(timezone.utc), apply=True)
     assert facts["epochsRebased"] == {"written": 0}
+
+
+def test_a_step_filed_before_the_rebase_and_claimed_after_it_reports_cleanly(library, queue):
+    """The claim stamps the run's epoch as it reads it (the rebased count), and
+    the report's epoch check compares that stamp with the same count."""
+    queue.hub_id, queue.stores = "hub-a", {"runtime-a": frozenset({"rt-agent"})}
+    asop = library.create("two steps", inputs=[], roles={"w": {"kind": "agent"}}, steps=[
+        {"name": "one", "role": "w", "purpose": "p", "gate": DET},
+        {"name": "two", "role": "w", "purpose": "p", "gate": DET}])
+    library.activate(asop.asop_id, 1, author_kind="human")
+    run = library.run(asop.asop_id, queue, bindings={"w": "hub-worker"})
+    one, two = (s["itemId"] for s in run["steps"])
+    round_trip(queue, run["runId"])
+    early = queue.claim(one, "hub-worker")            # claimed BEFORE the rebase
+    legacy(queue, run["runId"], one)                  # ...as an old store holds it
+
+    def old_stamp(item):
+        meta = {k: v for k, v in (item.metadata or {}).items() if k != ownership.STAMP_BASE_KEY}
+        return {"metadata": {**meta, ownership.OWNER_EPOCH_KEY: 3}}
+
+    queue._mutate(one, old_stamp)
+    ownership.rebase_epochs(queue, apply=True)
+    assert queue.get(one).metadata[ownership.OWNER_EPOCH_KEY] == 2
+    assert queue.report_result(one, early.lease_attempt, WorkStatus.DONE, attestation=det(0)).status \
+        is WorkStatus.DONE, "claimed before, reported after"
+    late = queue.claim(two, "hub-worker")              # filed before, claimed AFTER the rebase
+    assert late.metadata[ownership.OWNER_EPOCH_KEY] == 2 and late.metadata[ownership.STAMP_BASE_KEY] == 0
+    assert queue.report_result(two, late.lease_attempt, WorkStatus.DONE, attestation=det(0)).status \
+        is WorkStatus.DONE, "filed before, claimed after"
