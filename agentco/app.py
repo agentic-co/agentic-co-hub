@@ -62,7 +62,7 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from agentco import auth, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
 from agentco.errors import Refusal, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
@@ -336,6 +336,7 @@ def create_app(
     stores: Optional[dict] = None,
     admins: Optional[Iterable[str]] = None,
     lease_max_age: Optional[int] = None,
+    actor_routes: Optional[dict] = None,
 ) -> FastAPI:
     """Build the ASGI app. `keys`/`operator` are injectable so tests need no env.
 
@@ -440,6 +441,9 @@ def create_app(
     app.state.hub_uid = hubid.ensure(conn)  # generated, persisted; `hub_id` stays a label
     app.state.keys = keys
     app.state.operator = resolve_operator(operator)
+    # Per-actor route allowlist (agentco/authz.py): injected, or read from the
+    # key table per request so an edit applies like a revocation.
+    app.state.routes = authz.build(actor_routes)
     app.state.ignored = wire.Ignored()
     app.state.memory_enabled = memory_on
 
@@ -496,6 +500,10 @@ def create_app(
                 # query inside the timestamp window (known issue 6b).
                 query=request.url.query,
             )
+            # The route allowlist, straight after authentication and before any
+            # body is read: a restricted credential learns nothing about the
+            # body's validity, and no handler ever runs for it.
+            app.state.routes.check(actor, verb)
             payload: dict = {}
             if body:
                 try:
@@ -918,9 +926,13 @@ def create_app(
 
         def work(actor: str, payload: dict) -> dict:
             params = request.query_params
+            asked = params.get("agent")
             if params.get("ready"):
-                items = queue.ready(agent=params.get("agent"))
+                # The agent is the SIGNER, never the query (ADR 0008 §6); see
+                # `authz.read_agent` for the operator exception.
+                items = queue.ready(agent=authz.read_agent(actor, asked, app.state.operator))
             else:
+                authz.check_read_agent(actor, asked, app.state.operator)
                 raw = params.get("status")
                 if raw:
                     try:

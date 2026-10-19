@@ -51,12 +51,17 @@ ACTORS = {
         "hub-d": None,                      # a second declared child, a key only
         "hub-c": None,                      # a valid key, NOT a declared child
         "rt-agent": None,                   # speaks for the external store runtime-a
+        "relay": None,                      # a transport: carries answers, reaches ROUTES["hub-a"]["relay"] only
     },
     "hub-b": {"worker-b": None},
     "hub-c": {"worker-c": None},
     "chain-sqlite": {"dana": None, "kofi": None, "ana": None, "operator": None},
     "chain-pg": {"dana": None, "kofi": None, "ana": None, "operator": None},
 }
+
+#: Per-actor route allowlists written into the key table's object form
+#: (agentco/authz.py). An actor not named here is unrestricted.
+ROUTES = {"hub-a": {"relay": ["attest", "events"]}}
 
 
 class Rig:
@@ -111,7 +116,10 @@ class Rig:
             for actor, clearance in actors.items():
                 secret = secrets.token_hex(32)
                 self.secrets[hub][actor] = secret
-                table[actor] = {"secret": secret, "clearance": clearance} if clearance else secret
+                routes = ROUTES.get(hub, {}).get(actor)
+                entry = {"secret": secret, **({"clearance": clearance} if clearance else {}),
+                         **({"routes": routes} if routes is not None else {})}
+                table[actor] = entry if len(entry) > 1 else secret
             path = hub_dir / "keys.json"
             path.write_text(json.dumps(table, indent=2, sort_keys=True), encoding="utf-8")
             os.chmod(path, 0o644)
