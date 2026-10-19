@@ -405,6 +405,12 @@ class WorkItem:
 # read as configured, `lease_report` invents an executor. Reserved at the write
 # boundary, because the alternative — trusting every reader to re-derive what
 # every writer might have lied about — is not a boundary.
+#: Where an attestation's idempotency key is recorded, and how many are kept.
+#: An item is attested a handful of times at most (fail, fix, re-attest); the
+#: bound only stops a looping client growing the row without limit.
+ATTEST_KEYS_KEY = "attest_keys"
+ATTEST_KEYS_KEPT = 20
+
 RESERVED_METADATA_KEYS = frozenset({
     "verifies", "claims", "lease_report", "verify_parked_at", "verify_resolution",
     "verify_history", "verify_escalated", "verify_quarantined", "verify_retry",
@@ -418,6 +424,10 @@ RESERVED_METADATA_KEYS = frozenset({
     # A caller who could set any of them could make itself a run's owner, or
     # forge the evidence of a transfer.
     "run_owner", "run_pack", "owner_epoch", "lease_voided",
+    # The idempotency keys of the attestations that landed, so a retry after a
+    # lost response returns the recorded item instead of a refusal. A caller who
+    # could set them could make a real attestation read as a retry of one.
+    "attest_keys",
     # How many times the current lease was renewed, and when last (owner
     # decision 10). A caller who could set it could disguise a lease's age.
     "lease_renewed",
@@ -2137,8 +2147,25 @@ class Queue:
         capabilities: Optional[Sequence[str]] = None,
         adjudication: Optional[dict] = None,
         now: Optional[datetime] = None,
+        epoch: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Optional[WorkItem]:
         """Answer a gate. The only transition out of a verify state.
+
+        **The ownership epoch (ASOP §7.2).** For a step of a run, `epoch` is the
+        run's ownership epoch as the attester last read it (`GET /runs/{id}`,
+        `owner.epoch`, or the epoch a `not_the_owner` refusal states). A
+        mismatch is refused `not_the_owner` with the current epoch, whoever
+        sends it, so an answer read before a transfer cannot land after one,
+        even when the run was transferred back. Absent means a store that
+        predates epochs, which the spec treats as claiming epoch 0: accepted
+        until the run's first transfer, refused after it. Checked inside the
+        lock, so it is the epoch at the moment of the write.
+
+        **`idempotency_key`** makes a retry after a lost response safe: the
+        same key from the same submitter returns the item as it stands, writes
+        nothing, and is not judged a second answer. The outbox sends its line
+        id, exactly as it does for `report_result`.
 
         `adjudication` — `{verdict, evidence}` — rides along when the verifier
         is also judging the divergence they saw, and is written by
@@ -2488,7 +2515,41 @@ class Queue:
                 "metadata": metadata,
             }
 
-        attested = self._mutate(item_id, verdict, cascade=self._run_cascade)
+        class _AlreadyAttested(Exception):
+            """Raised from inside the lock: this key already landed, nothing to write."""
+
+            def __init__(self, item: WorkItem):
+                self.item = item
+
+        answer = verdict
+
+        def keyed(item: WorkItem) -> dict:
+            # Both INSIDE the lock, before the verdict: a retry racing its own
+            # first attempt must find the key, and the epoch must be the one
+            # the write lands under, not one read before a transfer.
+            if idempotency_key:
+                for prior in (item.metadata or {}).get(ATTEST_KEYS_KEY) or []:
+                    if prior.get("key") == idempotency_key and prior.get("by") == submitted_by:
+                        raise _AlreadyAttested(item)
+            from agentco import ownership
+
+            ownership.check_attest_epoch(self, item, epoch)
+            update = answer(item)
+            if idempotency_key:
+                metadata = dict(update.get("metadata") or item.metadata or {})
+                status = update.get("status", item.status)
+                metadata[ATTEST_KEYS_KEY] = [
+                    *(metadata.get(ATTEST_KEYS_KEY) or []),
+                    {"key": idempotency_key, "by": submitted_by, "at": _iso(now or _now()),
+                     "status": status.value if isinstance(status, WorkStatus) else status},
+                ][-ATTEST_KEYS_KEPT:]
+                update["metadata"] = metadata
+            return update
+
+        try:
+            attested = self._mutate(item_id, keyed, cascade=self._run_cascade)
+        except _AlreadyAttested as recorded:
+            return recorded.item
         if attested is not None and adjudication is not None:
             return self.adjudicate(
                 item_id, adjudication.get("verdict"), adjudication.get("evidence"),

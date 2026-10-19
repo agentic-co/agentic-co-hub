@@ -244,10 +244,10 @@ class _LocalBackend:
         return json.loads(self.queue.create(title, **kw).to_json())
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
-               capabilities=None, adjudication=None) -> Optional[dict]:
+               capabilities=None, adjudication=None, epoch=None) -> Optional[dict]:
         updated = self.queue.attest(
             item_id, attestation, submitted_by=submitted_by, capabilities=capabilities,
-            adjudication=adjudication,
+            adjudication=adjudication, epoch=epoch,
         )
         return json.loads(updated.to_json()) if updated is not None else None
 
@@ -329,10 +329,10 @@ class _RemoteBackend:
         ).get("item")
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
-               capabilities=None, adjudication=None) -> Optional[dict]:
+               capabilities=None, adjudication=None, epoch=None) -> Optional[dict]:
         return self.registry.attest(
             item_id, attestation, capabilities=list(capabilities or ()) or None,
-            adjudication=adjudication,
+            adjudication=adjudication, epoch=epoch,
         ).get("item")
 
     def work_create(self, title: str, requires=(), blocked_by=(), assigned_agent=None,
@@ -728,7 +728,8 @@ def create_server(
             raise _refuse(exc) from exc
 
     @mcp.tool(name="attest")
-    def attest(item_id: str, attestation: dict, adjudication: Optional[dict] = None) -> dict:
+    def attest(item_id: str, attestation: dict, adjudication: Optional[dict] = None,
+               epoch: Optional[int] = None) -> dict:
         """Answer a gate on an item parked in `awaiting_verify` (or re-run a failed one).
 
         The verifier's verb, as distinct from the executor's `work_report`: a
@@ -747,6 +748,8 @@ def create_server(
 
         `adjudication` — optional `{verdict: good|bad, evidence}` — tags the
         divergence you saw while verifying. You may not be the executor.
+
+        `epoch` — a run step's `owner.epoch` as read; omit if never transferred.
         """
         try:
             updated = backend.attest(
@@ -754,6 +757,7 @@ def create_server(
                 attestation,
                 submitted_by=who,
                 adjudication=adjudication,
+                epoch=epoch,
                 # The NODE's declared capabilities, from its own configuration —
                 # not an argument on the tool. A model that could pass this
                 # would be declaring, per call, what the machine it runs on is

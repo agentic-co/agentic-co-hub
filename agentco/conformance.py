@@ -1067,6 +1067,9 @@ def photograph(world: World) -> dict:
                 "lease_report", "claims", "adjudication", "sop_ref", "sop_run", "sop_plan",
                 "plan_vs_actual", "parent", "repairs", "verify_resolution", "verify_parked_at",
                 "verify_retry",
+                # Transport bookkeeping, like lease_report's key: only a path
+                # that sends an idempotency key (the outbox) records one.
+                "attest_keys",
             )),
         })
     sops = []
