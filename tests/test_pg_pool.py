@@ -76,8 +76,15 @@ def test_statements_from_different_threads_do_not_queue_behind_each_other(conn):
 def test_concurrent_callers_are_on_different_server_connections(conn):
     """`pg_backend_pid()` is the server's own answer to "is this the same
     connection", so it cannot be satisfied by an adapter that merely looks
-    concurrent."""
-    _, pids = _run(lambda i: conn.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"])
+    concurrent.
+
+    The statement holds its connection for a fixed time (`FROM pg_sleep`), so the
+    callers released together are inside the database at the same instant. A
+    bare `SELECT pg_backend_pid()` finished so fast that one pooled connection
+    could serve every caller in turn, and the test failed on a healthy pool
+    (main CI, once: every caller on one backend)."""
+    _, pids = _run(lambda i: conn.execute(
+        f"SELECT pg_backend_pid() AS pid FROM pg_sleep({SLEEP_S})").fetchone()["pid"])
     assert len(set(pids)) > 1, f"every caller landed on one backend: {set(pids)}"
 
 
