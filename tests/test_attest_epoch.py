@@ -118,19 +118,24 @@ def test_the_same_key_from_the_same_submitter_is_a_retry_not_a_second_answer(fai
     assert [k["key"] for k in again.metadata["attest_keys"]] == ["line-1"], "the retry wrote nothing"
     with pytest.raises(Refusal) as exc:
         queue.attest(step, det(0), "hub-worker", idempotency_key="line-2")
-    assert exc.value.code == "attestation_invalid", "a new key is a second answer, refused as before"
+    assert exc.value.code == "not_terminal", "a new key is a second answer to a passed gate (ADR 0008 §6)"
     with pytest.raises(Refusal):
         queue.attest(step, det(0), "someone-else", idempotency_key="line-1")
 
 
-def test_the_same_owner_stale_pass_is_not_what_the_epoch_fences(failed_step):
-    """DOCUMENTS current behaviour, not the property wanted. The review's first
-    probe had no transfer: a pass typed before a fail lands after it. The epoch
-    cannot see that (it moves only on a transfer); the attempt fence the review
-    proposes (`attestation.attempt`) would, and it waits on a spec decision.
-    A change that closes this should flip the assertion."""
+def test_the_same_owner_stale_pass_is_refused_by_the_attempt_not_the_epoch(failed_step):
+    """The review's first probe had no transfer: a pass typed before a fail lands
+    after it. The epoch cannot see that (it moves only on a transfer); the answer
+    attempt does, because a failing verdict advances it. Full coverage in
+    tests/test_attest_attempt.py."""
     queue, _, step = failed_step
-    assert queue.attest(step, det(0), "hub-worker", epoch=0).status is WorkStatus.DONE
+    typed_at = queue.get(step).answer_attempt
+    assert queue.attest(step, det(1), "hub-worker", epoch=0, attempt=typed_at).status is WorkStatus.VERIFY_FAILED
+    with pytest.raises(Refusal) as exc:
+        queue.attest(step, det(0), "hub-worker", epoch=0, attempt=typed_at)
+    assert exc.value.code == "stale" and exc.value.http_status == 409
+    assert queue.get(step).status is WorkStatus.VERIFY_FAILED
+    assert queue.attest(step, det(0), "hub-worker", epoch=0).status is WorkStatus.DONE, "no attempt: as before"
 
 
 # --------------------------------------------------------------------------- #
@@ -217,7 +222,7 @@ def test_http_an_attest_retry_with_its_key_returns_the_recorded_item(tmp_path):
     assert first[0] == retry[0] == 200 and retry[1]["item"]["status"] == "done"
     assert retry[1]["item"]["attestation"] == first[1]["item"]["attestation"]
     second = call("dana", "POST", f"/work/{step}/attest", {"attestation": human(True)})
-    assert (second[0], second[1]["code"]) == (422, "attestation_invalid")
+    assert (second[0], second[1]["code"]) == (409, "not_terminal")
 
 
 def test_live_socket_epoch_and_the_outbox_retry(tmp_path):

@@ -139,7 +139,7 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
 
 | Setting | Meaning |
 |---|---|
-| `AGENTCO_HUB_ID` | this hub's store id (default `local`); hub-filed runs are owned by it |
+| `AGENTCO_HUB_ID` | this hub's store id and **label** (default `local`); hub-filed runs are owned by it. Not what envelopes will name: that is the generated id, `agentco hub-id` |
 | `AGENTCO_STORES` | external stores and the actors that speak for them: `runtime-a=actor-1\|actor-2,…` or JSON |
 | `ASOP_ADMINISTRATORS` | actors who may transfer a run (spec 0.6.1 §9); each must ALSO be a declared human. Unset = nobody (fails closed) |
 | `AGENTCO_ADMINS` | **deprecated** fallback for the same, read only when `ASOP_ADMINISTRATORS` is unset. **When both are set, `ASOP_ADMINISTRATORS` wins and `AGENTCO_ADMINS` is ignored**; presence, not truthiness, decides, so declaring `ASOP_ADMINISTRATORS=` empty means nobody even if `AGENTCO_ADMINS` names someone. Remove after one minor |
@@ -179,6 +179,25 @@ run when it is filed and no **run** verb moves it; a recorded administrative tra
   to every gate kind, hub-owned runs included; an item outside a run has no epoch. Before this the
   check ran on renew and report only, and an answer read before a hub → runtime → hub round trip
   landed after it.
+- **The answer attempt** (ADR 0008 §3.3). The epoch moves only on a transfer, so a pass typed
+  before a fail still landed after it when nothing was transferred. `POST /work/{id}/attest` therefore
+  also takes `attempt`, the item's **`answer_attempt`** as the attester read it (shown on every item
+  view). It is `lease_attempt` plus the failing verdicts the gate has given, so it advances on every
+  re-execution (a new lease) and on every failing verdict. Derived from those two counters (the second
+  is the reserved metadata key `failed_verdicts`), never a third stored number that could drift. Checked
+  inside the same lock as the epoch: a value that is not the current one is refused **`stale`** (409)
+  stating the current attempt, and a value that is not a count is `attempt_invalid` (400). **Optional on
+  the wire:** asop-spec 0.6.x has no such field, so absent keeps the earlier behaviour. The client, the
+  MCP `attest` tool and the outbox carry it.
+- **A second answer is `not_terminal`** (ADR 0008 §6). Once a gate has passed, another answer to it is
+  refused `not_terminal` (409), not `attestation_invalid`. The idempotent retry is unchanged: the same
+  `idempotencyKey` from the same submitter returns the recorded item and writes nothing.
+- **The hub id.** `AGENTCO_HUB_ID` is a label and stays one (shared memory's `authority` and a run's
+  owner store still read it). The id a signed answer will name is separate (ADR 0008 §3.1): 128 bits,
+  32 lowercase hex, generated at first start and persisted in the registry database's `meta` table
+  (`agentco/hubid.py`), the same on SQLite and Postgres and race-safe when two processes start
+  together. `agentco hub-id` prints it beside the label, the pulse reports it as `hubId`, and
+  `hubid.require_bound` refuses (`hub_id_unbound`) where an id is missing or the label is still `local`.
 - **The count (§7.2).** A run never transferred is at **epoch 0**; each transfer makes it the
   current epoch + 1, so the first transfer is epoch 1. The `filed` history entry carries 0. Every
   epoch the hub shows, stamps on a claim, states in a refusal and accepts is in this count, with no

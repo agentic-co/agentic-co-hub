@@ -617,6 +617,9 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
                 capabilities=payload.get("capabilities"),
                 adjudication=payload.get("adjudication"),
                 epoch=payload.get("epoch"),
+                # The answer attempt the verifier read, so a line queued before
+                # a failing verdict is refused `stale` when it drains.
+                attempt=payload.get("attempt"),
                 # The line id is the idempotency key, as for `work_report`: a
                 # drainer that died after the call and before settling
                 # republishes, and gets the recorded item back instead of an

@@ -62,7 +62,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional
 
-from agentco import events, migrations, verifiers
+from agentco import events, hubid, migrations, verifiers
 from agentco.work import WorkStatus, executors_of, pin_of, rerun_pending
 
 EVENT_KIND = "PulseObserved"
@@ -258,6 +258,9 @@ def check_plane(conn: sqlite3.Connection, *, now: datetime) -> tuple[dict, list[
     last = _parse(row["last"])
     facts = {
         "schemaVersion": max(applied) if applied else None,
+        # The generated id (agentco/hubid.py), not the configured label; None
+        # until the database has been opened by a hub (or `agentco hub-id`).
+        "hubId": hubid.read(conn),
         "integrity": integrity,
         "writable": writable,
         "events": row["n"],
