@@ -11,6 +11,11 @@ what this adds"
 Nothing in this record is built. 0005's push-only digest remains the only
 hub-to-hub path that exists.
 
+> **Proposed amendment** ([`0008`](0008-control-loop-personal-and-company-hubs.md),
+> proposed 2026-10-18): where the hub that owns work also executes it, "parent"
+> is per channel, and work and answers both flow toward that hub. The direction
+> table in §2 is unchanged until 0008 is accepted.
+
 > **Status of the open points (owner, decision 8, 2026-10-18):** the identity
 > mechanism (§4) and credit across hubs (§5) are **open**, each with its reason and
 > revisit condition below.
