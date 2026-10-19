@@ -194,3 +194,33 @@ def test_live_socket_attempt_and_the_outbox(tmp_path):
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+def test_a_park_clock_failure_advances_the_attempt_like_a_failing_verdict(queue):
+    """S1 consistency: `verify_attempt` is `verify_failures`, and a park clock that
+    resolves a gate to `verify_failed` counts a failure, so an answer typed before
+    the clock fired is stale after it, exactly as after a failing verdict."""
+    item = queue.create("parked on a person", verify=HUMAN)
+    claimed = queue.claim(item.id, "hub-worker")
+    parked = queue.report_result(item.id, claimed.lease_attempt, WorkStatus.DONE)
+    assert parked.status is WorkStatus.AWAITING_VERIFY and parked.verify_failures == 0
+    queue.resolve_by_default(item.id, WorkStatus.VERIFY_FAILED, {"by": "park-clock", "reason": "timed out"})
+    assert queue.get(item.id).verify_failures == 1
+    with pytest.raises(Refusal) as exc:
+        queue.attest(item.id, human(True), "dana", verify_attempt=0)
+    assert exc.value.code == "stale"
+
+
+def test_a_row_stored_with_the_first_fences_field_reads_cleanly():
+    """The first #58 build wrote `answer_attempt` into JSONL rows. It is not a
+    field any more: it is dropped on read (and kept on disk, as every unknown
+    column is), and the fence reads `verify_failures` alone."""
+    import json
+
+    from agentco.work import WorkItem
+
+    row = {"id": "w-00000001", "title": "t", "status": "verify_failed", "verify_failures": 2,
+           "lease_attempt": 5, "answer_attempt": 7}
+    item = WorkItem.from_json(json.dumps(row))
+    assert not hasattr(item, "answer_attempt") and item.verify_failures == 2
+    assert "answer_attempt" not in json.loads(item.to_json())
