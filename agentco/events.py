@@ -130,6 +130,11 @@ KINDS = (
     # opens the label, and to nobody when no viewer is given — so the digest,
     # the write-back and any internal reader of the feed never carry it.
     "MemoryChanged",
+    # `HumanKeyEnrolled` / `HumanKeyRevoked` — a person's signing key was added
+    # to, or withdrawn from, this hub (ADR 0008 §3.2). The one pair of kinds the
+    # partition transport credential may read (`HUMAN_KEY_KINDS`).
+    "HumanKeyEnrolled",
+    "HumanKeyRevoked",
     # `RunTransferred` — a declared admin moved a run to another owner
     # (agentco/ownership.py): from, to, the new epoch, the reason, and the leases
     # it voided. The record of who did it is on the run; this is the notice.
@@ -145,6 +150,9 @@ WALLED_KINDS = frozenset({"MemoryChanged"})
 #: company: without this, any child key read every other child's rollups, `meta`
 #: included. The parent's own readers (anyone not a declared child) read all.
 SENDER_SCOPED_KINDS = frozenset({"DigestReceived"})
+
+#: The only kinds a transport-class credential reads (agentco/authz.py).
+HUMAN_KEY_KINDS = frozenset({"HumanKeyEnrolled", "HumanKeyRevoked"})
 
 # Events the PLANE observes rather than an actor performing. A reserved name
 # rather than borrowing whoever happened to run the pass: attributing a
@@ -323,6 +331,7 @@ def read(
     viewer: Any = None,
     reader: Optional[str] = None,
     children: frozenset = frozenset(),
+    only_kinds: Optional[frozenset] = None,
 ) -> dict:
     """`GET /events?since=` — events strictly after the cursor, plus the next one.
 
@@ -339,6 +348,10 @@ def read(
     cannot see would never move. That is a known limit, not an oversight: the
     gap in `seq` tells a reader that SOMETHING it cannot see happened
     (`docs/memory.md`, known limits).
+
+    **`only_kinds`** restricts the page to those kinds (the transport credential
+    reads `HUMAN_KEY_KINDS` only). Dropped rows behave as walled ones do, and a
+    `kind` naming something outside the set returns nothing.
 
     `nextCursor` is the seq of the LAST ROW RETURNED, never the highest seq in
     the table. Returning the table maximum would silently skip anything a
@@ -378,7 +391,8 @@ def read(
 
     rows = conn.execute(sql, args).fetchall()
     scanned = rows
-    rows = [r for r in rows if _visible(r, viewer) and _own(r, reader, children)]
+    rows = [r for r in rows if _visible(r, viewer) and _own(r, reader, children)
+            and (only_kinds is None or r["kind"] in only_kinds)]
     events = [
         {
             "seq": r["seq"],

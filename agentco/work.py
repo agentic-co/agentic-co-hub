@@ -1715,6 +1715,19 @@ class Queue:
             out.append(item)
         return out
 
+    def ready_assigned(self, belongs: Callable[[str], bool],
+                       now: Optional[datetime] = None) -> list[WorkItem]:
+        """Ready items ASSIGNED to someone `belongs` accepts; never unassigned ones.
+
+        The partition transport's read (ADR 0008 §8 B2). `ready(agent=X)` also
+        returns every unassigned ready item, which a relay must not see, so this
+        starts from the unfiltered ready set and keeps only items whose assignee
+        the predicate names (and whose run ownership lets that assignee act, as
+        `claim()` would).
+        """
+        return [i for i in self.ready(now=now)
+                if i.assigned_agent and belongs(i.assigned_agent) and self._may_act(i, i.assigned_agent)]
+
     def _may_act(self, item: "WorkItem", agent: str) -> bool:
         """Whether run ownership lets `agent` take `item` (agentco/ownership.py).
         `ready()` and `claim()` must agree, as they do on every other rule."""
