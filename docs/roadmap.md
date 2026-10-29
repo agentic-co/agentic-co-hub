@@ -246,6 +246,14 @@ not chosen, confidence 0.55; revisit when a second organisation needs to connect
 across hubs** — not decided, no internal market; revisit when two hubs exchange work with different
 owners.
 
+Proposed in [`decisions/0010-views-one-lens-per-hub.md`](decisions/0010-views-one-lens-per-hub.md):
+one view shape for every level, set by the viewer's clearance rather than by where the hub
+sits. Each hub shows its own items in full and the level above as labelled replicas or live
+reads, and nothing from below except what that level sent up. The personal hub's view of a
+team is a live read through the company's partition, never a stored copy. **Built:**
+`GET /views/me`, the signer's open gates (`askedOfMe`) and open work (`mine`), oldest first.
+Notices, memory, the harness switchboard and the UI are the next steps.
+
 ### A dedicated `cannot_evaluate` status — designed, not built (option B)
 
 **Today (option A, 2026-10-18):** a could-not-evaluate gate result lands `verify_failed` with

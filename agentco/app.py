@@ -63,7 +63,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from agentco import verifiers as verifiers_module
-from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots
+from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots, views
 from agentco.errors import Refusal, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
@@ -135,6 +135,7 @@ RUN_NOT_ON_THE_WIRE = {
 _IDENTITY = ("author", "author_kind")
 ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     ("GET", "/hub"): wire.lenient(),
+    ("GET", "/views/me"): wire.lenient(),
     ("GET", "/work/{item_id}"): wire.lenient(),
     ("POST", "/scope-claims"): wire.strict(
         ("repo", "prefixes", "intent", "holder", "ttlSeconds"), "a scope claim's paths and lease"),
@@ -664,6 +665,36 @@ def create_app(
             return {"state": "accepted", "hubId": app.state.hub_uid, "label": queue.hub_id}
 
         return await _handle(request, "hub_get", work)
+
+    @app.get("/views/me")
+    async def get_view_me(request: Request) -> JSONResponse:
+        """The signer's lens: what is asked of them and what is theirs (ADR 0010).
+
+        Takes no parameter. The viewer is the signature; a query that could
+        name someone else would be the unfiltered `GET /work` under another
+        name, so any parameter is refused rather than ignored.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            extra = sorted(request.query_params.keys())
+            if extra:
+                raise Refusal(
+                    code="view_takes_no_parameter",
+                    message=f"GET /views/me takes no parameter (got {extra})",
+                    remediation=(
+                        "Drop the parameters. The view is for the actor that signed the "
+                        "request; to see another actor's view, sign as that actor."
+                    ),
+                    http_status=400,
+                )
+            return {
+                "state": "accepted",
+                "hubId": app.state.hub_uid,
+                "label": queue.hub_id,
+                **views.lens(queue, viewer=actor),
+            }
+
+        return await _handle(request, "view_me", work)
 
     @app.get("/events")
     async def get_events(request: Request) -> JSONResponse:
