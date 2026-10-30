@@ -74,7 +74,7 @@ VERBS: frozenset[str] = frozenset({
     "memory_trace", "metrics", "promote", "release_scope", "run_get", "run_list", "run_pack",
     "run_transfer", "snapshot", "sop_activate", "sop_create", "sop_get", "sop_list",
     "sop_outcomes", "sop_propose", "sop_proposals", "sop_retire", "sop_revise", "sop_run",
-    "work_create", "work_get", "work_list", "work_pull", "work_renew", "work_report",
+    "view_me", "work_create", "work_get", "work_list", "work_pull", "work_renew", "work_report",
 })
 
 #: Reserved verb groups (see the module docstring). Empty today, on purpose.
