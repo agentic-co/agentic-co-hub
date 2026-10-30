@@ -16,7 +16,13 @@ object as an ASOP, held next to it — carrying:
   * a **provenance** pointer — a hard field, never a comment;
   * a **pinned** flag with a calendar `review_by` date, for the class that
     decay and reinforcement must not touch (§5, the engine arrives later);
-  * a `version`, and an append-only audit of every write.
+  * a `version`, and an append-only audit of every write;
+  * a **space** (ADR 0009 §3): a path inside this hub's root, `""`, such as
+    `agency/team-delivery`. A reader sees its own space and every ancestor,
+    never a sibling's or a child's — a soft wall for relevance, inside what
+    the owner label already allows. An item is written in its writer's own
+    space; only a declared human moves it, up (widen) or back down (narrow),
+    each move a version (`set_space`).
 
 **Nothing is deleted.** `retire` hides an item from retrieval and keeps it,
 and its audit, for as long as the store exists (§4: decay never deletes; a
@@ -45,7 +51,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
-from agentco.clearance import PUBLIC, Clearance, not_cleared
+from agentco.clearance import PUBLIC, ROOT_SPACE, Clearance, is_within, not_cleared, parse_space
 from agentco.errors import Refusal
 from agentco.events import now_iso
 from agentco.filelock import lock_exclusive, unlock
@@ -132,6 +138,7 @@ class MemoryItem:
     created_at: str = ""
     updated_by: str = ""
     updated_at: str = ""
+    space: str = ROOT_SPACE
 
     @property
     def label(self) -> dict:
@@ -161,6 +168,16 @@ def unknown_item(item_id: str) -> Refusal:
         message=f"no memory item {item_id!r} is visible to you",
         remediation="Check the id. Items you are not cleared for are not visible.",
         http_status=404,
+    )
+
+
+def _space_not_writable(space: str, own: str) -> Refusal:
+    return Refusal(
+        code="space_not_writable",
+        message=f"you write in {own or '(root)'!r}, not {space or '(root)'!r}",
+        remediation=("Write the item in your own space. Moving it up is a promotion, which a "
+                     "person approves (POST /memory/{id}/space)."),
+        http_status=403,
     )
 
 
@@ -408,18 +425,27 @@ class MemoryStore:
             # (`events.WALLED_KINDS`), and a payload carrying the title would
             # put content one filter bug away from every reader.
             self.announce("MemoryChanged", actor, {
-                "itemId": item.item_id, "label": item.label, "layer": item.layer,
+                "itemId": item.item_id, "label": item.label, "layer": item.layer, "space": item.space,
                 "version": item.version, "action": action, "authority": item.authority,
             })
 
     def _visible(self, item: Optional[MemoryItem], clearance: Clearance) -> bool:
-        return item is not None and clearance.allows(item.owner, item.level)
+        return (item is not None and clearance.allows(item.owner, item.level)
+                and clearance.sees_space(item.space))
 
     def create(self, *, actor: str, clearance: Clearance, owner: Any, level: Any, layer: Any,
-               **fields: Any) -> MemoryItem:
+               space: Any = None, **fields: Any) -> MemoryItem:
         """Write a new authoritative item. `clearance` is the actor's EFFECTIVE
         clearance (hub ∧ actor): an item can be written only at a label both
-        this hub and the actor hold."""
+        this hub and the actor hold, and only in the actor's own space (absent
+        means that space). Writing straight into an ancestor would be a
+        promotion nobody approved (ADR 0009 §4)."""
+        try:
+            space = clearance.space if space is None else parse_space(space)
+        except ValueError as exc:
+            raise _invalid(str(exc)) from exc
+        if space != clearance.space:
+            raise _space_not_writable(space, clearance.space)
         if not isinstance(owner, str) or not _NAME.match(owner):
             raise _invalid("'label.owner' is a short name: letters, digits, '.', '_' or '-'")
         if level not in clearance.levels:
@@ -448,7 +474,7 @@ class MemoryStore:
             authority=self.hub_id, version=1, kind=clean.get("kind", "lesson"),
             title=clean["title"], body=clean["body"], provenance=clean["provenance"],
             tags=clean.get("tags", []), applies_to=clean.get("applies_to"),
-            created_by=actor, created_at=at, updated_by=actor, updated_at=at,
+            created_by=actor, created_at=at, updated_by=actor, updated_at=at, space=space,
         )
         with self._locked():
             self._record(item, "create", actor)
@@ -470,7 +496,7 @@ class MemoryStore:
         out = []
         cold = set() if include_cold else {i for i, st in self._states().items() if st.cold and not st.pinned}
         for item in self._all():
-            if not clearance.allows(item.owner, item.level):
+            if not clearance.allows(item.owner, item.level) or not clearance.sees_space(item.space):
                 continue
             if item.status == "retired" and not include_retired:
                 continue
@@ -684,6 +710,40 @@ class MemoryStore:
             self._record(item, "pin" if pinned else "unpin", actor)
         return item
 
+    def set_space(self, item_id: str, *, actor: str, human: bool, clearance: Clearance,
+                  to: Any, expected_version: Optional[int] = None) -> MemoryItem:
+        """Move an item up its space path (widen) or back down it (narrow).
+        Human-only, a new version, audited as `space`.
+
+        Only along the item's own line: to an ancestor of where it is, or to a
+        descendant. A sideways move (one team's space to another's) is
+        refused — it is not a promotion, it is a relabel of whose the item is,
+        and nothing here may do that. The id, provenance and history stay.
+        This is the primitive the promotion path (§4) approves through; it does
+        not find candidates."""
+        if not human:
+            raise _human_only("move a memory item between spaces")
+        try:
+            target = parse_space(to)
+        except ValueError as exc:
+            raise _invalid(str(exc)) from exc
+        with self._locked():
+            item = self._authoritative(item_id, clearance)
+            if target == item.space:
+                return item
+            if not (is_within(item.space, target) or is_within(target, item.space)):
+                raise Refusal(
+                    code="space_move_lateral",
+                    message=f"{item_id} is in {item.space or '(root)'!r}; {target!r} is neither above nor below it",
+                    remediation=("Widen it to a common ancestor instead: an item moves up or back "
+                                 "down its own line, never across to another team's space."),
+                    http_status=409,
+                )
+            self._bump(item, actor, expected_version)
+            item.space = target
+            self._record(item, "space", actor)
+        return item
+
     def retire(self, item_id: str, *, actor: str, human: bool, clearance: Clearance,
                expected_version: Optional[int] = None) -> MemoryItem:
         """Hide from retrieval; keep the item and its audit. Human-only."""
@@ -716,6 +776,9 @@ class MemoryStore:
             incoming = MemoryItem.from_dict(dict(record))
         except TypeError as exc:
             raise _invalid(f"not a memory item record: {exc}") from exc
+        # Spaces are this hub's own paths; another hub's mean nothing here. A
+        # replica lands at the root, where every space below can read it.
+        incoming.space = ROOT_SPACE
         if incoming.authority == self.hub_id:
             raise _invalid("a replica's authority is another hub; this hub is authoritative for its own items")
         if not hub_clearance.allows(incoming.owner, incoming.level):
@@ -746,7 +809,7 @@ class MemoryStore:
 _COLUMNS = (
     "item_id", "owner", "level", "layer", "authority", "version", "kind", "title", "body",
     "provenance", "tags", "applies_to", "pinned", "review_by", "status",
-    "created_by", "created_at", "updated_by", "updated_at",
+    "created_by", "created_at", "updated_by", "updated_at", "space",
 )
 _JSON = frozenset({"provenance", "tags", "applies_to"})
 

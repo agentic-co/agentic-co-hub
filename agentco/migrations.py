@@ -870,6 +870,16 @@ _0016: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0017 — memory spaces (ADR 0009 §3). Every existing item is at the root, "",
+# which is what every reader already saw: adding the column changes no view.
+# --------------------------------------------------------------------------- #
+
+_0017: tuple[str, ...] = (
+    "ALTER TABLE memory_items ADD COLUMN space TEXT NOT NULL DEFAULT ''",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -887,6 +897,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(14, "memory-usefulness-and-decay", _0014),
     Migration(15, "human-keys", _0015),
     Migration(16, "answer-nonces", _0016),
+    Migration(17, "memory-spaces", _0017),
 )
 
 

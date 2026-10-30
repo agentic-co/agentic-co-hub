@@ -159,6 +159,33 @@ tail is long. With these defaults an item at strength 1.0 goes cold after 990 un
 and one at strength 4.0 after about 16,000. Whether that is right is a measurement, not a
 judgement this page can make.
 
+## Built: spaces inside one hub (ADR 0009 §3)
+
+A team that shares a hub with other teams of the same owner gets a **space**, a path such as
+`agency/team-delivery`. The hub's root is `""`. The actor's space is declared in the key table beside
+its clearance (`{"kofi": {"secret": "...", "clearance": {"acme": "internal"}, "space":
+"agency/team-delivery"}}`) or injected with `create_app(spaces=...)`. An actor with none is at the root.
+
+- **Reading:** an actor sees items in its own space and in every ancestor, merged. It never sees a
+  sibling's space or a child's. The rule rides on the effective clearance, so list, search, get,
+  history, reviews and traces all apply it, and the existing "unknown" answer covers an item in
+  another team's space.
+- **Spaces are a soft wall.** They separate for relevance, inside what the owner label already
+  allows. They never open what the label does not. Anything that must be secret from another team
+  belongs to a different owner.
+- **Writing:** an item is written in its writer's own space, and an absent `space` means that one.
+  A write naming another space, including an ancestor, is refused `space_not_writable`, because it
+  would be a promotion nobody approved.
+- **Moving:** a declared human widens an item to an ancestor or narrows it back down its own line
+  with `POST /memory/{id}/space {to, expected_version}`. Each move is a new version, audited as
+  `space`, and keeps the item's id and history. A move into another team's space is refused
+  `space_move_lateral`. This is the primitive the promotion path will approve through; finding
+  candidates is not built.
+- **The feed:** `MemoryChanged` carries the item's space beside its label, and never its content.
+- **Existing items** (migration 0017, and JSONL rows without the field) read as the root, so
+  turning spaces on changes no reader's view until an actor is given a space.
+- **Replicas** from another hub land at the root, because another hub's paths mean nothing here.
+
 ## Not built yet
 
 Admission by surprise (a capture-time novelty check);

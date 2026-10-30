@@ -187,8 +187,10 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     # Shared memory (ADR 0006): writes are strict — a dropped `provenance`,
     # `label` or `expected_version` would weaken what the item record promises.
     ("POST", "/memory"): wire.strict(
-        ("label", "layer", "title", "body", "kind", "tags", "applies_to", "provenance"),
-        "an item's owner label and provenance"),
+        ("label", "layer", "space", "title", "body", "kind", "tags", "applies_to", "provenance"),
+        "an item's owner label, space and provenance"),
+    ("POST", "/memory/{item_id}/space"): wire.strict(
+        ("to", "expected_version"), "the space an item moves to and the version it was read at"),
     ("POST", "/memory/{item_id}/revise"): wire.strict(
         ("title", "body", "kind", "tags", "applies_to", "provenance", "expected_version"),
         "an item's content and the version it was read at"),
@@ -338,6 +340,7 @@ def create_app(
     hub_id: Optional[str] = None,
     hub_clearance: Optional[dict] = None,
     clearances: Optional[dict] = None,
+    spaces: Optional[dict] = None,
     memory_levels: Optional[Iterable[str]] = None,
     memory_enabled: Optional[bool] = None,
     stores: Optional[dict] = None,
@@ -375,7 +378,7 @@ def create_app(
     # `_handle` answers every /memory route `memory_disabled` before any handler.
     memory_on = memory_switch() if memory_enabled is None else bool(memory_enabled)
     memory = open_memory_store(memory_store, hub_id=hub_id) if memory_on else None
-    walls = clearance_module.build(hub_clearance, clearances, memory_levels) if memory_on else None
+    walls = clearance_module.build(hub_clearance, clearances, memory_levels, spaces) if memory_on else None
     # Every write these two perform goes on the change feed, wired ONCE here
     # rather than at each handler. A harness following `GET /events?since=`
     # learns about new procedures and new work without asking the library or
@@ -1480,11 +1483,11 @@ def create_app(
             label = payload.get("label") or {}
             if not isinstance(label, dict):
                 label = {}
-            fields = {k: v for k, v in payload.items() if k not in ("label", "layer", "agentLabel")}
+            fields = {k: v for k, v in payload.items() if k not in ("label", "layer", "space", "agentLabel")}
             item = memory.create(
                 actor=actor, clearance=walls.effective(actor),
                 owner=label.get("owner"), level=label.get("level"), layer=payload.get("layer"),
-                **fields,
+                space=payload.get("space"), **fields,
             )
             return {"state": "accepted", "item": _memory_view(item)}
 
@@ -1522,8 +1525,9 @@ def create_app(
         (ADR 0006 §2: one partition and one session per owner)."""
 
         def work(actor: str, payload: dict) -> dict:
-            return {"state": "accepted", "clearance": walls.effective(actor).as_dict(),
-                    "levels": list(walls.levels)}
+            effective = walls.effective(actor)
+            return {"state": "accepted", "clearance": effective.as_dict(),
+                    "levels": list(walls.levels), "space": effective.space}
 
         return await _handle(request, "memory_clearance", work)
 
@@ -1684,6 +1688,21 @@ def create_app(
             return {"state": "accepted", "item": _memory_view(item)}
 
         return await _handle(request, "memory_pin", work)
+
+    @app.post("/memory/{item_id}/space")
+    async def post_memory_space(item_id: str, request: Request) -> JSONResponse:
+        """Widen an item to an ancestor space, or narrow it back (ADR 0009 §3, §4).
+        Human-only; never sideways into another team's space."""
+
+        def work(actor: str, payload: dict) -> dict:
+            item = memory.set_space(
+                item_id, actor=actor, human=policy.kind_of(actor, declared_humans) == policy.HUMAN,
+                clearance=walls.effective(actor), to=payload.get("to"),
+                expected_version=_optional_version(payload),
+            )
+            return {"state": "accepted", "item": _memory_view(item)}
+
+        return await _handle(request, "memory_space", work)
 
     @app.post("/memory/{item_id}/retire")
     async def post_memory_retire(item_id: str, request: Request) -> JSONResponse:
