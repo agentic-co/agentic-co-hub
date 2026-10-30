@@ -334,6 +334,11 @@ parameter value is **open** until real traces measure it. The original list, in 
 - A primary-source spot-check of the research behind the design, before any
   parameter is claimed.
 
+**Ontological memory — proposed, not built.** [`decisions/0009-ontological-memory.md`](decisions/0009-ontological-memory.md):
+entity facts as a slice of 0006 memory, resolved when a run is filed; spaces (teams) inside one hub,
+with promotion to the parent space; model-driven memory work run by a memory steward the hub files
+work for. Its first step is a census of `common_mistakes`, which can stop it before any code.
+
 ### Borrowed candidates (from the 2026-08-31 OpenViking review)
 
 Three patterns from [OpenViking](https://github.com/volcengine/OpenViking) worth weighing
