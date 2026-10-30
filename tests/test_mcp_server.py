@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from agentco.mcp_server import (
     DEFAULT_ACTOR,

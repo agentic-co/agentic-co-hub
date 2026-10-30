@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 import pytest
 from fastapi.testclient import TestClient
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ToolError
 
 from agentco import auth
 from agentco.app import create_app

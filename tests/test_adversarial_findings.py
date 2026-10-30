@@ -1704,7 +1704,7 @@ def test_a_refusal_over_mcp_carries_its_code_as_a_field(tmp_path):
     exactly the half that works, and it passes whether the code is a field or
     merely embedded in prose, so it cannot distinguish the two.
     """
-    from mcp.server.fastmcp.exceptions import ToolError
+    from mcp.server.mcpserver.exceptions import ToolError
 
     mcp = mcp_server_for(tmp_path)
     claim_scope = mcp._tool_manager.get_tool("claim_scope").fn
