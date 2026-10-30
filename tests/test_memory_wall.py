@@ -132,7 +132,7 @@ def test_the_feed_carries_labels_never_content_and_only_to_the_cleared(world):
     dana_events, _ = memory_events("dana")
     assert {e["payload"]["itemId"] for e in dana_events} == {world["walled"]["item_id"], world["open"]["item_id"]}
     for event in dana_events:
-        assert set(event["payload"]) == {"itemId", "label", "layer", "version", "action", "authority"}
+        assert set(event["payload"]) == {"itemId", "label", "layer", "space", "version", "action", "authority"}
     kofi_events, kofi_page = memory_events("kofi")
     assert [e["payload"]["itemId"] for e in kofi_events] == [world["open"]["item_id"]]
     assert kofi_page["count"] == len(kofi_page["events"])

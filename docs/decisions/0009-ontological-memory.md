@@ -7,7 +7,7 @@ memory channel is first used
 
 > A decision with no revisit condition is doctrine. Every record here carries one.
 
-Nothing in this record is built. It names the shape, the rules the shape must keep, and the
+Only spaces (§3) are built; see Order of build. The record names the shape, the rules the shape must keep, and the
 measurements that would show it is wrong before much of it is built.
 
 ## Context
@@ -243,16 +243,27 @@ In order of cost. Each can show the design is wrong.
 
 ## Order of build
 
+**Team spaces first (owner decision, 2026-10-30).** Spaces do not depend on the census or on entity
+facts: they are useful to 0006 lessons as they stand, and they are the part of this record a team
+using one hub feels first. The order below supersedes the original, which put spaces sixth.
+
 Each step stands on its own and is useful without the next:
 
-1. The census (validation 1). No code.
-2. Entity type registry; `subject`, `property` and `space` on items; validation at the write
-   boundary; protected properties.
-3. Resolution at `instantiate` into `sop_plan`, and `fact_unresolved`.
-4. Runtime side: read resolved facts into the step brief; report facts read in traces.
-5. The steward capability and the first steward ASOP (`memory-extract`, proposed tier).
-6. Spaces' visibility rules, promotion candidates, batch approval, constraint conflicts.
-7. Across hubs, over 0007's memory channel, once that channel exists.
+1. **Spaces** — **built**: `space` on every item (migration 0017; existing items read as the root);
+   a reader sees its own space and every ancestor, on every read path (list, search, get, history,
+   reviews, traces); writes land in the writer's own space only (`space_not_writable`); a declared
+   human moves an item up or back down its own line (`POST /memory/{id}/space`, a new version,
+   never sideways: `space_move_lateral`); a replica lands at the root. The actor's space comes from
+   the key table's `"space"`.
+2. The census (validation 1). No code.
+3. Entity type registry; `subject` and `property` on items; validation at the write boundary;
+   protected properties.
+4. Resolution at `instantiate` into `sop_plan`, and `fact_unresolved`.
+5. Runtime side: read resolved facts into the step brief; report facts read in traces.
+6. Promotion candidates (type, demand, convergence), batch approval through step 1's move verb,
+   constraint conflicts.
+7. The steward capability and the first steward ASOP (`memory-extract`, proposed tier).
+8. Across hubs, over 0007's memory channel, once that channel exists.
 
 ## Revisit condition
 

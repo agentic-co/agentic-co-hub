@@ -328,7 +328,10 @@ data to throttle on.
 
 Accepted as a design in [`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md).
 The item store, the wall and the usefulness engine are built **behind `AGENTCO_MEMORY`, off by
-default** (the rows above; [`docs/memory.md`](memory.md)). Owner decision 8 (2026-10-18):
+default** (the rows above; [`docs/memory.md`](memory.md)). Team **spaces** (ADR 0009 §3, built first by owner decision
+2026-10-30) are built too: a reader sees its own space and its ancestors, writes land in the
+writer's space, and a declared human widens or narrows an item along its own line
+([`docs/memory.md`](memory.md#built-spaces-inside-one-hub-adr-0009-3)). Owner decision 8 (2026-10-18):
 the three-valued verified outcome and holding shared-layer records in full are **confirmed**; every
 parameter value is **open** until real traces measure it. The original list, in dependency order:
 

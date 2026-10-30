@@ -25,12 +25,22 @@ labeled `(public, ...)` is the library everyone may read (ADR 0006 §1).
 
 This is a GATE, applied in code before any ranking or search, never a weight
 (§2). Nothing here asks a model to respect a label.
+
+**Spaces (ADR 0009 §3)** ride on the same object. An actor has a home space, a
+path such as `agency/team-delivery` (the key table's `"space"`, or
+`create_app(spaces=...)`; unstated is the hub's root, `""`). It sees items in
+that space and in every ancestor, merged, and nothing in a sibling's or a
+child's. A space is a SOFT wall, for relevance: it never widens what the owner
+grants allow, and anything that must be secret from another team belongs to a
+different owner. So narrowing by the hub's clearance keeps the actor's space —
+a hub has no space of its own to narrow it by.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional
 
@@ -46,6 +56,30 @@ HUB_CLEARANCE_ENV_VAR = "AGENTCO_HUB_CLEARANCE"
 #: a deployment sets its own with `AGENTCO_MEMORY_LEVELS`.
 DEFAULT_LEVELS: tuple[str, ...] = ("all", "internal", "confidential", "private")
 
+ROOT_SPACE = ""
+MAX_SPACE_DEPTH = 8
+_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def parse_space(value: object) -> str:
+    """A space path: `""` (the root) or `/`-joined short names, at most 8 deep."""
+    if value is None or value == ROOT_SPACE:
+        return ROOT_SPACE
+    if not isinstance(value, str):
+        raise ValueError("a space is a path string such as 'agency/team-delivery'")
+    segments = value.split("/")
+    if len(segments) > MAX_SPACE_DEPTH or not all(_SEGMENT.match(s) for s in segments):
+        raise ValueError(
+            f"space {value!r} is not a path of at most {MAX_SPACE_DEPTH} short names "
+            f"(letters, digits, '.', '_' or '-') joined by '/'"
+        )
+    return value
+
+
+def is_within(space: str, ancestor: str) -> bool:
+    """True when `ancestor` is `space` itself or one of its ancestors."""
+    return ancestor == ROOT_SPACE or space == ancestor or space.startswith(ancestor + "/")
+
 
 def levels_from_env() -> tuple[str, ...]:
     raw = os.environ.get(LEVELS_ENV_VAR, "")
@@ -59,8 +93,10 @@ class Clearance:
 
     grants: Mapping[str, str] = field(default_factory=dict)
     levels: tuple[str, ...] = DEFAULT_LEVELS
+    space: str = ROOT_SPACE
 
     def __post_init__(self) -> None:
+        parse_space(self.space)
         for owner, level in self.grants.items():
             if level not in self.levels:
                 raise ValueError(
@@ -82,13 +118,18 @@ class Clearance:
             return False
         return self.rank(level) <= self.rank(granted)
 
+    def sees_space(self, space: str) -> bool:
+        """The holder's own space and its ancestors; never a sibling or a child."""
+        return is_within(self.space, space)
+
     def narrow(self, other: "Clearance") -> "Clearance":
         """The per-owner minimum. An owner only one side grants is not granted."""
         out = {}
         for owner in set(self.grants) & set(other.grants):
             a, b = self.grants[owner], other.grants[owner]
             out[owner] = a if self.rank(a) <= self.rank(b) else b
-        return Clearance(out, self.levels)
+        # `other` is the actor's: the hub has no space to narrow it by.
+        return Clearance(out, self.levels, space=other.space)
 
     def as_dict(self) -> dict:
         return {PUBLIC: self.levels[-1], **dict(sorted(self.grants.items()))}
@@ -140,9 +181,10 @@ def actors_from_key_table(levels: tuple[str, ...]) -> dict[str, Clearance]:
         return {}
     out: dict[str, Clearance] = {}
     for actor, value in (data.items() if isinstance(data, dict) else ()):
-        if isinstance(value, dict) and value.get("clearance") is not None:
+        if isinstance(value, dict) and (value.get("clearance") is not None or value.get("space")):
             try:
-                out[str(actor)] = parse(value["clearance"], levels)
+                granted = parse(value.get("clearance"), levels)
+                out[str(actor)] = Clearance(granted.grants, levels, space=parse_space(value.get("space")))
             except ValueError:
                 out[str(actor)] = Clearance({}, levels)
     return out
@@ -173,12 +215,20 @@ class Clearances:
 
 def build(hub: Optional[Mapping[str, str]] = None,
           actors: Optional[Mapping[str, Mapping[str, str]]] = None,
-          levels: Optional[Iterable[str]] = None) -> Clearances:
-    """For `create_app`: injected values win, the environment fills the rest."""
+          levels: Optional[Iterable[str]] = None,
+          spaces: Optional[Mapping[str, str]] = None) -> Clearances:
+    """For `create_app`: injected values win, the environment fills the rest.
+    `spaces` (actor -> space) is injected beside `actors`, as the key table
+    carries both."""
     lv = tuple(levels) if levels is not None else levels_from_env()
     hub_c = parse(dict(hub), lv) if hub is not None else hub_from_env(lv)
-    if actors is not None:
-        return Clearances(hub_c, {a: parse(dict(g), lv) for a, g in actors.items()})
+    if actors is not None or spaces is not None:
+        spaces = dict(spaces or {})
+        grants = {a: parse(dict(g), lv) for a, g in (actors or {}).items()}
+        return Clearances(hub_c, {
+            a: Clearance(grants.get(a, Clearance({}, lv)).grants, lv, space=parse_space(spaces.get(a)))
+            for a in set(grants) | set(spaces)
+        })
     return Clearances(hub_c, actors_source=lambda: actors_from_key_table(lv))
 
 
