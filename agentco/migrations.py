@@ -811,6 +811,35 @@ _0014: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0015 — people's enrolled signing keys (ADR 0008 §3.2, agentco/humankeys.py).
+#
+# Public keys only: the hub never holds anything that can sign. `key_id` is
+# derived from the key itself, so the primary key is also what refuses one
+# public key under two people. A revoked row stays, because answers it signed
+# before revocation stay valid history and must keep naming a key.
+# --------------------------------------------------------------------------- #
+
+_0015: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS human_keys (
+        key_id         TEXT PRIMARY KEY,
+        human          TEXT NOT NULL,
+        alg            TEXT NOT NULL,
+        public_key     TEXT NOT NULL,
+        fingerprint    TEXT NOT NULL,
+        hub_uid        TEXT NOT NULL,
+        enrolled_by    TEXT NOT NULL,
+        enrolled_at    TEXT NOT NULL,
+        revoked_by     TEXT,
+        revoked_at     TEXT,
+        revoke_reason  TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_human_keys_human ON human_keys(human)",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -826,6 +855,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(12, "chain-manifests-adoptions-approvals", _0012),
     Migration(13, "memory-items", _0013),
     Migration(14, "memory-usefulness-and-decay", _0014),
+    Migration(15, "human-keys", _0015),
 )
 
 

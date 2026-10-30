@@ -241,6 +241,14 @@ envelope window with a confirm-by-fresh-signature grace to 36 h, removed people'
 reassigned by an administrator, titles shown with a per-company switch, presence check
 optional and off, push after v1.
 
+**Built so far, in §7's order:** the generated hub id and the attempt fence; the per-actor route
+allowlist and the partition credential's exact route set (§8 B2); `verify_attempt` and epoch 0
+(§8 S1, S2); and the operator's key directory, `agentco human-key enrol|revoke|list`
+(`agentco/humankeys.py`, migration 0015, the `envelope` extra): public keys only, local only,
+declared humans only, Ed25519 or ECDSA P-256, the fingerprint typed from a second channel, one key
+per person and never re-enrolled, each enrolment and revocation committed with its `HumanKey*`
+event. **Next:** the envelope itself — nonce table, `envelope_required` (B1), the runner's signer.
+
 Still open (owner decision 8, 2026-10-18): the **identity mechanism** — direction accepted, mechanism
 not chosen, confidence 0.55; revisit when a second organisation needs to connect a hub — and **credit
 across hubs** — not decided, no internal market; revisit when two hubs exchange work with different

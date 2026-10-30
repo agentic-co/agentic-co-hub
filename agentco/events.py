@@ -230,17 +230,39 @@ def append(
     a writer-side guard, not input validation — an unknown kind means a code
     path invented one, which the closed subscriber contract must not absorb.
     """
+    with conn:
+        return insert(conn, kind=kind, actor=actor, payload=payload, repo=repo,
+                      occurred_at=occurred_at, agent_label=agent_label)
+
+
+def insert(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    actor: str,
+    payload: dict[str, Any],
+    repo: Optional[str] = None,
+    occurred_at: Optional[str] = None,
+    agent_label: Optional[str] = None,
+) -> dict:
+    """`append` inside a transaction the CALLER holds.
+
+    For a write whose event is part of the fact: an enrolled key with no
+    `HumanKeyEnrolled` on the feed is a key the person's partition cannot see
+    arrive (agentco/humankeys.py), so the row and its event commit together or
+    not at all. `append`'s own `with conn:` would commit the caller's
+    transaction half-way through.
+    """
     if kind not in KINDS:
         raise ValueError(f"unknown event kind {kind!r} (known: {', '.join(KINDS)})")
     uid = f"evt_{uuid.uuid4().hex[:16]}"
     at = occurred_at or now_iso()
     body = json.dumps(payload, sort_keys=True)
-    with conn:
-        cur = conn.execute(
-            "INSERT INTO events(uid, kind, actor, agent_label, repo, occurred_at, payload) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (uid, kind, actor, agent_label, repo, at, body),
-        )
+    cur = conn.execute(
+        "INSERT INTO events(uid, kind, actor, agent_label, repo, occurred_at, payload) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (uid, kind, actor, agent_label, repo, at, body),
+    )
     return {
         "seq": cur.lastrowid,
         "uid": uid,

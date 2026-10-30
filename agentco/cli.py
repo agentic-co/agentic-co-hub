@@ -721,6 +721,54 @@ def cmd_hub_id(args) -> int:
     return 0
 
 
+def cmd_human_key(args) -> int:
+    """Enrol, revoke and list people's signing keys (ADR 0008 §3.2).
+
+    Local only, on purpose: there is no enrolment verb on the wire. Refusals
+    print their code and remediation and exit 1; nothing is written.
+    """
+    from asop.revision import humans_from_env
+
+    from agentco import humankeys
+    from agentco.errors import Refusal
+    from agentco.memory import resolve_hub_id
+
+    conn = _conn(args)
+    by = app_module.resolve_operator(getattr(args, "by", None))
+    try:
+        if args.action == "enrol":
+            with open(args.public_key, "rb") as handle:
+                data = handle.read()
+            keys = [humankeys.enrol(conn, human=args.human, public_key=data,
+                                    fingerprint=args.fingerprint, by=by,
+                                    humans=humans_from_env(), label=resolve_hub_id(None))]
+        elif args.action == "revoke":
+            if bool(args.key_id) == bool(args.human):
+                print("revoke takes a key id, or --human to revoke every key of one person",
+                      file=sys.stderr)
+                return 2
+            if args.key_id:
+                key, changed = humankeys.revoke(conn, key_id=args.key_id, by=by, reason=args.reason)
+                keys = [key] if changed else []
+                if not changed:
+                    print(f"{key.key_id} was already revoked at {key.revoked_at}; nothing changed",
+                          file=sys.stderr)
+            else:
+                keys = humankeys.revoke_all(conn, human=args.human, by=by, reason=args.reason)
+        else:
+            keys = humankeys.list_keys(conn, human=args.human)
+    except Refusal as refusal:
+        print(f"refused: {refusal.code}: {refusal.message}\n  {refusal.remediation}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps([k.to_dict() for k in keys], indent=2))
+    else:
+        for k in keys:
+            state = f"revoked {k.revoked_at} by {k.revoked_by}" if k.revoked else "active"
+            print(f"{k.key_id}  {k.human}  {k.alg}  {state}\n  fingerprint {k.fingerprint}")
+    return 0
+
+
 def cmd_verifiers(args) -> int:
     """The L3 operator surface: who is answering gates, and what is overdue.
 
@@ -1308,6 +1356,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_hub.add_argument("--db", default=None, help="registry database (default: $AGENTCO_REGISTRY_DB)")
     p_hub.add_argument("--json", action="store_true", help="machine-readable output")
     p_hub.set_defaults(func=cmd_hub_id)
+
+    p_hk = sub.add_parser(
+        "human-key",
+        help="enrol, revoke and list people's public signing keys (local only; no wire verb)",
+    )
+    hk_sub = p_hk.add_subparsers(dest="action", required=True)
+    hk_en = hk_sub.add_parser("enrol", help="enrol a person's public key, handed over out of band")
+    hk_en.add_argument("human", help="the person, exactly as declared in ASOP_HUMANS")
+    hk_en.add_argument("public_key", help="their PUBLIC key file (PEM or DER SubjectPublicKeyInfo)")
+    hk_en.add_argument("--fingerprint", required=True,
+                       help="the key's SHA-256 fingerprint as the person read it on a SECOND channel")
+    hk_rv = hk_sub.add_parser("revoke", help="revoke one key, or every key of one person")
+    hk_rv.add_argument("key_id", nargs="?", default=None)
+    hk_rv.add_argument("--human", default=None, help="revoke every live key of this person")
+    hk_rv.add_argument("--reason", default=None)
+    hk_ls = hk_sub.add_parser("list", help="the keys this hub holds, revoked ones included")
+    hk_ls.add_argument("--human", default=None)
+    for p in (hk_en, hk_rv, hk_ls):
+        p.add_argument("--db", default=None, help="registry database (default: $AGENTCO_REGISTRY_DB)")
+        p.add_argument("--json", action="store_true", help="machine-readable output")
+    for p in (hk_en, hk_rv):
+        p.add_argument("--by", default=None,
+                       help="the operator acting (default: $AGENTCO_REGISTRY_OPERATOR)")
+    p_hk.set_defaults(func=cmd_human_key)
 
     p_ver = sub.add_parser(
         "verifiers",
