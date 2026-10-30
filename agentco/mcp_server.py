@@ -62,8 +62,8 @@ import json
 import os
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from agentco import auth, db, events as events_module, leases, policy, scope, snapshots
 from agentco.errors import Refusal
@@ -423,7 +423,7 @@ def create_server(
     secret: Optional[str] = None,
     registry: Optional[Registry] = None,
     agent_label: Optional[str] = None,
-) -> FastMCP:
+) -> MCPServer:
     """Build the server. Paths/actor/registry are injectable so tests need no env vars.
 
     One `conn`/`queue`/`library` per server instance in local mode, closed over
@@ -483,7 +483,7 @@ def create_server(
             resolve_agent_label(agent_label),
         )
 
-    mcp = FastMCP(
+    mcp = MCPServer(
         name="agentco",
         instructions=(
             "Coordination primitives for a team running more than one agent "
