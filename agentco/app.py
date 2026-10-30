@@ -63,7 +63,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from agentco import verifiers as verifiers_module
-from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, events, leases, metrics, policy, snapshots, views
+from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, envelope, events, leases, metrics, policy, snapshots, views
 from agentco.errors import Refusal, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
@@ -154,6 +154,9 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
         "the fence, the idempotency key and the attestation"),
     ("POST", "/work/{item_id}/adjudicate"): wire.strict(
         ("verdict", "evidence"), "the adjudication record", refused_by_name=("adjudicator", "by")),
+    ("POST", "/answers"): wire.strict(
+        ("envelope", "signature"), "the signed answer: a dropped key changes what was signed"),
+    ("GET", "/answers/{key_id}/{nonce}"): wire.lenient(),
     ("POST", "/work/{item_id}/attest"): wire.strict(
         ("attestation", "capabilities", "adjudication", "epoch", "verifyAttempt", "idempotencyKey"),
         "the gate's evidence, the ownership epoch, the verify attempt and the idempotency key"),
@@ -379,6 +382,8 @@ def create_app(
     # the queue for everything they hold — which is what both of them do when
     # asked, and what a fleet of a hundred pollers cannot afford.
     queue.announce = library.announce = events.announcer(conn)
+    # ADR 0008 §8 B1: a person with an enrolled key answers by envelope only.
+    queue.envelope_required_for = envelope.required_for(conn)
     if memory is not None:
         # Off (AGENTCO_MEMORY), there is no store, so nothing can announce a
         # memory event: the feed never carries one.
@@ -545,6 +550,9 @@ def create_app(
             ignored = wire.check(policy, payload, verb=verb, ignored=app.state.ignored) if policy else []
 
             result = work(actor, payload)
+            # A handler may answer with another success status (a held answer
+            # is 202); the key never reaches the client.
+            status_code = result.pop("_status", 200) if isinstance(result, dict) else 200
             if ignored and isinstance(result, dict):
                 result = {**result, "ignored": ignored}
             elapsed = (time.perf_counter() - started) * 1000
@@ -557,7 +565,7 @@ def create_app(
                 agent_label=payload.get("agentLabel") or label,
                 via=via,
             )
-            return JSONResponse(result)
+            return JSONResponse(result, status_code=status_code)
 
         except Refusal as refusal:
             elapsed = (time.perf_counter() - started) * 1000
@@ -665,6 +673,47 @@ def create_app(
             return {"state": "accepted", "hubId": app.state.hub_uid, "label": queue.hub_id}
 
         return await _handle(request, "hub_get", work)
+
+    @app.post("/answers")
+    async def post_answer(request: Request) -> JSONResponse:
+        """A person's signed answer to a human gate (ADR 0008 §3.3, agentco/envelope.py).
+
+        `{"envelope": "<the payload's JSON text>", "signature": "<base64>"}`.
+        The carrier is whoever signed the request; a transport-class credential
+        carries only its own party's answers. Applied answers return the item;
+        an answer in its grace window is HELD (202) with nothing touched.
+        """
+
+        def work(actor: str, payload: dict) -> dict:
+            result = envelope.submit(
+                conn, queue, envelope=payload.get("envelope"), signature=payload.get("signature"),
+                via=actor, hub_uid=app.state.hub_uid,
+                transport_party=app.state.routes.transport_party(actor),
+            )
+            body = {"state": "accepted" if result["state"] == "applied" else result["state"],
+                    "answer": result["state"], "receipt": result["receipt"]}
+            if result.get("item") is not None:
+                body["item"] = result["item"]
+            if result["state"] == "held":
+                body["_status"] = 202
+            return body
+
+        return await _handle(request, "answer_submit", work)
+
+    @app.get("/answers/{key_id}/{nonce}")
+    async def get_answer_receipt(key_id: str, nonce: str, request: Request) -> JSONResponse:
+        """What became of one envelope — for the actor that carried it only."""
+
+        def work(actor: str, payload: dict) -> dict:
+            found = envelope.receipt(conn, key_id, nonce)
+            if found is None or found["via"] != actor:
+                # Someone else's receipt answers exactly as a missing one does.
+                raise Refusal(code="unknown_receipt", message=f"no receipt {key_id}/{nonce} for {actor!r}",
+                              remediation="Ask with the credential that carried the answer.",
+                              http_status=404)
+            return {"state": "accepted", "receipt": found}
+
+        return await _handle(request, "answer_receipt", work)
 
     @app.get("/views/me")
     async def get_view_me(request: Request) -> JSONResponse:

@@ -42,15 +42,13 @@ with `"class"` in the same object form, and is a different thing from `routes`:
     party, no other query parameter; `GET /work/{id}` for its party's vehicles
     and what they verify; `GET /events` for `HumanKey*` kinds only. A `routes`
     list beside `class` can only NARROW that set, never widen it.
-  * `TRANSPORT_ANSWER_VERBS` is where the answer route and its receipts join
-    once they exist; it is empty today.
+  * `TRANSPORT_ANSWER_VERBS`: `POST /answers` and `GET /answers/{key_id}/{nonce}`
+    (agentco/envelope.py). The answer route takes only its party's signed
+    answers; the receipt read only what this credential carried.
 
-**Reserved group `transport`.** The answer route and its receipts do not exist
-yet (envelope work builds them). The name is reserved now so a table written
-today does not change meaning when they land; `PROFILES["transport"]` is
-EMPTY today, so `"routes": ["transport"]` reaches nothing, and it will expand to
-the answer route and the receipts read in the same change that adds them. Until
-then name the verbs you mean.
+**Group `transport`.** `"routes": ["transport"]` expands to the answer route
+and its receipts read: what a relay needs when it is not a transport-class
+credential but should reach no more than one.
 """
 
 from __future__ import annotations
@@ -66,7 +64,7 @@ from agentco.errors import Refusal
 #: and fails when this and the verbs it uses differ in either direction, so a
 #: route added without a decision here cannot ship.
 VERBS: frozenset[str] = frozenset({
-    "adjudicate", "approval_get", "approval_record", "attest", "chain_adopt", "chain_get",
+    "adjudicate", "answer_receipt", "answer_submit", "approval_get", "approval_record", "attest", "chain_adopt", "chain_get",
     "chain_impact", "chain_manifest", "claim_scope", "digest_receive", "divergence", "events",
     "hub_get", "memory_clearance", "memory_create", "memory_get", "memory_history", "memory_list",
     "memory_pin", "memory_rate", "memory_reconsolidate", "memory_replay", "memory_retire",
@@ -77,11 +75,11 @@ VERBS: frozenset[str] = frozenset({
     "view_me", "work_create", "work_get", "work_list", "work_pull", "work_renew", "work_report",
 })
 
-#: Reserved verb groups (see the module docstring). Empty today, on purpose.
-PROFILES: dict[str, frozenset[str]] = {"transport": frozenset()}
+#: The answer route and the receipts read (ADR 0008 §8 B2).
+TRANSPORT_ANSWER_VERBS: frozenset[str] = frozenset({"answer_submit", "answer_receipt"})
 
-#: The answer route and the receipts read, once the envelope work adds them.
-TRANSPORT_ANSWER_VERBS: frozenset[str] = frozenset()
+#: Named verb groups (see the module docstring).
+PROFILES: dict[str, frozenset[str]] = {"transport": TRANSPORT_ANSWER_VERBS}
 
 #: Every verb a `"class": "transport"` credential may reach at all.
 TRANSPORT_VERBS: frozenset[str] = frozenset({"hub_get", "work_list", "work_get", "events"}) | TRANSPORT_ANSWER_VERBS
