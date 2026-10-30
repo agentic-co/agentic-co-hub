@@ -106,8 +106,8 @@ def test_an_unknown_name_grants_nothing(client, keyfile):
     assert call(client, "relay", "GET", "/events").json()["code"] == "route_not_allowed"
 
 
-def test_the_transport_group_is_reserved_and_reaches_nothing_today(client, keyfile):
-    assert authz.PROFILES["transport"] == frozenset()
+def test_the_transport_group_reaches_the_answer_route_and_receipts_only(client, keyfile):
+    assert authz.PROFILES["transport"] == frozenset({"answer_submit", "answer_receipt"})
     _write(keyfile, {"routes": ["transport"]})
     assert call(client, "relay", "GET", "/events").json()["code"] == "route_not_allowed"
     _write(keyfile, {"routes": ["transport", "events"]})

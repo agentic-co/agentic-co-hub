@@ -247,7 +247,12 @@ allowlist and the partition credential's exact route set (§8 B2); `verify_attem
 (`agentco/humankeys.py`, migration 0015, the `envelope` extra): public keys only, local only,
 declared humans only, Ed25519 or ECDSA P-256, the fingerprint typed from a second channel, one key
 per person and never re-enrolled, each enrolment and revocation committed with its `HumanKey*`
-event. **Next:** the envelope itself — nonce table, `envelope_required` (B1), the runner's signer.
+event; and the signed answer itself, `POST /answers` ([`docs/envelope.md`](envelope.md),
+`agentco/envelope.py`, migration 0016): the `asop.answer/1` contract with published vectors, the
+nonce table with two-store recovery, held answers in the grace window, and `envelope_required` (B1)
+closing the unsigned path on every transport once a person has a key. **Next:** the grace
+confirmation flow (S4), gate reassignment (Decision 4), then the first end-to-end loop with the
+partition's signer.
 
 Still open (owner decision 8, 2026-10-18): the **identity mechanism** — direction accepted, mechanism
 not chosen, confidence 0.55; revisit when a second organisation needs to connect a hub — and **credit

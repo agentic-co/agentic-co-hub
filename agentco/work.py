@@ -1284,6 +1284,11 @@ class Queue:
     #: would make the same act mean different things by route.
     announce: Optional[Callable[[str, str, dict], None]] = None
 
+    #: ADR 0008 §8 B1: whether a named human must answer by signed envelope
+    #: (`agentco.envelope.required_for`). Wired beside `announce` from the same
+    #: registry; None, as in a bare queue, keeps the unsigned path open.
+    envelope_required_for: Optional[Callable[[str], bool]] = None
+
     #: A write the plane performed rather than a person. `create` takes no
     #: actor — a filer is not modelled — so `WorkFiled` is the plane observing
     #: its own queue, which is what `events.PLANE_ACTOR` is reserved for, and
@@ -2175,8 +2180,19 @@ class Queue:
         epoch: Optional[int] = None,
         idempotency_key: Optional[str] = None,
         verify_attempt: Optional[int] = None,
+        envelope: Optional[dict] = None,
     ) -> Optional[WorkItem]:
         """Answer a gate. The only transition out of a verify state.
+
+        **Signed answers (ADR 0008 §3, §8 B1).** `envelope` is passed by
+        `agentco.envelope.submit` only, after it checked the signature, and is
+        stored on the attestation as the record of who signed what. Once the
+        human a gate names has a key enrolled on this hub
+        (`envelope_required_for`, wired by whoever builds the plane), an answer
+        to that gate WITHOUT one is refused `envelope_required`: the hub holds
+        the person's HMAC secret, so an unsigned answer in their name is one
+        the hub could have written itself. Until they enrol, the unsigned path
+        behaves as before, and its attestation reads as legacy (no envelope).
 
         **The verify attempt (ADR 0008 §8 S1).** `verify_attempt` is the item's
         `verify_failures` as the attester read it. Present, it must equal the
@@ -2426,6 +2442,21 @@ class Queue:
                         "boundary is not the only boundary."
                     ),
                 )
+            if (gate.get("kind") == "human" and named and envelope is None
+                    and self.envelope_required_for is not None and self.envelope_required_for(named)):
+                raise Refusal(
+                    code="envelope_required",
+                    message=(
+                        f"{item.id}'s human gate names {named!r}, who has a signing key on this "
+                        f"hub, so an unsigned answer is refused"
+                    ),
+                    remediation=(
+                        "Answer from the person's partition: it signs an asop.answer/1 envelope "
+                        "and its transport sends it to POST /answers. An answer the hub could "
+                        "have written itself is not the person's answer."
+                    ),
+                    http_status=403,
+                )
             if gate.get("kind") == "human" and named and submitted_by != named:
                 raise Refusal(
                     code=gates.ATTESTATION_INVALID,
@@ -2499,6 +2530,10 @@ class Queue:
                 )
 
             record = gates.validate_attestation(attestation, gate=gate, submitted_by=submitted_by)
+            if envelope is not None:
+                # Beside the validated fields, never through the validator: the
+                # contract's attestation has no such field (0008 Decision 1 = A).
+                record = {**record, "envelope": envelope}
             metadata = dict(item.metadata or {})
             metadata["verify_verdict"] = {
                 "verified_by": submitted_by,

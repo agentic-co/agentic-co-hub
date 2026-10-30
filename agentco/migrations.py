@@ -840,6 +840,36 @@ _0015: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0016 — the nonce table for signed answers (ADR 0008 §3.3, agentco/envelope.py).
+#
+# One row per (key, nonce): what arrived, its digest, and what became of it —
+# `received` (committed BEFORE the attestation, so a crash between the two is
+# resumable), then `applied`, `refused` or `held`. `arrived_epoch` is integer
+# seconds so collection compares numbers on both backends.
+# --------------------------------------------------------------------------- #
+
+_0016: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS answer_nonces (
+        key_id          TEXT NOT NULL,
+        nonce           TEXT NOT NULL,
+        digest          TEXT NOT NULL,
+        item_id         TEXT NOT NULL,
+        verify_attempt  INTEGER NOT NULL,
+        status          TEXT NOT NULL,
+        via             TEXT NOT NULL,
+        arrived_at      TEXT NOT NULL,
+        arrived_epoch   BIGINT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        receipt         TEXT,
+        PRIMARY KEY (key_id, nonce)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_answer_nonces_arrived ON answer_nonces(arrived_epoch)",
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -856,6 +886,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(13, "memory-items", _0013),
     Migration(14, "memory-usefulness-and-decay", _0014),
     Migration(15, "human-keys", _0015),
+    Migration(16, "answer-nonces", _0016),
 )
 
 

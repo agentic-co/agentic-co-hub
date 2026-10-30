@@ -469,6 +469,11 @@ def create_server(
         # feed that heard only one of them would be a feed nobody can trust to
         # be complete. The conformance suite compares exactly this.
         _queue.announce = _library.announce = events_module.announcer(_conn)
+        # ADR 0008 §8 B1, the same rule as over HTTP: no unsigned answer for a
+        # person with an enrolled key, whichever transport carried it.
+        from agentco import envelope as envelope_module
+
+        _queue.envelope_required_for = envelope_module.required_for(_conn)
         backend = _LocalBackend(
             _conn,
             _queue,
