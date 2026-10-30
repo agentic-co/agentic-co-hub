@@ -42,7 +42,13 @@ postgres = [
     # backend existed to lift.
     "psycopg-pool>=3.2",
 ]
-dev = ["pytest>=8.0"]
+# People's signing keys and, later, the envelopes they sign (ADR 0008 §3,
+# agentco/humankeys.py). Optional like `postgres`: a hub that never enrols a
+# key never needs it, and enrolment refuses `crypto_unavailable` without it.
+envelope = ["cryptography>=42"]
+# `cryptography` is here too so the key tests run in CI, not only where some
+# other extra happens to pull it in.
+dev = ["pytest>=8.0", "cryptography>=42"]
 # The ASOP eval harness (`evals/`, not shipped in the wheel). LiteLLM is a
 # heavy transitive tree and only the harness needs it — an adopter running
 # the coordination layer must never pay for an experiment they are not
