@@ -652,12 +652,13 @@ def check_stranded_steps(
             continue  # not ready yet; waiting on a step is not being stranded
         if item.leased_by or (item.metadata or {}).get("claims"):
             continue  # somebody has pulled it; this is about the ones nobody has
-        ready_since = max(
-            [_parse_at(item.created_at)]
-            + [_parse_at(b.updated_at) for b in blockers if b is not None]  # pyright: ignore[reportArgumentType] -- None (unparseable timestamp) would raise here
-        )
-        if ready_since is None:
+        stamps = [_parse_at(item.created_at)] + [_parse_at(b.updated_at) for b in blockers if b is not None]
+        if any(stamp is None for stamp in stamps):
+            # An unparseable timestamp means "ready since" cannot be derived for
+            # THIS item. It is skipped; `max()` over a None used to raise and
+            # take the whole check down with it (found by pyright).
             continue
+        ready_since = max(s for s in stamps if s is not None)
         waited = int((now - ready_since).total_seconds())
         expected = cadences.get(actor, DEFAULT_STRANDED_SECONDS)
         rows.append({

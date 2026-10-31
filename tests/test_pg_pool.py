@@ -167,3 +167,16 @@ def test_a_nonsense_bound_does_not_stop_the_registry_starting(monkeypatch):
     monkeypatch.setenv(pgadapter.POOL_MAX_ENV_VAR, "not-a-number")
     monkeypatch.setenv(pgadapter.POOL_MIN_ENV_VAR, "99")
     assert pgadapter._pool_bounds() == (pgadapter.DEFAULT_POOL_MAX, pgadapter.DEFAULT_POOL_MAX)
+
+
+def test_executemany_works_outside_and_inside_a_transaction(conn):
+    """psycopg puts `executemany` on a cursor, not the connection; both of the
+    adapter's branches called it on the connection (found by pyright)."""
+    conn.execute("CREATE TABLE IF NOT EXISTS em_test (k TEXT PRIMARY KEY, v INTEGER)")
+    conn.execute("DELETE FROM em_test")
+    conn.executemany("INSERT INTO em_test (k, v) VALUES (?, ?)", [("a", 1), ("b", 2)])
+    with conn:
+        conn.executemany("INSERT INTO em_test (k, v) VALUES (?, ?)", [("c", 3)])
+    rows = conn.execute("SELECT k, v FROM em_test ORDER BY k").fetchall()
+    assert [(r["k"], r["v"]) for r in rows] == [("a", 1), ("b", 2), ("c", 3)]
+    conn.execute("DROP TABLE em_test")
