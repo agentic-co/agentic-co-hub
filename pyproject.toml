@@ -48,7 +48,7 @@ postgres = [
 envelope = ["cryptography>=42"]
 # `cryptography` is here too so the key tests run in CI, not only where some
 # other extra happens to pull it in.
-dev = ["pytest>=8.0", "cryptography>=42"]
+dev = ["pytest>=8.0", "cryptography>=42", "hypothesis>=6.100"]
 # The ASOP eval harness (`evals/`, not shipped in the wheel). LiteLLM is a
 # heavy transitive tree and only the harness needs it — an adopter running
 # the coordination layer must never pay for an experiment they are not
