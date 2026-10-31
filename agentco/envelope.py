@@ -36,8 +36,17 @@ with `submitted_by` = the person and the envelope beside it.
 in the future is `envelope_future`; up to `fresh` (default 24 h) applies;
 between `fresh` and `fresh + grace` (grace defaults to half of fresh) is HELD —
 neither applied nor refused, the slot kept, nothing about the item touched —
-for the owner to confirm with a fresh envelope (S4, the next build step);
-older is `envelope_expired`.
+for the owner to confirm with a fresh envelope (S4); older is
+`envelope_expired`.
+
+**The grace confirmation (S4).** `held_for` lists a person's held answers by
+slot `(item, verify_attempt)` and digest, and never their verdict: the
+partition takes the verdict from its OWN stored envelope for that slot, and
+with none it shows "the hub reports an answer you did not send" and offers no
+confirm. Confirming is an ordinary NEW `asop.answer/1`, fresh, with a new
+nonce; when it applies, every held envelope for the same slot is recorded
+`expired`, naming the answer that superseded it, and none of their content
+touches the item.
 
 **Two stores, no shared transaction (S5).** The nonce table is in the registry
 database and the attestation in the work store. The order is: nonce row
@@ -400,8 +409,38 @@ def submit(conn, queue, *, envelope: Any, signature: Any, via: str, hub_uid: str
     stored = _settle(conn, key.key_id, payload["nonce"], "applied", {
         "item": updated.id, "status": updated.status.value, "verifyFailures": updated.verify_failures,
     }, at)
+    _expire_held(conn, payload, key.key_id, at)
     return {"state": "applied", "receipt": {**receipt(conn, key.key_id, payload["nonce"]), "receipt": stored},
             "item": json.loads(updated.to_json())}
+
+
+def _expire_held(conn, payload: dict, key_id: str, at: datetime) -> None:
+    """S4: an answer applied for a slot ends every held envelope for that slot."""
+    superseded = json.dumps({"supersededBy": {"keyId": key_id, "nonce": payload["nonce"]}}, sort_keys=True)
+    with conn:
+        conn.execute(
+            "UPDATE answer_nonces SET status = 'expired', receipt = ?, updated_at = ? "
+            "WHERE status = 'held' AND item_id = ? AND verify_attempt = ?",
+            (superseded, _iso(at), payload["item"], payload["verify_attempt"]),
+        )
+
+
+def held_for(conn, human: str) -> list[dict]:
+    """The held answers signed by `human`'s keys, oldest first: the slot, the
+    digest, when it arrived — never the verdict (S4)."""
+    key_ids = [k.key_id for k in humankeys.list_keys(conn, human=human)]
+    if not key_ids:
+        return []
+    marks = ", ".join("?" for _ in key_ids)
+    rows = conn.execute(
+        f"SELECT key_id, nonce, item_id, verify_attempt, digest, arrived_at FROM answer_nonces "
+        f"WHERE status = 'held' AND key_id IN ({marks}) ORDER BY arrived_epoch, nonce",
+        tuple(key_ids),
+    ).fetchall()
+    return [{"keyId": r["key_id"], "nonce": r["nonce"], "item": r["item_id"],
+             "verifyAttempt": r["verify_attempt"], "digest": r["digest"], "arrivedAt": r["arrived_at"],
+             "message": "needs your validation: confirm with a fresh envelope signed from your own record"}
+            for r in rows]
 
 
 def required_for(conn):

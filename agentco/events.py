@@ -139,6 +139,9 @@ KINDS = (
     # (agentco/ownership.py): from, to, the new epoch, the reason, and the leases
     # it voided. The record of who did it is on the run; this is the notice.
     "RunTransferred",
+    # `GateReassigned` — a declared admin moved the open human gates naming one
+    # person to another (ADR 0008 Decision 4): from, to, the reason, the items.
+    "GateReassigned",
 )
 
 #: Kinds whose rows are filtered by the reader's clearance on the way out.

@@ -42,9 +42,10 @@ with `"class"` in the same object form, and is a different thing from `routes`:
     party, no other query parameter; `GET /work/{id}` for its party's vehicles
     and what they verify; `GET /events` for `HumanKey*` kinds only. A `routes`
     list beside `class` can only NARROW that set, never widen it.
-  * `TRANSPORT_ANSWER_VERBS`: `POST /answers` and `GET /answers/{key_id}/{nonce}`
-    (agentco/envelope.py). The answer route takes only its party's signed
-    answers; the receipt read only what this credential carried.
+  * `TRANSPORT_ANSWER_VERBS`: `POST /answers`, `GET /answers/{key_id}/{nonce}`
+    and `GET /answers/held` (agentco/envelope.py). The answer route takes only
+    its party's signed answers; the receipt read only what this credential
+    carried; the held list only its party's, without verdicts.
 
 **Group `transport`.** `"routes": ["transport"]` expands to the answer route
 and its receipts read: what a relay needs when it is not a transport-class
@@ -64,8 +65,9 @@ from agentco.errors import Refusal
 #: and fails when this and the verbs it uses differ in either direction, so a
 #: route added without a decision here cannot ship.
 VERBS: frozenset[str] = frozenset({
-    "adjudicate", "answer_receipt", "answer_submit", "approval_get", "approval_record", "attest", "chain_adopt", "chain_get",
+    "adjudicate", "answer_held", "answer_receipt", "answer_submit", "approval_get", "approval_record", "attest", "chain_adopt", "chain_get",
     "chain_impact", "chain_manifest", "claim_scope", "digest_receive", "divergence", "events",
+    "gate_reassign",
     "hub_get", "memory_clearance", "memory_create", "memory_get", "memory_history", "memory_list",
     "memory_pin", "memory_rate", "memory_reconsolidate", "memory_replay", "memory_retire",
     "memory_revise", "memory_revive", "memory_reviews", "memory_search", "memory_space", "memory_state",
@@ -76,7 +78,7 @@ VERBS: frozenset[str] = frozenset({
 })
 
 #: The answer route and the receipts read (ADR 0008 §8 B2).
-TRANSPORT_ANSWER_VERBS: frozenset[str] = frozenset({"answer_submit", "answer_receipt"})
+TRANSPORT_ANSWER_VERBS: frozenset[str] = frozenset({"answer_submit", "answer_receipt", "answer_held"})
 
 #: Named verb groups (see the module docstring).
 PROFILES: dict[str, frozenset[str]] = {"transport": TRANSPORT_ANSWER_VERBS}
