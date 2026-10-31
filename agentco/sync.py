@@ -214,4 +214,5 @@ def registry_from_env() -> Any:
             "A harness syncs procedures from the hub it is a worker on — "
             "`agentco keygen <actor>` mints the secret, and the operator names the URL."
         )
+    assert url and actor and secret  # `missing` above is empty only when all three are set
     return Registry(actor, secret, url)

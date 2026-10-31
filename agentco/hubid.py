@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from typing import Optional
+from typing import Optional, TypeGuard
 
 from agentco.errors import Refusal
 
@@ -30,7 +30,7 @@ UNBOUND_LABEL = "local"
 _SHAPE = re.compile(r"^[0-9a-f]{32}$")
 
 
-def _valid(value: object) -> bool:
+def _valid(value: object) -> TypeGuard[str]:
     return isinstance(value, str) and _SHAPE.match(value) is not None
 
 

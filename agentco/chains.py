@@ -263,6 +263,7 @@ def impact(conn, chain: str, to: str) -> dict:
     if current is None:
         raise _unknown_chain(chain)
     old, new = _manifest(conn, current), _manifest(conn, to)
+    assert old is not None  # the chain's current digest always names a recorded manifest
     if new is None or new["chain"] != chain:
         raise manifest_unknown(
             f"no manifest {to} is recorded for chain {chain!r}",
@@ -297,6 +298,7 @@ def adopt(conn, *, chain: str, to: str, actor: str, humans: Iterable[str],
         )
     preview = impact(conn, chain, to)
     old, new = _manifest(conn, preview["from"]), _manifest(conn, to)
+    assert old is not None and new is not None  # `impact` above refused if either was missing
     record = {
         "schema": ADOPTION_SCHEMA,
         "chain": chain,
@@ -357,6 +359,7 @@ def pin_for_run(conn, chain: str, asop_id: str, version: Optional[int]) -> tuple
     if current is None:
         raise _unknown_chain(chain)
     manifest = _manifest(conn, current)
+    assert manifest is not None  # the chain's current digest always names a recorded manifest
     pinned = next((m["version"] for m in manifest["members"] if m["asop_id"] == asop_id), None)
     if pinned is None or (version is not None and not is_pinned(manifest, asop_id, version)):
         asked = f"v{version}" if version is not None else "any version"

@@ -71,6 +71,10 @@ import re
 import threading
 from typing import Any, Optional, Sequence
 
+# Declared `Any` so the checker does not treat the optional extra as always
+# present, nor the `None` fallback below as a type error at every use.
+psycopg: Any
+ConnectionPool: Any
 try:
     import psycopg
     import psycopg.errors
@@ -440,7 +444,7 @@ class PgConnection:
             self._local.conn.executemany(translated, rows)
             return
         with self._pool.connection() as conn:
-            conn.executemany(translated, rows)
+            conn.executemany(translated, rows)  # pyright: ignore[reportAttributeAccessIssue] -- unused today; psycopg Connection has no executemany (needs a cursor)
 
     def commit(self) -> None:
         """Only meaningful inside a transaction now.
