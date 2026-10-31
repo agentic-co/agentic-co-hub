@@ -227,8 +227,8 @@ def store(backend, tmp_path, request):
 
 
 def expect_jsonl_gap(backend, request):
-    if backend == "jsonl":
-        request.applymarker(pytest.mark.xfail(strict=True, reason=JSONL_AUDIT_GAP, raises=AssertionError))
+    """F1 is fixed (`_record` writes the audit row first); kept so the two
+    tests read as they were written against the defect."""
 
 
 def lesson(store, **over):
@@ -279,6 +279,28 @@ def test_revise_failing_between_the_item_and_its_audit_row_leaves_no_audit_gap(
 
     store.revise(item.item_id, actor="kofi", clearance=ACME, body="Retry twice, really.")
     assert_every_item_is_audited(store)
+
+
+def test_an_item_write_failing_after_its_audit_row_leaves_history_true(store):
+    """F1's other side, now that the audit row is written first: the item write
+    fails after it. The orphan row describes a version the item never reached,
+    so history must not show it, and the retry's own row is the one kept."""
+    item = lesson(store)
+    real = store._put
+
+    def fail_put(_item):
+        raise RuntimeError("injected fault: after the audit row")
+
+    store._put = fail_put
+    with pytest.raises(RuntimeError, match="injected fault"):
+        store.revise(item.item_id, actor="kofi", clearance=ACME, body="Retry twice.")
+    store._put = real
+
+    assert store.get(item.item_id, ACME).version == 1
+    assert audit_versions(store, item.item_id) == [1], "an unapplied attempt is not history"
+    store.revise(item.item_id, actor="kofi", clearance=ACME, body="Retry twice, really.")
+    assert_every_item_is_audited(store)
+    assert store.history(item.item_id, ACME)[-1]["record"]["body"] == "Retry twice, really."
 
 
 def test_a_failing_announcement_never_separates_an_item_from_its_audit_row(store):
@@ -346,12 +368,6 @@ def test_a_drain_that_dies_after_publishing_republishes_and_the_hub_records_once
     assert box.pending() == [] and len(box.read_receipts()) == 1
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "REAL DEFECT (known-issues F2): Outbox.settle rewrites the outbox WITHOUT the settled "
-    "lines first and appends their receipts second. A failure between the two leaves lines "
-    "removed from the outbox with no receipt anywhere: the publish happened, the agent that "
-    "wrote the line is long gone, and the receipt was the only way it could ever learn the "
-    "outcome. A re-drain has nothing to republish, so nothing repairs it."))
 def test_a_settle_that_fails_after_removing_the_lines_does_not_lose_their_receipts(box, queue):
     item = queue.create("work")
     queue.claim(item.id, "alice")
@@ -582,11 +598,6 @@ def test_sqlite_queue_killed_inside_a_transaction_rolls_back(tmp_path):
     reopened.close()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "REAL DEFECT (known-issues F3): Outbox.push appends with open(..., 'ab') and never checks "
-    "that the file ends in a newline. After a process dies mid-line, the NEXT push is written "
-    "onto the torn fragment, so one crash costs the fragment AND the next good line (both are "
-    "quarantined as one unparseable line)."))
 def test_outbox_push_after_a_killed_push_is_not_lost(tmp_path):
     """`tests/test_outbox_concurrency.py` proves a torn tail costs exactly one
     line when DRAINED. This is the other half: a line pushed AFTER the crash must
@@ -597,10 +608,11 @@ def test_outbox_push_after_a_killed_push_is_not_lost(tmp_path):
 
     run_script(f"""
         import sys
+        import agentco.appendlog as al
         import agentco.outbox as ob
         {textwrap.indent(textwrap.dedent(TORN), "        ").lstrip()}
         real = open
-        ob.open = lambda p, mode="r", *a, **k: Torn(real(p, mode, *a, **k)) if mode == "ab" else real(p, mode, *a, **k)
+        al.open = lambda p, mode="r", *a, **k: Torn(real(p, mode, *a, **k)) if mode == "a+b" else real(p, mode, *a, **k)
         ob.Outbox(sys.argv[1]).push("claim_scope", {claim!r})
     """, str(box.dir))
     assert not box.path.read_bytes().endswith(b"\n"), "the file really is torn"
@@ -614,11 +626,6 @@ def test_outbox_push_after_a_killed_push_is_not_lost(tmp_path):
     assert result["quarantined"] == 1, "only the torn fragment is quarantined"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "REAL DEFECT (known-issues F4): MemoryStore._audit (and the credits ledger, same shape) "
-    "appends without checking for a trailing newline. After a death mid-line the next audit row "
-    "is glued onto the fragment and `_audits` silently skips it (`except ValueError: continue`): "
-    "the provenance of every item written after the crash starts one row short."))
 def test_memory_audit_appended_after_a_killed_audit_write_is_not_lost(tmp_path):
     """The JSONL memory audit log is append-only. Killed mid-line, the next
     audit row must start on a fresh line, or the next item's history is silently
@@ -629,11 +636,12 @@ def test_memory_audit_appended_after_a_killed_audit_write_is_not_lost(tmp_path):
 
     run_script("""
         import sys
+        import agentco.appendlog as al
         import agentco.memory as mem
         from agentco.clearance import Clearance
         """ + textwrap.indent(textwrap.dedent(TORN), "        ").lstrip() + """
         real = open
-        mem.open = lambda p, mode="r", *a, **k: Torn(real(p, mode, *a, **k)) if str(p).endswith(".audit") else real(p, mode, *a, **k)
+        al.open = lambda p, mode="r", *a, **k: Torn(real(p, mode, *a, **k)) if str(p).endswith(".audit") else real(p, mode, *a, **k)
         store = mem.MemoryStore(sys.argv[1], hub_id="hub-a")
         store.create(actor="kofi", clearance=Clearance({"acme": "internal"}, ("all", "internal", "confidential", "private")),
                      owner="acme", level="internal", layer="shared", title="dies", body="b",
@@ -646,3 +654,18 @@ def test_memory_audit_appended_after_a_killed_audit_write_is_not_lost(tmp_path):
     assert [e["action"] for e in store.history(survivor.item_id, ACME)] == ["create"], (
         "the audit row written after the crash was glued onto the torn fragment and is unreadable")
     assert [e["action"] for e in store.history(kept.item_id, ACME)] == ["create"]
+
+
+def test_appendlog_starts_a_fresh_line_after_a_torn_tail(tmp_path):
+    """The shared helper behind F3/F4, directly: a torn tail stays its own line,
+    the new record lands whole, an intact file gets no blank line, and an empty
+    append writes nothing."""
+    from agentco import appendlog
+
+    path = tmp_path / "log.jsonl"
+    appendlog.append_lines(path, [b'{"a":1}'])
+    appendlog.append_lines(path, [])
+    assert path.read_bytes() == b'{"a":1}\n'
+    path.write_bytes(path.read_bytes() + b'{"torn":')
+    appendlog.append_lines(path, [b'{"b":2}', b'{"c":3}'])
+    assert path.read_bytes().split(b"\n") == [b'{"a":1}', b'{"torn":', b'{"b":2}', b'{"c":3}', b""]

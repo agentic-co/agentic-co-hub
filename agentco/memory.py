@@ -55,7 +55,7 @@ from agentco.clearance import PUBLIC, ROOT_SPACE, Clearance, is_within, not_clea
 from agentco.errors import Refusal
 from agentco.events import now_iso
 from agentco.filelock import lock_exclusive, unlock
-from agentco import memory_engine as engine
+from agentco import appendlog, memory_engine as engine
 
 LAYERS = ("session", "episodic", "personal", "shared", "public")
 HELD_LAYERS = ("personal", "shared", "public")
@@ -346,23 +346,26 @@ class MemoryStore:
             raise
 
     def _audit(self, entry: dict) -> None:
-        with open(self.audit_path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        appendlog.append_lines(self.audit_path, [json.dumps(entry, sort_keys=True).encode("utf-8")])
 
     def _audits(self, item_id: str) -> list[dict]:
         if not self.audit_path.exists():
             return []
-        out = []
+        current = self._load(item_id)
+        reached = current.version if current is not None else 0
+        by_version: dict[int, dict] = {}
         for line in self.audit_path.read_text(encoding="utf-8").splitlines():
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            if entry.get("item_id") == item_id:
-                out.append(entry)
-        return out
+            # Only versions the item actually reached, and the LAST row for each:
+            # an earlier row for the same version, or one past the item's version,
+            # is an attempt whose item write never landed (`_record`, F1).
+            version = entry.get("version")
+            if entry.get("item_id") == item_id and isinstance(version, int) and version <= reached:
+                by_version[version] = entry
+        return [by_version[v] for v in sorted(by_version)]
 
     def _states(self) -> dict[str, engine.State]:
         if not self.state_path.exists():
@@ -405,11 +408,8 @@ class MemoryStore:
         return any(row.get("trace_id") == trace_id for row in self._ledger())
 
     def _add_credits(self, rows: Sequence[dict]) -> None:
-        with open(self.credits_path, "a", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps(row, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        appendlog.append_lines(self.credits_path,
+                               [json.dumps(row, sort_keys=True).encode("utf-8") for row in rows])
 
     def _credits(self, item_id: str) -> list[dict]:
         return [row for row in self._ledger() if row.get("item_id") == item_id]
@@ -417,9 +417,16 @@ class MemoryStore:
     # -- the rules -------------------------------------------------------
 
     def _record(self, item: MemoryItem, action: str, actor: str) -> None:
-        self._put(item)
+        # The audit row FIRST, then the item (F1). On the JSONL store the two are
+        # separate files with no shared transaction; the other order could leave
+        # an item no audit row describes, and a retried revise then left a hole
+        # in the chain for good. This order's worst case is an audit row for a
+        # version that never landed, which `_audits` reads past (it keeps only
+        # versions the item reached, the last row per version). The SQL stores
+        # write both in one transaction either way.
         self._audit({"item_id": item.item_id, "version": item.version, "action": action,
                      "actor": actor, "at": item.updated_at, "record": asdict(item)})
+        self._put(item)
         if self.announce is not None:
             # The label, never the content: the feed filters on the label
             # (`events.WALLED_KINDS`), and a payload carrying the title would
