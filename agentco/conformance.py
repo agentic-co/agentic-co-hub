@@ -565,7 +565,7 @@ class World:
         self.labels: dict[str, str] = {}     # label -> identifier
         self.saved: dict[str, Any] = {}      # label -> whatever a step produced
         self._client = None
-        self._servers: dict[str, Any] = {}
+        self._servers: dict[tuple[str, bool], Any] = {}
 
     # -- transports, built on first use -------------------------------------
 
@@ -1156,13 +1156,13 @@ def _pg_scoped_registry(base_dsn: str) -> tuple[str, Callable[[], None]]:
 
     schema = f"conform_{uuid.uuid4().hex[:16]}"
     with psycopg.connect(base_dsn, autocommit=True) as boot:
-        boot.execute(f'CREATE SCHEMA "{schema}"')
+        boot.execute(f'CREATE SCHEMA "{schema}"')  # pyright: ignore[reportArgumentType, reportCallIssue] -- schema is a generated hex name
     sep = "&" if "?" in base_dsn else "?"
     dsn = f"{base_dsn}{sep}options=-csearch_path%3D{schema}"
 
     def cleanup() -> None:
         with psycopg.connect(base_dsn, autocommit=True) as boot:
-            boot.execute(f'DROP SCHEMA "{schema}" CASCADE')
+            boot.execute(f'DROP SCHEMA "{schema}" CASCADE')  # pyright: ignore[reportArgumentType, reportCallIssue] -- schema is a generated hex name
 
     return dsn, cleanup
 

@@ -224,6 +224,7 @@ def enrol(conn, *, human: str, public_key: bytes, fingerprint: str, by: str,
             })
     if inserted != 1:
         existing = get(conn, key.key_id)
+        assert existing is not None  # the insert only fails on a row that exists
         raise _refuse(
             "key_in_use",
             f"this key was already enrolled here for {existing.human!r}"
@@ -250,11 +251,14 @@ def revoke(conn, *, key_id: str, by: str, reason: Optional[str] = None) -> tuple
         ).rowcount
         if changed == 1:
             key = get(conn, key_id)
+            assert key is not None  # checked above, and nothing deletes keys
             events.insert(conn, kind="HumanKeyRevoked", actor=by, payload={
                 "human": key.human, "keyId": key.key_id, "fingerprint": key.fingerprint,
                 "reason": reason,
             })
-    return get(conn, key_id), changed == 1
+    revoked = get(conn, key_id)
+    assert revoked is not None  # checked above, and nothing deletes keys
+    return revoked, changed == 1
 
 
 def revoke_all(conn, *, human: str, by: str, reason: Optional[str] = None) -> list[HumanKey]:

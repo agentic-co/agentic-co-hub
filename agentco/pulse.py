@@ -586,7 +586,7 @@ def check_participants(
             state = "undeclared"
         elif when is None:
             state = "never-seen"
-        elif silent > expected:
+        elif silent is not None and silent > expected:
             state = "silent"
         else:
             state = "active"
@@ -654,7 +654,7 @@ def check_stranded_steps(
             continue  # somebody has pulled it; this is about the ones nobody has
         ready_since = max(
             [_parse_at(item.created_at)]
-            + [_parse_at(b.updated_at) for b in blockers if b is not None]
+            + [_parse_at(b.updated_at) for b in blockers if b is not None]  # pyright: ignore[reportArgumentType] -- None (unparseable timestamp) would raise here
         )
         if ready_since is None:
             continue

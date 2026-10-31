@@ -52,7 +52,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, fields
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 from agentco import policy
 from agentco.errors import Refusal
@@ -1292,7 +1292,8 @@ class SopLibrary:
     def _run_view(self, parent: WorkItem, queue: Queue, index: dict) -> dict:
         ref = pin_of(parent)
         record = (parent.metadata or {}).get(RUN_KEY) or {}
-        active = self.get(ref.get("asop_id")) if ref.get("asop_id") else None
+        ref_id = ref.get("asop_id")
+        active = self.get(ref_id) if ref_id else None
         return {
             "runId": parent.id,
             "asopId": ref.get("asop_id"),
@@ -1569,7 +1570,7 @@ class SopLibrary:
                 )
             draft = None
         else:
-            body = {"steps": steps}
+            body: dict[str, Any] = {"steps": steps}
             if structural:
                 body["proposals"] = [*(latest.proposals or []), *structural]
             draft = self.revise(asop_id, author=author, author_kind=author_kind, **body)
@@ -1727,7 +1728,7 @@ class SopLibrary:
             ref = pin_of(item)
             if ref.get("asop_id") != asop_id:
                 continue
-            row = by_version.get(ref.get("version"))
+            row = by_version.get(ref.get("version"))  # pyright: ignore[reportArgumentType] -- an unpinned item has no version and misses, as intended
             if row is None:
                 continue
             step = ref.get("step")

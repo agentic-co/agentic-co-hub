@@ -63,3 +63,11 @@ packages = ["agentco"]
 # Scoped to this package's own suite. The contract's own tests travel with
 # the contract now, in its own repository, and are run there.
 testpaths = ["tests"]
+
+[tool.pyright]
+# Type checking is a CI gate, not a typing crusade: basic mode over the shipped
+# package only. Run with `uv run --extra server --extra mcp --extra postgres
+# --extra envelope --with pyright==1.1.414 pyright` (the pin lives in ci.yml).
+include = ["agentco"]
+typeCheckingMode = "basic"
+pythonVersion = "3.11"

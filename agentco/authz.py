@@ -57,7 +57,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from agentco.errors import Refusal
 
@@ -256,7 +256,7 @@ def transport_query_refused(actor: str, names: list[str]) -> Refusal:
     )
 
 
-def party_owns(party: str, assigned: Optional[str], identities: Mapping[str, object]) -> bool:
+def party_owns(party: str, assigned: Optional[str], identities: Mapping[str, Any]) -> bool:
     """Whether an item assigned to `assigned` belongs to `party`: the party
     itself, or an actor the key table says it owns. Unassigned belongs to nobody."""
     from agentco import auth

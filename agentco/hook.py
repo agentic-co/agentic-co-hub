@@ -402,7 +402,7 @@ def install(settings_path: PathLike, *, command: Optional[str] = None, write: bo
         # get back to the state before AgentCo ever touched the file.
         record = {
             "existed": existed,
-            "content_b64": base64.b64encode(original_bytes).decode("ascii") if existed else None,
+            "content_b64": base64.b64encode(original_bytes).decode("ascii") if original_bytes is not None else None,
         }
         backup_path.write_text(json.dumps(record), encoding="utf-8")
 
@@ -435,7 +435,7 @@ def uninstall(settings_path: PathLike, *, write: bool = False) -> HookInstallRes
     original_bytes = base64.b64decode(record["content_b64"]) if existed else None
     current = settings_path.read_bytes() if settings_path.exists() else b""
 
-    if existed:
+    if original_bytes is not None:
         diff = "\n".join(
             difflib.unified_diff(
                 current.decode("utf-8", errors="replace").splitlines(),
@@ -453,7 +453,7 @@ def uninstall(settings_path: PathLike, *, write: bool = False) -> HookInstallRes
             path=str(settings_path), status="would_uninstall", reason="dry run — pass write=True to apply", diff=diff
         )
 
-    if existed:
+    if original_bytes is not None:
         settings_path.write_bytes(original_bytes)
     else:
         settings_path.unlink(missing_ok=True)

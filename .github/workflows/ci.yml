@@ -63,6 +63,21 @@ jobs:
       # workspace member of this repo. It now lives in github.com/mabidoli/asop
       # and is tested there, against every implementation rather than this one.
 
+  typecheck:
+    # pyright over the shipped package only (`[tool.pyright]` in pyproject.toml).
+    # Every optional extra is installed because a missing one turns an import
+    # into an Unknown and hides the errors the check is here to find. The
+    # version is pinned: a new pyright release adds rules, and a gate that goes
+    # red on someone else's release is not a gate anyone keeps.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv run --extra dev --extra server --extra mcp --extra postgres --extra envelope --python 3.12 --with pyright==1.1.414 pyright
+
   contract:
     # The plane supports every `asop-spec` in its pin (`>=0.4.0,<1`), and the
     # job above only ever tests the LOCKED one. Before this job the plane

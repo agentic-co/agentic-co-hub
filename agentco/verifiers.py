@@ -337,7 +337,7 @@ def route_open_gates(
         if not is_vehicle(vehicle) or vehicle.status in (WorkStatus.DONE, WorkStatus.FAILED):
             continue
         parent_id = verifies(vehicle)
-        parent = by_id.get(parent_id)
+        parent = by_id.get(parent_id) if parent_id else None
         if parent is None:
             # Not "the parent has an answer" — the parent is not in this store
             # at all: deleted, or a row this version cannot model, which

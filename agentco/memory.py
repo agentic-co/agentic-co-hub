@@ -49,7 +49,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence, TypeGuard
 
 from agentco.clearance import PUBLIC, ROOT_SPACE, Clearance, is_within, not_cleared, parse_space
 from agentco.errors import Refusal
@@ -295,7 +295,7 @@ class MemoryStore:
         self.audit_path = self.path.with_suffix(self.path.suffix + ".audit")
         self.hub_id = resolve_hub_id(hub_id)
         self.quarantined: list[bytes] = []
-        self.announce = None
+        self.announce: Optional[Callable[[str, str, dict], None]] = None
         self.params = engine.Params.from_env()
         self.state_path = self.path.with_suffix(self.path.suffix + ".state")
         self.credits_path = self.path.with_suffix(self.path.suffix + ".credits")
@@ -429,7 +429,7 @@ class MemoryStore:
                 "version": item.version, "action": action, "authority": item.authority,
             })
 
-    def _visible(self, item: Optional[MemoryItem], clearance: Clearance) -> bool:
+    def _visible(self, item: Optional[MemoryItem], clearance: Clearance) -> TypeGuard[MemoryItem]:
         return (item is not None and clearance.allows(item.owner, item.level)
                 and clearance.sees_space(item.space))
 
