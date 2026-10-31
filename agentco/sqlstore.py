@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
 from agentco import migrations, policy
-from agentco.db import BUSY_TIMEOUT_MS
+from agentco.db import BUSY_TIMEOUT_MS, AnyConnection
 from agentco.pgadapter import PgConnection, is_postgres_target
 from agentco.sop import ASOP, SOP, SopLibrary, SopStatus, Step
 from agentco.work import (
@@ -204,7 +204,7 @@ def _quote(column: str) -> str:
     return f'"{column}"'
 
 
-def connect(path: str | Path) -> sqlite3.Connection | PgConnection:
+def connect(path: str | Path) -> AnyConnection:
     """Open the durable store, migrated, in autocommit so BEGIN is explicit.
 
     `isolation_level=None` because every write here is wrapped in an explicit
@@ -218,7 +218,7 @@ def connect(path: str | Path) -> sqlite3.Connection | PgConnection:
     `agentco/pgadapter.py` for what changes and what does not.
     """
     if is_postgres_target(path):
-        conn: sqlite3.Connection | PgConnection = PgConnection(str(path))
+        conn: AnyConnection = PgConnection(str(path))  # pyright: ignore[reportAssignmentType] -- see db.AnyConnection
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         migrations.apply(conn)
         return conn
@@ -533,6 +533,7 @@ class SqlQueue(_SqlBacked, Queue):
             )
             if blocked_parent is not None:
                 parent = lookup(blocked_parent)
+                assert parent is not None  # `enforce_decomposition` named a parent that exists
                 blocked = sorted(set(parent.get("blocked_by") or []) | {item.id})
                 conn.execute(
                     "UPDATE work_items SET blocked_by = ?, updated_at = ? WHERE id = ?",

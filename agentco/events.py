@@ -280,7 +280,7 @@ def insert(
         "repo": repo,
         "occurredAt": at,
         "payload": payload,
-        "cursor": encode_cursor(cur.lastrowid),
+        "cursor": encode_cursor(cur.lastrowid)  # pyright: ignore[reportArgumentType] -- an INSERT always sets lastrowid,
     }
 
 

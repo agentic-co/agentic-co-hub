@@ -1516,6 +1516,16 @@ def create_app(
     def _memory_view(item) -> dict:
         return item.to_dict()
 
+    # `_handle` answers every /memory route `memory_disabled` before any handler
+    # runs, so these are only reached with the store and the walls built.
+    def _mem():
+        assert memory is not None
+        return memory
+
+    def _walls():
+        assert walls is not None
+        return walls
+
     def _optional_version(payload: dict) -> Optional[int]:
         raw = payload.get("expected_version")
         return None if raw is None else _int(payload, "expected_version", -1)
@@ -1529,8 +1539,8 @@ def create_app(
             if not isinstance(label, dict):
                 label = {}
             fields = {k: v for k, v in payload.items() if k not in ("label", "layer", "space", "agentLabel")}
-            item = memory.create(
-                actor=actor, clearance=walls.effective(actor),
+            item = _mem().create(
+                actor=actor, clearance=_walls().effective(actor),
                 owner=label.get("owner"), level=label.get("level"), layer=payload.get("layer"),
                 space=payload.get("space"), **fields,
             )
@@ -1544,8 +1554,8 @@ def create_app(
 
         def work(actor: str, payload: dict) -> dict:
             params = request.query_params
-            items = memory.list(
-                walls.effective(actor), layer=params.get("layer"), kind=params.get("kind"),
+            items = _mem().list(
+                _walls().effective(actor), layer=params.get("layer"), kind=params.get("kind"),
                 include_retired=params.get("retired") in ("1", "true"),
                 include_cold=params.get("cold") in ("1", "true"),
             )
@@ -1558,7 +1568,7 @@ def create_app(
         """`?q=words` over the items you are cleared for — the wall first, then the match."""
 
         def work(actor: str, payload: dict) -> dict:
-            items = memory.search(walls.effective(actor), request.query_params.get("q") or "",
+            items = _mem().search(_walls().effective(actor), request.query_params.get("q") or "",
                                   include_cold=request.query_params.get("cold") in ("1", "true"))
             return {"state": "accepted", "items": [_memory_view(i) for i in items], "count": len(items)}
 
@@ -1570,9 +1580,9 @@ def create_app(
         (ADR 0006 §2: one partition and one session per owner)."""
 
         def work(actor: str, payload: dict) -> dict:
-            effective = walls.effective(actor)
+            effective = _walls().effective(actor)
             return {"state": "accepted", "clearance": effective.as_dict(),
-                    "levels": list(walls.levels), "space": effective.space}
+                    "levels": list(_walls().levels), "space": effective.space}
 
         return await _handle(request, "memory_clearance", work)
 
@@ -1620,8 +1630,8 @@ def create_app(
                     http_status=403,
                 )
             outcome = _trace_outcome(item)
-            result = memory.record_trace(
-                actor=actor, clearance=walls.effective(actor), trace_id=f"work:{item_id}",
+            result = _mem().record_trace(
+                actor=actor, clearance=_walls().effective(actor), trace_id=f"work:{item_id}",
                 outcome=outcome, invoked=payload.get("invoked") or [],
                 retrieved=payload.get("retrieved") or [],
             )
@@ -1634,9 +1644,9 @@ def create_app(
         """Periodic replay: revive the coldest items you can see, on probation."""
 
         def work(actor: str, payload: dict) -> dict:
-            return {"state": "accepted", **memory.replay(
+            return {"state": "accepted", **_mem().replay(
                 actor=actor, human=policy.kind_of(actor, declared_humans) == policy.HUMAN,
-                clearance=walls.effective(actor))}
+                clearance=_walls().effective(actor))}
 
         return await _handle(request, "memory_replay", work)
 
@@ -1647,7 +1657,7 @@ def create_app(
         def work(actor: str, payload: dict) -> dict:
             from datetime import date as _date
 
-            items = memory.reviews_due(walls.effective(actor), _date.today())
+            items = _mem().reviews_due(_walls().effective(actor), _date.today())
             return {"state": "accepted", "items": [_memory_view(i) for i in items], "count": len(items)}
 
         return await _handle(request, "memory_reviews", work)
@@ -1657,7 +1667,7 @@ def create_app(
         """Strength, exposure age, activation, cold/probation, and the credit history."""
 
         def work(actor: str, payload: dict) -> dict:
-            return {"state": "accepted", **memory.state(item_id, walls.effective(actor))}
+            return {"state": "accepted", **_mem().state(item_id, _walls().effective(actor))}
 
         return await _handle(request, "memory_state", work)
 
@@ -1671,9 +1681,9 @@ def create_app(
                 raise Refusal(code="memory_invalid", message="'rating' is 'up' or 'down'",
                               remediation="Send {\"rating\": \"up\"} or {\"rating\": \"down\"}.",
                               http_status=400)
-            return {"state": "accepted", **memory.rate(
+            return {"state": "accepted", **_mem().rate(
                 item_id, actor=actor, human=policy.kind_of(actor, declared_humans) == policy.HUMAN,
-                clearance=walls.effective(actor), up=rating == "up")}
+                clearance=_walls().effective(actor), up=rating == "up")}
 
         return await _handle(request, "memory_rate", work)
 
@@ -1682,7 +1692,7 @@ def create_app(
         """Demand pull: bring a cold item back, on probation."""
 
         def work(actor: str, payload: dict) -> dict:
-            return {"state": "accepted", **memory.revive(item_id, actor=actor, clearance=walls.effective(actor))}
+            return {"state": "accepted", **_mem().revive(item_id, actor=actor, clearance=_walls().effective(actor))}
 
         return await _handle(request, "memory_revive", work)
 
@@ -1692,21 +1702,21 @@ def create_app(
 
         def work(actor: str, payload: dict) -> dict:
             return {"state": "accepted",
-                    **memory.reconsolidated(item_id, actor=actor, clearance=walls.effective(actor))}
+                    **_mem().reconsolidated(item_id, actor=actor, clearance=_walls().effective(actor))}
 
         return await _handle(request, "memory_reconsolidate", work)
 
     @app.get("/memory/{item_id}")
     async def get_memory_item(item_id: str, request: Request) -> JSONResponse:
         def work(actor: str, payload: dict) -> dict:
-            return {"state": "accepted", "item": _memory_view(memory.get(item_id, walls.effective(actor)))}
+            return {"state": "accepted", "item": _memory_view(_mem().get(item_id, _walls().effective(actor)))}
 
         return await _handle(request, "memory_get", work)
 
     @app.get("/memory/{item_id}/history")
     async def get_memory_history(item_id: str, request: Request) -> JSONResponse:
         def work(actor: str, payload: dict) -> dict:
-            return {"state": "accepted", "history": memory.history(item_id, walls.effective(actor))}
+            return {"state": "accepted", "history": _mem().history(item_id, _walls().effective(actor))}
 
         return await _handle(request, "memory_history", work)
 
@@ -1714,7 +1724,7 @@ def create_app(
     async def post_memory_revise(item_id: str, request: Request) -> JSONResponse:
         def work(actor: str, payload: dict) -> dict:
             changes = {k: v for k, v in payload.items() if k not in ("expected_version", "agentLabel")}
-            item = memory.revise(item_id, actor=actor, clearance=walls.effective(actor),
+            item = _mem().revise(item_id, actor=actor, clearance=_walls().effective(actor),
                                  expected_version=_optional_version(payload), **changes)
             return {"state": "accepted", "item": _memory_view(item)}
 
@@ -1725,9 +1735,9 @@ def create_app(
         """Pin with a calendar review date, or unpin (`pinned: false`). Human-only."""
 
         def work(actor: str, payload: dict) -> dict:
-            item = memory.set_pinned(
+            item = _mem().set_pinned(
                 item_id, actor=actor, human=policy.kind_of(actor, declared_humans) == policy.HUMAN,
-                clearance=walls.effective(actor), pinned=payload.get("pinned", True) is not False,
+                clearance=_walls().effective(actor), pinned=payload.get("pinned", True) is not False,
                 review_by=payload.get("review_by"), expected_version=_optional_version(payload),
             )
             return {"state": "accepted", "item": _memory_view(item)}
@@ -1740,9 +1750,9 @@ def create_app(
         Human-only; never sideways into another team's space."""
 
         def work(actor: str, payload: dict) -> dict:
-            item = memory.set_space(
+            item = _mem().set_space(
                 item_id, actor=actor, human=policy.kind_of(actor, declared_humans) == policy.HUMAN,
-                clearance=walls.effective(actor), to=payload.get("to"),
+                clearance=_walls().effective(actor), to=payload.get("to"),
                 expected_version=_optional_version(payload),
             )
             return {"state": "accepted", "item": _memory_view(item)}
@@ -1754,9 +1764,9 @@ def create_app(
         """Hide from retrieval, keep for audit. Human-only; nothing is deleted."""
 
         def work(actor: str, payload: dict) -> dict:
-            item = memory.retire(
+            item = _mem().retire(
                 item_id, actor=actor, human=policy.kind_of(actor, declared_humans) == policy.HUMAN,
-                clearance=walls.effective(actor), expected_version=_optional_version(payload),
+                clearance=_walls().effective(actor), expected_version=_optional_version(payload),
             )
             return {"state": "accepted", "item": _memory_view(item)}
 

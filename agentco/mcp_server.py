@@ -803,7 +803,7 @@ def create_server(
             # operator's declared verifiers, or self-asserted.
             "verifiers": sorted(policy.verifiers_from_env()) or "undeclared (verify is self-asserted)",
             **backend.describe(),
-            **({"auth": backend.auth_check()} if backend.remote else {}),
+            **({"auth": backend.auth_check()} if isinstance(backend, _RemoteBackend) else {}),
             "scope": {"minSegments": scope.MIN_SEGMENTS, "intents": list(scope.INTENTS)},
             "eventKinds": list(events_module.KINDS),
             # Shared memory's switch (AGENTCO_MEMORY), as this server reads it.

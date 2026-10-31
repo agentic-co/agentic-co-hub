@@ -52,7 +52,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Iterable, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlparse
 
 from agentco.errors import Refusal, transfer_refused
@@ -132,7 +132,7 @@ def not_the_owner(message: str, *, epoch: Optional[int] = None) -> Refusal:
 # --------------------------------------------------------------------------- #
 
 
-def run_root(queue, item) -> Optional[object]:
+def run_root(queue, item) -> Optional[Any]:
     """The run parent this bead belongs to, or None for an ordinary item."""
     from agentco.work import PARENT_KEY, RUN_KEY
 
@@ -476,13 +476,13 @@ def reassign_gates(queue, *, from_: object, to: object, reason: object, by: str,
 
     reassigned = []
     for item in targets:
-        def change(current, _id=item.id):
+        def reassign(current, _id=item.id):
             if not open_gate(current):  # moved on since the read: leave it
                 return {}
             metadata = dict(current.metadata or {})
             metadata[GATE_REASSIGNED_KEY] = [*(metadata.get(GATE_REASSIGNED_KEY) or []), entry]
             return {"verify": moved(current.verify), "metadata": metadata}
-        after = queue._mutate(item.id, change)
+        after = queue._mutate(item.id, reassign)
         if after is not None and (after.verify or {}).get("verifier") == to:
             reassigned.append(item.id)
 

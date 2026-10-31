@@ -256,7 +256,7 @@ def _host_is_internal(host: str) -> bool:
     except OSError:
         return True
     for info in infos:
-        addr = info[4][0].split("%")[0]
+        addr = str(info[4][0]).split("%")[0]
         try:
             ip = ipaddress.ip_address(addr)
         except ValueError:

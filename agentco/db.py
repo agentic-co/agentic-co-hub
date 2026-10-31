@@ -30,12 +30,17 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 from agentco import migrations
 from agentco.pgadapter import PgConnection, is_postgres_target
 
-AnyConnection = Union[sqlite3.Connection, PgConnection]
+if TYPE_CHECKING:
+    # PgConnection is a drop-in for sqlite3.Connection by design, and every
+    # consumer is annotated `sqlite3.Connection`; the checker sees one type.
+    AnyConnection = sqlite3.Connection
+else:
+    AnyConnection = Union[sqlite3.Connection, PgConnection]
 
 # The live schema is now the migration list (`agentco/migrations.py`), because
 # `CREATE TABLE IF NOT EXISTS` on every open has nowhere to put a change that
@@ -161,7 +166,8 @@ def connect(path: str | Path) -> AnyConnection:
     `database is locked` at whoever happened to be second.
     """
     if is_postgres_target(path):
-        conn: AnyConnection = PgConnection(str(path))
+        # PgConnection mimics sqlite3.Connection; see AnyConnection above.
+        conn: AnyConnection = PgConnection(str(path))  # pyright: ignore[reportAssignmentType]
         conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         migrations.apply(conn)
         return conn

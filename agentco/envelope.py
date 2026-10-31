@@ -234,7 +234,7 @@ def verify_signature(key: humankeys.HumanKey, payload: dict, signature: Any) -> 
         raw = base64.b64decode(signature, validate=True) if isinstance(signature, str) else b""
     except (binascii.Error, ValueError):
         raw = b""
-    public = serialization.load_der_public_key(base64.b64decode(key.public_key))
+    public: Any = serialization.load_der_public_key(base64.b64decode(key.public_key))
     message = signed_bytes(payload)
     try:
         if key.alg == humankeys.ED25519:
@@ -372,7 +372,7 @@ def submit(conn, queue, *, envelope: Any, signature: Any, via: str, hub_uid: str
             "reason": "grace", "ageSeconds": age, "freshSeconds": fresh,
             "message": "needs your validation: sign a fresh envelope to confirm this answer",
         }, at)
-        return {"state": "held", "receipt": {**receipt(conn, key.key_id, payload["nonce"]), "receipt": stored},
+        return {"state": "held", "receipt": {**receipt(conn, key.key_id, payload["nonce"]), "receipt": stored},  # pyright: ignore[reportGeneralTypeIssues] -- `_settle` just wrote the row, so receipt() is a dict
                 "item": None}
 
     gate_item = queue.get(payload["item"])
@@ -410,7 +410,7 @@ def submit(conn, queue, *, envelope: Any, signature: Any, via: str, hub_uid: str
         "item": updated.id, "status": updated.status.value, "verifyFailures": updated.verify_failures,
     }, at)
     _expire_held(conn, payload, key.key_id, at)
-    return {"state": "applied", "receipt": {**receipt(conn, key.key_id, payload["nonce"]), "receipt": stored},
+    return {"state": "applied", "receipt": {**receipt(conn, key.key_id, payload["nonce"]), "receipt": stored},  # pyright: ignore[reportGeneralTypeIssues] -- `_settle` just wrote the row, so receipt() is a dict
             "item": json.loads(updated.to_json())}
 
 

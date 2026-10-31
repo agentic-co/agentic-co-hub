@@ -62,7 +62,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
 from agentco import gates, policy
 from agentco.errors import Refusal
@@ -790,6 +790,7 @@ def enforce_decomposition(
         # parent open. Nothing further to check and nobody new to block.
         return None
 
+    assert parent_id is not None  # both None returned above; a repair returned in its branch
     parent = lookup(parent_id)
     if parent is None:
         raise _decomposition_refusal(
@@ -985,7 +986,7 @@ def finished_containers(rows: Sequence[dict], *, at: str,
     that triggered the check), so the row that just became `done` is seen as
     done rather than as its stored value.
     """
-    status_of: dict[str, str] = {}
+    status_of: dict[str, Any] = {}
     by_id: dict[str, dict] = {}
     children: dict[str, list[dict]] = {}
     for row in rows:
@@ -1155,7 +1156,9 @@ def rerun_pending(item: "WorkItem") -> bool:
 
 
 def _note_cannot_evaluate(metadata: dict, record: dict, failures: int, at: str) -> None:
-    previous = metadata.get(CANNOT_EVALUATE_KEY) if isinstance(metadata.get(CANNOT_EVALUATE_KEY), dict) else {}
+    previous = metadata.get(CANNOT_EVALUATE_KEY)
+    if not isinstance(previous, dict):
+        previous = {}
     metadata[CANNOT_EVALUATE_KEY] = {
         "pending": True,
         "count": int(previous.get("count") or 0) + 1,
@@ -2764,7 +2767,7 @@ class Queue:
                     f"cannot renew {item_id}: the lease at attempt {attempt} expired at "
                     f"{item.lease_expires_at}. An expired lease is not renewed; pull the work again."
                 )
-            renewed = dict((item.metadata or {}).get("lease_renewed") or {})
+            renewed: dict[str, Any] = dict((item.metadata or {}).get("lease_renewed") or {})
             if renewed.get("attempt") != item.lease_attempt:
                 renewed = {"attempt": item.lease_attempt, "count": 0}
             renewed.update(count=int(renewed.get("count", 0)) + 1, last_at=_iso(at))
@@ -3051,7 +3054,7 @@ class Queue:
                     code="gate_pinned",
                     message=(
                         f"refusing to retire {item_id}: it carries a "
-                        f"{item.verify.get('kind')!r} gate."
+                        f"{(item.verify or {}).get('kind')!r} gate."
                     ),
                     remediation=(
                         "Retirement writes DONE directly and would step past the "

@@ -18,6 +18,7 @@ import secrets
 import sys
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from agentco import ado, app as app_module, routing
 from agentco import db, divergence, hook, inject, leases, metrics
@@ -198,12 +199,12 @@ def cmd_prune(args) -> int:
         "SELECT COUNT(*) AS n FROM calls WHERE verb IN "
         f"({','.join('?' for _ in metrics.RETAINED_VERBS)})",
         metrics.RETAINED_VERBS,
-    ).fetchone()["n"]
+    ).fetchone()["n"]  # pyright: ignore[reportOptionalSubscript] -- COUNT(*) always yields a row
     doomed = conn.execute(
         "SELECT COUNT(*) AS n FROM calls WHERE at < ? AND verb NOT IN "
         f"({','.join('?' for _ in metrics.RETAINED_VERBS)})",
         (before.isoformat(), *metrics.RETAINED_VERBS),
-    ).fetchone()["n"]
+    ).fetchone()["n"]  # pyright: ignore[reportOptionalSubscript] -- COUNT(*) always yields a row
 
     print(f"retention window: {args.days} days (before {before.date().isoformat()})")
     print(f"publishing rows kept at any age: {kept}  (verbs: {', '.join(metrics.RETAINED_VERBS)})")
@@ -494,7 +495,7 @@ def cmd_ado_pull(args) -> int:
 
         def file_one(row: dict) -> tuple[str, str, str]:
             p = row["payload"]
-            common = dict(
+            common: dict[str, Any] = dict(
                 title=p["title"], source=p["source"], sourceId=p["sourceId"],
                 metadata=p["metadata"], requires=requires,
                 **({"assignedAgent": p["assignedAgent"]} if p["assignedAgent"] else {}),
@@ -516,7 +517,7 @@ def cmd_ado_pull(args) -> int:
 
         def file_one(row: dict) -> tuple[str, str, str]:
             p = row["payload"]
-            common = dict(
+            common: dict[str, Any] = dict(
                 source=p["source"], source_id=p["sourceId"], metadata=p["metadata"],
                 assigned_agent=p["assignedAgent"], requires=requires,
             )
@@ -854,7 +855,7 @@ def cmd_lessons(args) -> int:
             print(f"{sop_id}: {exc}", file=sys.stderr)
             status = 2
             continue
-        entry = {"proposals": view}
+        entry: dict[str, Any] = {"proposals": view}
         if args.propose and view["pending"]:
             try:
                 draft = library.propose(
