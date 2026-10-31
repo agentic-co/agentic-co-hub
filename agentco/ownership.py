@@ -407,6 +407,107 @@ def transfer(queue, run_id: str, *, to: object, reason: object, by: str, at: str
             "voidedLeases": voided, "releasedAssignments": released, "keptDone": kept, "owner": updated}
 
 
+#: Where an item keeps its record of every gate reassignment, oldest first.
+GATE_REASSIGNED_KEY = "gate_reassignments"
+
+
+def reassign_gates(queue, *, from_: object, to: object, reason: object, by: str, at: str,
+                   humans: Iterable[str], items: Optional[Iterable[str]] = None) -> dict:
+    """Move every open human gate naming `from_` to `to` (ADR 0008 Decision 4).
+
+    The administrative act for a person removed from a company: their identity
+    stays on every record they answered, their keys are revoked separately, and
+    each gate still waiting on them names somebody who can answer. Parallel to
+    `transfer`: the caller has already checked that `by` is a declared human
+    admin; this checks the record.
+
+    An open gate is a human gate on any item not yet done, whatever its status:
+    a gate on work still in progress names its verifier too, and leaving it to
+    the departed person only moves the stranding later. `escalate_to` moves
+    with the verifier when it named the same person. The live vehicle for each
+    gate moves with it, so the new person is asked and the old one is not.
+
+    The verify attempt does not move: an answer the removed person signed and
+    that arrives after is refused because it is no longer the named human's,
+    not because the slot changed. `items`, given, narrows the act to those ids,
+    each of which must be an open gate naming `from_`.
+    """
+    from agentco import verifiers
+    from agentco.work import TERMINAL
+
+    humans = frozenset(humans)
+    if not isinstance(reason, str) or not reason.strip():
+        raise _refuse("reassign_invalid", "a reassignment must say why",
+                      "Say why the gates move; the reason is recorded on each item for good.", 400)
+    if not isinstance(from_, str) or not from_ or not isinstance(to, str) or not to:
+        raise _refuse("reassign_invalid", "`from` and `to` name people",
+                      "Send the person the gates name now and the person who will answer them.", 400)
+    if to == from_:
+        raise _refuse("reassign_invalid", f"{to!r} already answers these gates",
+                      "A reassignment to the same person moves nothing.", 400)
+    if to not in humans:
+        raise _refuse("human_required", f"{to!r} is not a declared human, and a human gate needs one",
+                      "Reassign to a person declared in ASOP_HUMANS.", 403)
+
+    def open_gate(item) -> bool:
+        gate = item.verify or {}
+        return (gate.get("kind") == "human" and gate.get("verifier") == from_
+                and item.status not in TERMINAL and not verifiers.is_vehicle(item))
+
+    everything = queue.list()
+    targets = [i for i in everything if open_gate(i)]
+    if items is not None:
+        wanted = list(dict.fromkeys(items))
+        found = {i.id for i in targets}
+        missing = [i for i in wanted if i not in found]
+        if missing:
+            raise _refuse("reassign_invalid", f"not open human gates naming {from_!r}: {missing}",
+                          "Name only items whose open human gate names the person being replaced, "
+                          "or omit `items` to move all of them.", 409)
+        targets = [i for i in targets if i.id in set(wanted)]
+
+    entry = {"at": at, "by": by, "from": from_, "to": to, "reason": reason.strip()}
+
+    def moved(gate: dict) -> dict:
+        out = {**gate, "verifier": to}
+        if gate.get("escalate_to") == from_:
+            out["escalate_to"] = to
+        return out
+
+    reassigned = []
+    for item in targets:
+        def change(current, _id=item.id):
+            if not open_gate(current):  # moved on since the read: leave it
+                return {}
+            metadata = dict(current.metadata or {})
+            metadata[GATE_REASSIGNED_KEY] = [*(metadata.get(GATE_REASSIGNED_KEY) or []), entry]
+            return {"verify": moved(current.verify), "metadata": metadata}
+        after = queue._mutate(item.id, change)
+        if after is not None and (after.verify or {}).get("verifier") == to:
+            reassigned.append(item.id)
+
+    vehicles = []
+    for vehicle in everything:
+        if (verifiers.is_vehicle(vehicle) and verifiers.verifies(vehicle) in reassigned
+                and vehicle.assigned_agent == from_ and vehicle.status not in TERMINAL):
+            def change(current):
+                metadata = dict(current.metadata or {})
+                if isinstance(metadata.get("gate"), dict):
+                    metadata["gate"] = moved(metadata["gate"])
+                metadata[GATE_REASSIGNED_KEY] = [*(metadata.get(GATE_REASSIGNED_KEY) or []), entry]
+                return {"assigned_agent": to, "metadata": metadata}
+            queue._mutate(vehicle.id, change)
+            vehicles.append(vehicle.id)
+
+    if queue.announce is not None and reassigned:
+        try:
+            queue.announce("GateReassigned", by, {"from": from_, "to": to, "reason": reason.strip(),
+                                                  "items": reassigned, "vehicles": vehicles})
+        except Exception:  # noqa: BLE001 - the record is the fact; the feed is a notice
+            pass
+    return {"from": from_, "to": to, "reassigned": reassigned, "vehicles": vehicles}
+
+
 def descendants(queue, run_id: str) -> list:
     from agentco.work import PARENT_KEY
 

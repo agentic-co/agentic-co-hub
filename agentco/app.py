@@ -157,6 +157,9 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     ("POST", "/answers"): wire.strict(
         ("envelope", "signature"), "the signed answer: a dropped key changes what was signed"),
     ("GET", "/answers/{key_id}/{nonce}"): wire.lenient(),
+    ("GET", "/answers/held"): wire.lenient(),
+    ("POST", "/gates/reassign"): wire.strict(
+        ("from", "to", "reason", "items"), "who a gate names: a dropped key could move the wrong gates"),
     ("POST", "/work/{item_id}/attest"): wire.strict(
         ("attestation", "capabilities", "adjudication", "epoch", "verifyAttempt", "idempotencyKey"),
         "the gate's evidence, the ownership epoch, the verify attempt and the idempotency key"),
@@ -702,6 +705,48 @@ def create_app(
             return body
 
         return await _handle(request, "answer_submit", work)
+
+    @app.get("/answers/held")
+    async def get_answers_held(request: Request) -> JSONResponse:
+        """Your answers held in the grace window, by slot and digest (ADR 0008 §8 S4).
+
+        A transport reads its party's; anyone else reads their own. The verdict
+        is never returned: confirming takes it from the partition's own record."""
+
+        def work(actor: str, payload: dict) -> dict:
+            person = app.state.routes.transport_party(actor) or actor
+            held = envelope.held_for(conn, person)
+            return {"state": "accepted", "held": held, "count": len(held)}
+
+        return await _handle(request, "answer_held", work)
+
+    @app.post("/gates/reassign")
+    async def post_gates_reassign(request: Request) -> JSONResponse:
+        """Move the open human gates naming one person to another (ADR 0008
+        Decision 4). Declared human AND declared admin, as a run transfer is."""
+
+        def work(actor: str, payload: dict) -> dict:
+            if policy.kind_of(actor, declared_humans) != policy.HUMAN:
+                raise human_required(
+                    f"{actor!r} is not a declared human; only a person may reassign gates",
+                    f"Ask a person listed in both {ownership.ADMINISTRATORS_ENV_VAR} and AGENTCO_HUMANS.",
+                )
+            if actor not in declared_admins:
+                raise transfer_refused(
+                    "administrator",
+                    f"{actor!r} is a declared human but not a declared administrator",
+                    f"Have a person the operator declared in {ownership.ADMINISTRATORS_ENV_VAR} record it.",
+                    alias="capability_mismatch", http_status=403,
+                )
+            items = payload.get("items")
+            if items is not None and (not isinstance(items, list) or not all(isinstance(i, str) for i in items)):
+                raise Refusal(code="reassign_invalid", message="`items` is a list of item ids",
+                              remediation="Omit it to move every open gate, or list the ids.", http_status=400)
+            return {"state": "accepted", **ownership.reassign_gates(
+                queue, from_=payload.get("from"), to=payload.get("to"), reason=payload.get("reason"),
+                by=actor, at=events.now_iso(), humans=declared_humans, items=items)}
+
+        return await _handle(request, "gate_reassign", work)
 
     @app.get("/answers/{key_id}/{nonce}")
     async def get_answer_receipt(key_id: str, nonce: str, request: Request) -> JSONResponse:

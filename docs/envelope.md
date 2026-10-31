@@ -63,8 +63,8 @@ Each check refuses before anything is written:
    - more than 300 s in the future: `envelope_future`;
    - up to `AGENTCO_ENVELOPE_FRESH_SECONDS` (default 24 h): applied;
    - within the grace window after that (`AGENTCO_ENVELOPE_GRACE_SECONDS`, default half of fresh):
-     **held**. It is neither applied nor refused, and the response is 202. The owner confirms by
-     signing a fresh envelope; that confirmation flow is the next build step.
+     **held**. It is neither applied nor refused, and the response is 202. See "Confirming a held
+     answer" below.
    - older than fresh plus grace: `envelope_expired`.
 7. The nonce. Resending the same envelope returns its stored outcome. A different payload under a
    used nonce is refused `replayed`.
@@ -94,6 +94,37 @@ written. After the attestation lands, the row is set `applied` with its receipt.
 `GET /answers/{key_id}/{nonce}` returns a row's receipt, but only to the actor that carried it.
 `envelope.prune` collects settled rows older than fresh plus grace. It never collects a `received`
 row.
+
+## Confirming a held answer (§8 S4)
+
+`GET /answers/held` lists the caller's held answers: a transport sees its party's, anyone else sees
+their own. Each entry gives the slot `(item, verifyAttempt)`, the `digest`, the nonce and when it
+arrived. **The list never includes the verdict.** The partition matches each entry against its own
+stored envelopes by digest:
+
+- **No match:** the partition shows "the hub reports an answer you did not send" and offers no
+  confirm.
+- **Match:** confirming signs a **new** envelope, fresh, with a new nonce, and takes the verdict from
+  the partition's own record.
+
+When that answer applies, every held envelope for the same slot is recorded `expired` with
+`supersededBy` naming the confirming answer. None of their content touches the item.
+
+## A person removed from a company (Decision 4)
+
+`POST /gates/reassign {from, to, reason, items?}` moves the open human gates naming one person to
+another. Only someone who is both a declared human and a declared administrator may do it, the same
+as a run transfer.
+
+- **Which gates:** every human gate on an item that isn't done, including work still in progress.
+  `escalate_to` moves with the verifier when it named the same person, and the live vehicle is
+  reassigned with its gate.
+- **The record:** each item keeps a `gate_reassignments` entry, and the feed carries
+  `GateReassigned`.
+- **What stays:** answered gates keep who answered them. The verify attempt does not move.
+- **Late answers from the removed person:** an answer they signed that arrives after the move is
+  refused, because they are no longer the gate's named human. Revoke their keys separately with
+  `agentco human-key revoke --human <name>`.
 
 ## The unsigned path (§8 B1)
 
