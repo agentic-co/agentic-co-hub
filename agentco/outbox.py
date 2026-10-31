@@ -62,6 +62,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 from agentco.errors import Refusal
+from agentco import appendlog
 from agentco.filelock import lock_exclusive, unlock
 
 NODE_DIR_ENV_VAR = "AGENTCO_NODE_DIR"
@@ -384,10 +385,8 @@ class Outbox:
             # exist if the process dies inside this call, which is why the
             # drainer quarantines rather than fails — but nothing here writes a
             # line in two pieces and hopes.
-            with open(self.path, "ab") as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
+            # After a torn tail, the line starts on a fresh one (F3).
+            appendlog.append_lines(self.path, [encoded.rstrip(b"\n")])
         return record
 
     # -- the drainer's end -----------------------------------------------
@@ -511,10 +510,15 @@ class Outbox:
         settled = {r["line_id"] for r in receipts if r.get("state") in ("published", "refused")}
         with self._locked():
             good, bad = self._read_raw()
-            if settled or bad:
-                self._rewrite([r for r in good if r["line_id"] not in settled])
+            # Receipts FIRST, then the lines go (F2). The other order lost both
+            # when it died in between: the lines were gone and no receipt said
+            # what became of them. This order's worst case is a receipt for a
+            # line still in the outbox, which the next drain republishes and
+            # the hub dedupes on the line id.
             if receipts:
                 self._append_jsonl(self.receipts_path, list(receipts), keep=RECEIPT_HISTORY)
+            if settled or bad:
+                self._rewrite([r for r in good if r["line_id"] not in settled])
             counts: dict[str, int] = {}
             for receipt in receipts:
                 state = str(receipt.get("state"))
