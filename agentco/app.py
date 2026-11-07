@@ -64,7 +64,7 @@ from fastapi.responses import JSONResponse
 
 from agentco import verifiers as verifiers_module
 from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, envelope, events, leases, metrics, policy, snapshots, views
-from agentco.errors import Refusal, human_required, transfer_refused
+from agentco.errors import Refusal, Unauthenticated, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
 from agentco.memory import memory_enabled as memory_switch
@@ -479,34 +479,41 @@ def create_app(
         verb" the way the published SLO is phrased.
         """
         started = time.perf_counter()
-        body = await request.body()
-        if len(body) > MAX_BODY_BYTES:
-            # Before json.loads, which is where an oversized body actually
-            # costs. A reverse proxy usually caps this, and "usually" is the
-            # problem: the zero-config floor this plane advertises has no proxy
-            # in front of it, so the process that parses the body is the only
-            # thing that can refuse it.
-            raise Refusal(
-                code="body_too_large",
-                message=(
-                    f"request body is {len(body)} bytes; the limit is "
-                    f"{MAX_BODY_BYTES}"
-                ),
-                remediation=(
-                    "Send a pointer rather than a payload — snapshots take an "
-                    "artifactUri precisely so bodies stay small."
-                ),
-                http_status=413,
-            )
+        # Bounded BEFORE it is buffered: the declared length is checked first,
+        # and the stream is cut off the moment it passes the limit even when no
+        # length was declared (chunked). An anonymous client can therefore make
+        # this process hold at most MAX_BODY_BYTES, and no `calls` row is
+        # written for it — the body must still be read before authentication
+        # because the signature covers its digest, but nothing here parses it.
+        too_large = Refusal(
+            code="body_too_large",
+            message=f"request body is over the limit of {MAX_BODY_BYTES} bytes",
+            remediation=(
+                "Send a pointer rather than a payload — snapshots take an "
+                "artifactUri precisely so bodies stay small."
+            ),
+            http_status=413,
+        )
+        try:
+            declared = int(request.headers.get("content-length", ""))
+        except ValueError:
+            declared = 0
+        if declared > MAX_BODY_BYTES:
+            return JSONResponse(too_large.to_dict(), status_code=413)
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > MAX_BODY_BYTES:
+                return JSONResponse(too_large.to_dict(), status_code=413)
+            chunks.append(chunk)
+        body = b"".join(chunks)
         actor = "-"
-        # Read BEFORE the try, so a refused call is recorded with the same
-        # transport and label as an accepted one. A refusal is the most
-        # important row in this table — a colleague whose first three POSTs are
-        # refused and who then stops is the adoption failure the gate exists to
-        # detect — and it is worth nothing if the refusals cannot be attributed
-        # to the path they arrived on.
+        # `via` is a header read; the label parses the body, so it waits until
+        # the caller has authenticated (a refusal after that point still gets
+        # its label — the failed-auth rows are the only ones dropped).
         via = _observed_via(request)
-        label = _observed_label(request, body)
+        label: Optional[str] = None
         try:
             actor = auth.authenticate(
                 dict(request.headers),
@@ -520,6 +527,7 @@ def create_app(
                 # query inside the timestamp window (known issue 6b).
                 query=request.url.query,
             )
+            label = _observed_label(request, body)
             # The route allowlist, straight after authentication and before any
             # body is read: a restricted credential learns nothing about the
             # body's validity, and no handler ever runs for it.
@@ -574,6 +582,9 @@ def create_app(
             return JSONResponse(result, status_code=status_code)
 
         except Refusal as refusal:
+            if actor == "-" and isinstance(refusal, Unauthenticated):
+                # An anonymous caller does not get to write rows (R13).
+                return JSONResponse(refusal.to_dict(), status_code=refusal.http_status)
             elapsed = (time.perf_counter() - started) * 1000
             metrics.record_call(
                 conn,
@@ -1109,6 +1120,11 @@ def create_app(
                 else:
                     wanted = None
                 items = queue.list(status=wanted)
+                if actor != app.state.operator:
+                    # Everyone but the operator sees their own party's reach
+                    # (`authz.item_in_reach`); a transport never gets here.
+                    identities = auth.load_identities()
+                    items = [i for i in items if authz.item_in_reach(actor, i, identities)]
             return {"state": "accepted", "items": [json.loads(i.to_json()) for i in items]}
 
         return await _handle(request, "work_list", work)
@@ -1128,6 +1144,9 @@ def create_app(
                     return verifiers_module.is_vehicle(i) and authz.party_owns(party, i.assigned_agent, identities)
 
                 if not (mine(item) or any(mine(v) and verifiers_module.verifies(v) == item_id for v in queue.list())):
+                    item = None
+            if item is not None and party is None and actor != app.state.operator:
+                if not authz.item_in_reach(actor, item, auth.load_identities()):
                     item = None
             if item is None:
                 raise unknown_item(item_id, "read")
