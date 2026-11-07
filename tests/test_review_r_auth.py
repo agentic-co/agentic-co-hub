@@ -198,3 +198,53 @@ def test_clearance_key_table_is_not_reparsed_when_unchanged(tmp_path, monkeypatc
     assert len(parses) <= 1, f"parsed {len(parses)} times"
     path.write_text(json.dumps({"alice": {"secret": "s", "clearance": "restricted"}, "bob": {"secret": "x", "clearance": "internal"}}))
     assert clearance.actors_from_key_table(levels) != first, "an edit must still be seen at once"
+
+
+# --- R10 residue: the filer stays in reach -------------------------------------
+
+
+@pytest.mark.xfail(strict=True, reason="R10 residue: no creator is recorded, so a filer loses an item once it is assigned")
+def test_a_filer_keeps_sight_of_what_they_filed_after_it_is_assigned_elsewhere(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    made = call(client, "alice", "POST", "/work", {"title": "for bob", "assignedAgent": "bob"})
+    item_id = made.json()["item"]["id"]
+    assert item_id in {i["id"] for i in call(client, "alice", "GET", "/work").json()["items"]}
+    assert call(client, "alice", "GET", f"/work/{item_id}").status_code == 200
+    # alice's own agent is the same party; a stranger's filing stays hidden
+    assert call(client, "alice-bot", "GET", f"/work/{item_id}").status_code == 200
+    third = call(client, "op", "POST", "/work", {"title": "x", "assignedAgent": "bob"}).json()["item"]["id"]
+    assert call(client, "alice", "GET", f"/work/{third}").status_code == 404
+    # and the creator is not caller-settable
+    forged = call(client, "bob", "POST", "/work", {"title": "f", "assignedAgent": "bob",
+                                                    "metadata": {"filed_by": "alice"}})
+    assert forged.status_code >= 400 and forged.json()["code"] == "metadata_reserved"
+
+
+@pytest.mark.xfail(strict=True, reason="R10 residue: run steps carry no creator")
+def test_every_item_a_run_files_is_in_reach_of_the_one_who_filed_it(library, queue):
+    from agentco import authz
+
+    gate = {"kind": "deterministic", "check": "make check", "max_park_seconds": 900, "on_timeout": "fail"}
+    asop = library.create("two steps", inputs=[], roles={"w": {"kind": "agent"}}, steps=[
+        {"name": "one", "role": "w", "purpose": "one", "gate": gate},
+        {"name": "two", "role": "w", "purpose": "two", "gate": gate}])
+    library.activate(asop.asop_id, 1, author_kind="human")
+    library.run(asop.asop_id, queue, bindings={"w": "kofi"}, filed_by="dana")
+    items = queue.list()
+    assert len(items) >= 3
+    assert all(authz.item_in_reach("dana", i, {}) for i in items)
+    assert not any(authz.item_in_reach("ana", i, {}) for i in items if i.assigned_agent == "kofi")
+
+
+@pytest.mark.xfail(strict=True, reason="R10 residue: MCP work_create records no creator")
+def test_mcp_work_create_records_who_filed_it(tmp_path):
+    pytest.importorskip("mcp")
+    from agentco import authz
+    from agentco.mcp_server import create_server
+    from agentco.work import WorkItem
+
+    mcp = create_server(db_path=str(tmp_path / "r.sqlite3"), work_store=str(tmp_path / "w.jsonl"),
+                        sop_store=str(tmp_path / "s.jsonl"), actor="dana")
+    made = mcp._tool_manager.get_tool("work_create").fn("t", assigned_agent="kofi")
+    item = WorkItem.from_json(json.dumps(made["item"] if "item" in made else made))
+    assert authz.item_in_reach("dana", item, {})
