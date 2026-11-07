@@ -31,10 +31,46 @@ because they are easy to get wrong:
 | ~~**A15**~~ | ~~The server signs the percent-decoded path while a client signs the wire form.~~ **Fixed 2026-09-22.** Settled the other way from the old remediation text: BOTH ends sign the DECODED path, and the remediation now says so. The server cannot reliably recover the wire form — ASGI's `raw_path` is optional and proxies rewrite it — while decoding is deterministic on both sides. Two encodings of one path denote one resource and should produce one signature; what must not happen is the ends disagreeing. |
 | **MCP refusals** | The MCP encoding renders a `Refusal` as `ToolError(str(exc))`, so the machine `code` survives only as a string prefix. Over HTTP it is a field. | `errors.py` says clients branch on the code; over MCP they cannot without parsing prose. |
 | ~~**F1**~~ | ~~JSONL `MemoryStore._record` wrote the item, then its audit row, with no shared transaction; a failure between them left an unaudited item and, after a retried revise, a permanent hole in the audit chain.~~ **Fixed 2026-10-31.** The audit row is written FIRST. The worst case left is an audit row for a version that never landed, and `_audits` reads past it (only versions the item reached, the last row per version). Both directions are tested in `tests/test_fault_injection.py`. |
-| ~~**F2**~~ | ~~`Outbox.settle` removed the settled lines before appending their receipts, so a failure between them lost both.~~ **Fixed 2026-10-31.** Receipts first, then the lines go. The worst case left is a receipt for a line still in the outbox, which the next drain republishes and the hub dedupes on the line id. |
+| ~~**F2**~~ | ~~`Outbox.settle` removed the settled lines before appending their receipts, so a failure between them lost both.~~ **Fixed 2026-10-31.** Receipts first, then the lines go. The worst case left is a receipt for a line still in the outbox, which the next drain republishes and the hub dedupes on the line id — **true for `attest` and `work_report` only; see R4.** |
 | ~~**F3**~~ | ~~After a process died mid-line, the next `Outbox.push` was glued onto the torn fragment and both were quarantined as one line.~~ **Fixed 2026-10-31.** Every append goes through `agentco/appendlog.py`, which starts a fresh line when the file does not end in one: the fragment stays its own quarantined line and the next record lands whole. |
 | ~~**F4**~~ | ~~The same glue in the JSONL memory audit log and the credits ledger, where `_audits` skipped the glued row silently.~~ **Fixed 2026-10-31** by the same helper, which the write-back dead-letter log now uses too. |
 
+
+## Open, from the 2026-11-07 review (R4-R21)
+
+Found by a three-lane review of the work queue, auth/envelope, and storage
+layers on 2026-11-07. R1-R3 from the same review were fixed in #87 before
+this table existed. Every row below gets a strict-xfail test before its fix,
+under the same conventions as `tests/test_adversarial_findings.py`; the tests
+live in `tests/test_review_r*.py`, one file per lane.
+
+| # | Defect | Lane |
+|---|---|---|
+| **R4** | **F2's "the hub dedupes on the line id" only holds for two of eight verbs.** `registry_publisher` passes `idempotency_key=line_id` for `attest` and `work_report` only. A drainer that dies after the receipt and before removing the line republishes `claim_scope` (a second lease), `snapshot`, `adjudicate`, `sop_revise` (a second version) and `sop_activate`. The hub has no idempotency key on those verbs at all, so the fix is hub-side: accept `idempotencyKey` and return the recorded outcome. `release_scope` is idempotent by state. | outbox |
+| **R5** | **More 500s from wrong-typed payload fields, beyond claim 5.** On `POST /scope-claims`: an int `repo`, `holder` or prefix, or a non-string `intent`. On release: a dict/list `action` (`sqlite3.ProgrammingError`). On `/work/pull`: `capabilities: 5`. On `POST /work`: `requires: 5` or `metadata: [1]`. `ttlSeconds: Infinity` raises `OverflowError`, which `_int` does not catch. The handlers catch `WorkError`/`ValueError` only, so `TypeError`/`AttributeError` reach the "registry bug" handler, which echoes the exception text. | input |
+| **R6** | **Claim TTL is unbounded.** `Queue.claim` and `/work/pull` never bound `ttl_seconds`; `renew` refuses `<= 0` and caps at `lease_max_age`. `ttl <= 0` returns "leased" on an already-expired lease. `ttl = 10**9` pins an item until 2058: `retire` refuses a live lease and `reap` takes only expired ones. | input |
+| **R7** | **`report_result` honours an expired lease that `renew` refuses.** The fence checks attempt and holder, not expiry, so whether a late report lands depends on whether a reaper happened to run in the gap. | input |
+| **R8** | **A retried `attest` drops its adjudication rider.** The verdict lands in one write and `adjudicate` runs as a second. If the second fails, the retry with the same `idempotencyKey` hits `_AlreadyAttested` and returns early, so the rider is never applied and the caller is told it succeeded. | input |
+| **R9** | **Scope claim and release are check-then-act across separate transactions.** `leases.claim` reads live leases, then inserts, then writes each event in its own commit. Two processes claiming overlapping scope concurrently both see no conflict. A crash between commits leaves a lease no feed subscriber saw. `release`'s UPDATE has no `released_at IS NULL` guard, so concurrent releases both emit `ScopeReleased`. | outbox |
+| **R10** | **Any authenticated actor can read the whole queue.** `?ready=1` is forced to the signer (ADR 0008 §6), but plain `GET /work` returns every item, and `GET /work/{id}` has no per-actor check. `authz.py`'s rationale reads as if non-operators were filtered. | auth |
+| **R11** | **MCP local mode skips owner-party separation.** Only the HTTP app sets `queue.owners`, so over MCP-local `party_of` returns the actor and one person's two agents can execute and verify the same judged gate — which HTTP refuses. | auth |
+| **R12** | **`Queue.party_of` falls back to the actor when `owners()` raises.** The comment says "stricter than nothing", but comparing actors is weaker than comparing parties: a malformed key table silently turns owner separation off. | auth |
+| **R13** | **The request body is buffered in full before authentication.** `_handle` awaits `request.body()`, then checks `MAX_BODY_BYTES`, then authenticates. An anonymous client can force an unbounded buffer, and every failed-auth request writes a `calls` row. | auth |
+| **R14** | **Envelope nonce rows are pruned before the envelope expires.** `submit` accepts `issued_at` up to `MAX_FUTURE_S` ahead and judges expiry from `issued_at`; `prune` deletes by arrival time. A future-dated envelope loses its nonce row up to 300 s early, and a refused or held envelope can be resubmitted in that gap. | auth |
+| **R15** | **`clearance.actors_from_key_table` re-reads the key table on every request**, uncached — the A14 pattern, not stat-cached the way `auth` and `authz` are. | auth |
+| **R16** | **Postgres: the change feed can lose events permanently.** `seq` comes from an identity column at INSERT and becomes visible at COMMIT, and commit order does not follow seq order. A reader that sees seq 6 before seq 5 commits moves its cursor past 5 for good. SQLite is safe because one writer lock orders commits; the pool removed the process-wide lock that did the same for Postgres. | postgres |
+| **R17** | **Postgres: concurrent cold starts race the migrations.** `BEGIN IMMEDIATE` becomes a plain transaction, so two processes both pass the `already` check; the loser fails on a duplicate column or the ledger primary key. | postgres |
+| **R18** | **Postgres: concurrent child creates under one parent lose `blocked_by` entries** and can exceed `MAX_SUBTASKS_PER_TASK`. The parent's read-modify-write is unlocked; the advisory lock covers natural keys only. A parent can then close with a child open. | postgres |
+| **R19** | **Postgres: concurrent SOP authoring can destroy a committed version and reuse its number.** `SqlSopLibrary._write_all` deletes the whole table and re-inserts; `FOR UPDATE` cannot protect that under READ COMMITTED, nor a first create on an empty table. | postgres |
+| **R20** | **JSONL `record_trace` writes the dedupe marker last.** States, then credits — and `_trace_seen` reads the credits ledger, so a crash between them credits a redelivered trace twice. The F1/F2 "guard first" order was not applied here. | postgres |
+| **R21** | **Event cursor edges.** `v1:99999999999999999999` raises an uncaught `OverflowError` (500). `since=""` is "no cursor" to `decode_cursor` but not to the floor check, so after any prune it gets 410 `cursor_expired` instead of starting at the floor. | postgres |
+
+Recorded and accepted rather than scheduled: signed non-envelope POSTs carry
+no nonce, so a captured one replays for the 300 s window and harm depends on
+the verb's own idempotency (R4 closes the outbox verbs); `appendlog` does not
+fsync the directory after creating a file; the outbox quarantine keeps the
+last 200 rows, not all of them; `settle` discards torn tails without
+quarantining them.
 
 ## Removed: claim 1 (redirect downgraded HEAD to GET)
 
