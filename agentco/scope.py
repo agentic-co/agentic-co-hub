@@ -94,6 +94,10 @@ def validate_prefix(raw: str, min_segments: int = MIN_SEGMENTS) -> str:
 
 
 def validate_intent(raw: str) -> str:
+    if raw is not None and not isinstance(raw, str):
+        from agentco import payload as pl
+
+        raise pl.refuse("intent", "a string", raw)
     intent = (raw or "").strip().lower()
     if intent not in INTENTS:
         raise Refusal(
@@ -173,6 +177,10 @@ class Scope:
                     f"{min_segments} segments deep — e.g. ['src/budget/grid']."
                 ),
             )
+        from agentco import payload as pl
+
+        pl.str_list_value("prefixes", prefixes)
+        pl.str_value("repo", repo)
         seen: list[str] = []
         for raw in prefixes:
             prefix = validate_prefix(raw, min_segments)

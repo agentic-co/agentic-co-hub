@@ -52,13 +52,27 @@ def test_only_the_holder_at_the_current_fence_renews(queue):
     assert exc.value.code == "not_the_holder"
     with pytest.raises(LeaseError, match="superseded"):
         queue.renew(claimed.id, claimed.lease_attempt - 1, "worker-a", now=T0 + timedelta(seconds=10))
-    with pytest.raises(LeaseError, match="expired"):
-        queue.renew(claimed.id, claimed.lease_attempt, "worker-a", now=T0 + timedelta(seconds=61))
     retaken = queue.claim(claimed.id, "worker-b", now=T0 + timedelta(seconds=61))
     with pytest.raises(Refusal) as gone:
         queue.renew(claimed.id, claimed.lease_attempt, "worker-a", now=T0 + timedelta(seconds=62))
     assert gone.value.code == "not_the_holder", "the work was taken again by someone else"
     assert queue.renew(claimed.id, retaken.lease_attempt, "worker-b", now=T0 + timedelta(seconds=62))
+
+
+def test_a_lapsed_but_unreclaimed_lease_is_still_renewable_by_its_holder(queue):
+    """R7: the attempt fence is the authority; expiry only makes the item eligible.
+
+    `report_result` honours a lapsed-but-unreaped lease (test_work.py), so a late
+    heartbeat is honoured too — the two cannot disagree. Once another worker
+    reclaims it the attempt moves and the old holder is refused (above).
+    """
+    claimed = held(queue)
+    late = T0 + timedelta(seconds=61)
+    renewed = queue.renew(claimed.id, claimed.lease_attempt, "worker-a", ttl_seconds=600, now=late)
+    assert renewed.lease_attempt == claimed.lease_attempt
+    assert datetime.fromisoformat(renewed.lease_expires_at) == late + timedelta(seconds=600)
+    assert queue.claim(claimed.id, "worker-b", now=late + timedelta(seconds=1)) is None
+    assert queue.get(claimed.id).leased_by == "worker-a", "the renewed lease is live again"
 
 
 def test_a_finished_item_holds_no_lease_to_renew(queue):

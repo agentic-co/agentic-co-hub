@@ -1277,11 +1277,6 @@ def test_constructing_a_scope_directly_validates_it():
     assert reconstructed.repo == "acme/web-platform"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Scope.parse iterates a str character-by-character, so the refusal names a "
-    "single-character prefix the caller never sent",
-)
 def test_a_string_of_prefixes_is_refused_without_inventing_a_prefix():
     """Passing a string for `prefixes` produces a refusal that quotes a prefix nobody sent.
 
@@ -1452,11 +1447,6 @@ def assert_is_a_refusal_not_a_server_error(response, what: str) -> None:
     assert body.get("remediation"), f"{what} refused without telling the caller what to do"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="app.py calls bare int() on ttlSeconds, so a non-numeric value raises "
-    "ValueError into the generic handler and returns 500 internal_error",
-)
 def test_a_non_numeric_ttl_is_refused_not_reported_as_a_registry_bug(client):
     """A string where a number was wanted is told the registry is broken.
 
@@ -1511,11 +1501,6 @@ def test_a_non_numeric_ttl_is_refused_not_reported_as_a_registry_bug(client):
     assert too_broad.json()["code"] == "scope_too_broad"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="app.py calls bare int() on the limit query parameter, so a non-numeric "
-    "value raises ValueError into the generic handler and returns 500",
-)
 def test_a_non_numeric_limit_is_refused_not_reported_as_a_registry_bug(client):
     """The same bare `int()` on the read path, where it is even likelier to be hit.
 
@@ -1551,11 +1536,6 @@ def test_a_non_numeric_limit_is_refused_not_reported_as_a_registry_bug(client):
     assert bad_cursor.json()["code"] == "bad_cursor"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="resolve() catches only ResolverError, so URLError from an unreachable "
-    "host escapes take() and becomes a 500",
-)
 def test_an_unreachable_snapshot_uri_does_not_become_a_server_error(client):
     """A2's sibling: the transport failures `resolve()` still does not catch.
 
@@ -1607,11 +1587,6 @@ def test_an_unreachable_snapshot_uri_does_not_become_a_server_error(client):
     assert good.status_code in (200, 422)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the generic handler interpolates the raw exception into the response, so "
-    "server-side detail reaches the caller verbatim",
-)
 def test_an_unexpected_error_is_identifiable_without_leaking_internals(client, monkeypatch):
     """The 500 handler forwards raw exception text — paths and all — to the caller.
 
