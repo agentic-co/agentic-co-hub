@@ -474,6 +474,13 @@ def create_server(
         from agentco import envelope as envelope_module
 
         _queue.envelope_required_for = envelope_module.required_for(_conn)
+        # Owner-party separation, resolved from the same key table the HTTP app
+        # reads (app.py): without it `party_of` is the actor, and one person's
+        # two agents could execute and verify the same judged gate here while
+        # HTTP refuses it.
+        _queue.owners = lambda: {
+            name: ident.owner for name, ident in auth.load_identities().items() if ident.owner
+        }
         backend = _LocalBackend(
             _conn,
             _queue,

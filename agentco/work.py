@@ -1374,10 +1374,22 @@ class Queue:
             return actor
         try:
             return self.owners().get(actor, actor)
-        except Exception:  # noqa: BLE001 - a table that cannot be read must not
-            # turn every attestation into a 500. Falling back to the actor is
-            # the pre-ownership rule, which is stricter than nothing.
-            return actor
+        except Exception as exc:  # noqa: BLE001 - fail CLOSED. Falling back to
+            # the actor would compare actors where parties are meant, which is
+            # weaker than the rule it replaces and turns owner separation off
+            # without a word whenever the key table is malformed.
+            raise Refusal(
+                code="owner_table_unreadable",
+                message=(
+                    f"cannot tell who answers for {actor!r}: the key table that names "
+                    f"owners could not be read ({type(exc).__name__}: {exc})"
+                ),
+                remediation=(
+                    "Repair the key table (AGENTCO_REGISTRY_KEYS) so it parses; owner "
+                    "separation is refused rather than skipped while it is broken."
+                ),
+                http_status=503,
+            ) from exc
 
     def __init__(self, path: Path | str = "work.jsonl", verifiers: Optional[Sequence[str]] = None,
                  humans: Optional[Sequence[str]] = None,

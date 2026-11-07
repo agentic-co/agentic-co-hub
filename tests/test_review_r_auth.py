@@ -63,7 +63,6 @@ def _filed(client):
     return ids
 
 
-@pytest.mark.xfail(strict=True, reason="R10: plain GET /work returns the whole queue")
 def test_a_plain_work_list_shows_a_non_operator_only_its_partys_items(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     ids = _filed(client)
@@ -73,7 +72,6 @@ def test_a_plain_work_list_shows_a_non_operator_only_its_partys_items(tmp_path, 
     assert {i["id"] for i in call(client, "op", "GET", "/work").json()["items"]} == set(ids.values())
 
 
-@pytest.mark.xfail(strict=True, reason="R10: GET /work/{id} has no per-actor check")
 def test_a_single_item_read_of_another_partys_item_answers_like_a_missing_id(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     ids = _filed(client)
@@ -88,7 +86,6 @@ def test_a_single_item_read_of_another_partys_item_answers_like_a_missing_id(tmp
 # --- R11 ---------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="R11: MCP local mode never sets queue.owners")
 def test_mcp_local_mode_resolves_owner_parties_like_the_http_app(tmp_path, monkeypatch):
     pytest.importorskip("mcp")
     from agentco import mcp_server
@@ -111,7 +108,6 @@ def test_mcp_local_mode_resolves_owner_parties_like_the_http_app(tmp_path, monke
 # --- R12 ---------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="R12: party_of falls back to the actor when owners() raises")
 def test_party_of_fails_closed_when_the_owner_table_cannot_be_read(tmp_path):
     queue = Queue(tmp_path / "w.jsonl")
 
@@ -127,7 +123,6 @@ def test_party_of_fails_closed_when_the_owner_table_cannot_be_read(tmp_path):
 # --- R13 ---------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="R13: the body is buffered before the size check")
 def test_the_body_is_never_read_when_content_length_is_over_the_limit(tmp_path, monkeypatch):
     from starlette.requests import Request
 
@@ -145,7 +140,6 @@ def test_the_body_is_never_read_when_content_length_is_over_the_limit(tmp_path, 
     assert not reads, "the oversized body was buffered before being refused"
 
 
-@pytest.mark.xfail(strict=True, reason="R13: failed-auth requests parse the body and write a calls row")
 def test_an_unauthenticated_request_leaves_no_calls_row_and_parses_no_body(tmp_path, monkeypatch):
     from agentco import app as app_module
 
@@ -168,7 +162,6 @@ def test_an_unauthenticated_request_leaves_no_calls_row_and_parses_no_body(tmp_p
 # --- R14 ---------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="R14: nonce rows are pruned by arrival, before a future-dated envelope expires")
 def test_a_future_dated_envelope_keeps_its_nonce_until_it_can_no_longer_be_valid(tmp_path):
     conn = db.connect(tmp_path / "r.sqlite3")
     hubid.ensure(conn)
@@ -190,7 +183,6 @@ def test_a_future_dated_envelope_keeps_its_nonce_until_it_can_no_longer_be_valid
 # --- R15 ---------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="R15: actors_from_key_table re-parses the key table every call")
 def test_clearance_key_table_is_not_reparsed_when_unchanged(tmp_path, monkeypatch):
     path = tmp_path / "keys.json"
     path.write_text(json.dumps({"alice": {"secret": "s", "clearance": "internal"}}))
@@ -204,5 +196,5 @@ def test_clearance_key_table_is_not_reparsed_when_unchanged(tmp_path, monkeypatc
         again = clearance.actors_from_key_table(levels)
     assert again == first
     assert len(parses) <= 1, f"parsed {len(parses)} times"
-    path.write_text(json.dumps({"alice": {"secret": "s", "clearance": "restricted"}, "bob": "x"}))
+    path.write_text(json.dumps({"alice": {"secret": "s", "clearance": "restricted"}, "bob": {"secret": "x", "clearance": "internal"}}))
     assert clearance.actors_from_key_table(levels) != first, "an edit must still be seen at once"

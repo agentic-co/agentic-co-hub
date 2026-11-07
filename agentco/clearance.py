@@ -163,6 +163,9 @@ def hub_from_env(levels: Optional[tuple[str, ...]] = None) -> Clearance:
     return parse(os.environ.get(HUB_CLEARANCE_ENV_VAR), levels)
 
 
+_CACHE: dict[str, tuple[tuple, dict[str, Clearance]]] = {}
+
+
 def actors_from_key_table(levels: tuple[str, ...]) -> dict[str, Clearance]:
     """Each actor's clearance from the key table's object form.
 
@@ -175,9 +178,22 @@ def actors_from_key_table(levels: tuple[str, ...]) -> dict[str, Clearance]:
     target = os.environ.get(auth.KEYS_ENV_VAR)
     if not target:
         return {}
+    # Stat-cached the way `auth` and `authz` cache the same file: a stat per
+    # call, a parse only when (mtime, size) changed, so an edit still applies
+    # on the next request (known issue R15, the A14 pattern).
+    try:
+        stamp = os.stat(target)
+    except OSError:
+        _CACHE.pop(target, None)
+        return {}
+    fingerprint = (stamp.st_mtime_ns, stamp.st_size, levels)
+    cached = _CACHE.get(target)
+    if cached and cached[0] == fingerprint:
+        return dict(cached[1])
     try:
         data = json.loads(open(target, encoding="utf-8").read())
     except (OSError, json.JSONDecodeError):
+        _CACHE.pop(target, None)
         return {}
     out: dict[str, Clearance] = {}
     for actor, value in (data.items() if isinstance(data, dict) else ()):
@@ -187,7 +203,8 @@ def actors_from_key_table(levels: tuple[str, ...]) -> dict[str, Clearance]:
                 out[str(actor)] = Clearance(granted.grants, levels, space=parse_space(value.get("space")))
             except ValueError:
                 out[str(actor)] = Clearance({}, levels)
-    return out
+    _CACHE[target] = (fingerprint, out)
+    return dict(out)
 
 
 class Clearances:

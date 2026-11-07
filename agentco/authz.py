@@ -262,3 +262,38 @@ def party_owns(party: str, assigned: Optional[str], identities: Mapping[str, Any
     from agentco import auth
 
     return bool(assigned) and auth.owner_of(assigned, identities) == party
+
+
+def item_in_reach(actor: str, item: Any, identities: Mapping[str, Any]) -> bool:
+    """Whether `item` is in the reach of `actor`'s party: the rule behind a plain
+    list and a single-item read by anyone who is neither the operator nor a
+    transport credential (those two have their own rules in `app.py`).
+
+    ADR 0008 §6 and `wire.md` filter the READY read to the signer; they say
+    nothing about the plain list, so this extends the same principle: an item is
+    in reach when the actor's party is its assignee, its current lease holder,
+    the verifier or escalation target named on its gate, or the submitter of its
+    attestation. Parties compare through `auth.owner_of`, so a person and their
+    agents see the same set.
+
+    An UNASSIGNED item is in everyone's reach: it is the shared pool the ready
+    read already shows every actor (and every actor may pull), so hiding it from
+    the list would protect nothing. The queue records no creator on an item, so
+    "created by" is not part of the rule; a filer sees what they filed while it
+    is unassigned or once it names them.
+    """
+    from agentco import auth
+
+    party = auth.owner_of(actor, identities)
+    gate = getattr(item, "verify", None) or {}
+    attestation = getattr(item, "attestation", None) or {}
+    if not getattr(item, "assigned_agent", None):
+        return True
+    named = (
+        getattr(item, "assigned_agent", None),
+        getattr(item, "leased_by", None),
+        gate.get("verifier") if isinstance(gate, dict) else None,
+        gate.get("escalate_to") if isinstance(gate, dict) else None,
+        attestation.get("submitted_by") if isinstance(attestation, dict) else None,
+    )
+    return any(isinstance(n, str) and n and auth.owner_of(n, identities) == party for n in named)
