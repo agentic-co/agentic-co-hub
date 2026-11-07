@@ -1901,7 +1901,13 @@ class Queue:
         are unaffected: nothing is required, so nothing can be missing.
         """
         from agentco import ownership
+        from agentco import payload as pl
 
+        # The same rule `renew` applies: positive, finite, and never longer than
+        # one lease may live. Clamped rather than refused at the top, because a
+        # caller asking for "a long time" wants the longest lease it may have.
+        ttl_seconds = pl.int_value("ttlSeconds", ttl_seconds, lo=1, code="bad_ttl")
+        ttl_seconds = min(ttl_seconds, self.lease_max_age)
         owned = None
         if self.stores:
             current = self.get(item_id)
@@ -2371,10 +2377,19 @@ class Queue:
             # with nothing exported would refuse the rider here and accept the
             # identical adjudication there, which is two answers to one
             # question depending on how the caller reached the plane.
-            adjudication_record(
-                current, adjudication.get("verdict"), adjudication.get("evidence"), submitted_by,
-                humans=self.humans, adjudicators=self.adjudicators,
+            # A retry of a call whose verdict already landed skips it: the item
+            # may carry the adjudication from the first attempt (which this
+            # check would refuse as `adjudication_exists`), and the retry path
+            # below decides whether a rider is still owed (R8).
+            retry = bool(idempotency_key) and any(
+                prior.get("key") == idempotency_key and prior.get("by") == submitted_by
+                for prior in (current.metadata or {}).get(ATTEST_KEYS_KEY) or []
             )
+            if not retry:
+                adjudication_record(
+                    current, adjudication.get("verdict"), adjudication.get("evidence"), submitted_by,
+                    humans=self.humans, adjudicators=self.adjudicators,
+                )
 
         def verdict(item: WorkItem) -> dict:
             if item.is_gated and item.status == WorkStatus.DONE:
@@ -2670,12 +2685,27 @@ class Queue:
         try:
             attested = self._mutate(item_id, keyed, cascade=self._run_cascade)
         except _AlreadyAttested as recorded:
-            return recorded.item
+            # The verdict landed on an earlier call, but the rider is a second
+            # write and may not have. A retry completes it: the item carries the
+            # adjudication or it does not, and `adjudicate` is immutable, so
+            # applying only when absent makes a double application impossible.
+            if adjudication is None or (recorded.item.metadata or {}).get(ADJUDICATION_KEY):
+                return recorded.item
+            attested = recorded.item
         if attested is not None and adjudication is not None:
-            return self.adjudicate(
-                item_id, adjudication.get("verdict"), adjudication.get("evidence"),
-                adjudicator=submitted_by,
-            )
+            try:
+                return self.adjudicate(
+                    item_id, adjudication.get("verdict"), adjudication.get("evidence"),
+                    adjudicator=submitted_by,
+                )
+            except Refusal as exc:
+                # Two retries racing: the other one wrote it between our read
+                # and our write. Theirs stands; ours was never needed.
+                landed = self.get(item_id)
+                prior = ((landed.metadata or {}).get(ADJUDICATION_KEY) or {}) if landed else {}
+                if exc.code == ADJUDICATION_EXISTS and prior.get("by") == submitted_by:
+                    return landed
+                raise
         return attested
 
     def adjudicate(
@@ -2738,10 +2768,11 @@ class Queue:
         """Extend a held lease — the heartbeat a long step sends (owner decision 10).
 
         Only for the current fence holder: `agent` must hold the lease, at
-        `attempt`, and the lease must still be live. Otherwise it is refused
-        exactly as a report would be — a stale or expired fence is `LeaseError`
-        (work_conflict), another holder is `not_the_holder`, and a run moved by
-        an administrative transfer is `not_the_owner`.
+        `attempt`. Otherwise it is refused exactly as a report would be — a
+        stale fence is `LeaseError` (work_conflict), another holder is
+        `not_the_holder`, and a run moved by an administrative transfer is
+        `not_the_owner`. A lease that has lapsed but not been reclaimed or
+        reaped is still renewable, exactly as it is still reportable (R7).
 
         A renewal changes ONLY the expiry. It never advances the fence (the
         holder's attempt is still the one its report will carry), never touches
@@ -2750,9 +2781,9 @@ class Queue:
         is refused `lease_max_age`.
         """
         at = now or _now()
-        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or ttl_seconds <= 0:
-            raise Refusal(code="bad_ttl", message=f"ttlSeconds must be a positive integer, got {ttl_seconds!r}",
-                          remediation="Send the seconds the lease should run from now.", http_status=400)
+        from agentco import payload as pl
+
+        ttl_seconds = pl.int_value("ttlSeconds", ttl_seconds, lo=1, code="bad_ttl")
         if self.stores:
             from agentco import ownership
 
@@ -2792,11 +2823,13 @@ class Queue:
                     remediation="Report what is done and re-file the rest; a lease is not renewed forever.",
                     http_status=409,
                 )
-            if not item.lease_active_at(at):
-                raise LeaseError(
-                    f"cannot renew {item_id}: the lease at attempt {attempt} expired at "
-                    f"{item.lease_expires_at}. An expired lease is not renewed; pull the work again."
-                )
+            # An EXPIRED lease is not refused here. The attempt-number fence is
+            # the authority on who may act; expiry only makes the item eligible
+            # for reclaim. Until someone reclaims it (which bumps the attempt) or
+            # the reaper takes it, the holder of record is still the holder —
+            # the same rule `report_result` follows, so a late heartbeat and a
+            # late report cannot disagree. Requiring a reaper to have NOT run
+            # would make it load-bearing. The cap above still bounds the total.
             renewed: dict[str, Any] = dict((item.metadata or {}).get("lease_renewed") or {})
             if renewed.get("attempt") != item.lease_attempt:
                 renewed = {"attempt": item.lease_attempt, "count": 0}
@@ -2954,6 +2987,9 @@ class Queue:
                     f"completion with no executor is one the separation check on a "
                     f"judged gate can never see. Claim it first."
                 )
+            # Expiry is deliberately NOT checked here: the attempt fence above is
+            # the authority, and a lapsed-but-unreclaimed holder is still the
+            # holder of record (R7; `renew` follows the same rule).
             if submitted_by is not None and submitted_by != item.leased_by:
                 raise LeaseError(
                     f"refusing result for {item_id}: {submitted_by!r} is reporting "

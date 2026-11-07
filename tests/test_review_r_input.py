@@ -69,7 +69,6 @@ def _refused_cleanly(response, what):
 _CLAIM_OK = {"repo": "acme/web-platform", "prefixes": ["src/budget/grid"], "intent": "implement"}
 
 
-@pytest.mark.xfail(strict=True, reason="R5: wrong-typed scope-claim fields reach TypeError and return 500")
 @pytest.mark.parametrize("field, value", [
     ("repo", 5), ("holder", 5), ("prefixes", [5]), ("prefixes", 5), ("intent", 5),
     ("ttlSeconds", float("inf")), ("ttlSeconds", True), ("ttlSeconds", [1]),
@@ -79,7 +78,6 @@ def test_a_wrong_typed_scope_claim_field_is_refused_not_a_500(client, field, val
     _refused_cleanly(response, f"{field}={value!r}")
 
 
-@pytest.mark.xfail(strict=True, reason="R5: a dict/list release action reaches sqlite3.ProgrammingError")
 @pytest.mark.parametrize("action", [{"a": 1}, [1], 5])
 def test_a_wrong_typed_release_action_is_refused_not_a_500(client, action):
     lease = _post(client, "/scope-claims", _CLAIM_OK).json()
@@ -87,7 +85,6 @@ def test_a_wrong_typed_release_action_is_refused_not_a_500(client, action):
     _refused_cleanly(response, f"action={action!r}")
 
 
-@pytest.mark.xfail(strict=True, reason="R5: wrong-typed work payload fields reach TypeError and return 500")
 @pytest.mark.parametrize("path, body", [
     ("/work/pull", {"capabilities": 5}),
     ("/work/pull", {"capabilities": [5]}),
@@ -102,7 +99,6 @@ def test_a_wrong_typed_work_field_is_refused_not_a_500(client, path, body):
     _refused_cleanly(_post(client, path, body), f"{path} {body!r}")
 
 
-@pytest.mark.xfail(strict=True, reason="R5: an infinite ttl raises OverflowError out of the core")
 def test_the_core_refuses_a_non_numeric_scope_ttl(tmp_path):
     conn = db.connect(tmp_path / "r.sqlite3")
     for bad in ("abc", float("inf"), float("nan"), True, None, [1]):
@@ -111,7 +107,6 @@ def test_the_core_refuses_a_non_numeric_scope_ttl(tmp_path):
                          intent="implement", ttl_seconds=bad)
 
 
-@pytest.mark.xfail(strict=True, reason="R5: a malformed events limit is not refused")
 @pytest.mark.parametrize("limit", ["inf", "1e999", "nan"])
 def test_an_unusable_events_limit_never_500s(client, limit):
     path = "/events"
@@ -125,7 +120,6 @@ def test_an_unusable_events_limit_never_500s(client, limit):
 # --------------------------------------------------------------------------- R6
 
 
-@pytest.mark.xfail(strict=True, reason="R6: Queue.claim accepts ttl <= 0 and returns 'leased' on a dead lease")
 @pytest.mark.parametrize("ttl", [0, -5])
 def test_claim_refuses_a_non_positive_ttl(queue, ttl):
     item = queue.create("x")
@@ -134,7 +128,6 @@ def test_claim_refuses_a_non_positive_ttl(queue, ttl):
     assert queue.get(item.id).status is WorkStatus.PENDING, "a refused claim leaves the item free"
 
 
-@pytest.mark.xfail(strict=True, reason="R6: Queue.claim accepts any ttl, so one claim can pin an item for decades")
 def test_claim_never_holds_an_item_past_the_maximum_lease_age(queue):
     item = queue.create("x")
     try:
@@ -145,7 +138,6 @@ def test_claim_never_holds_an_item_past_the_maximum_lease_age(queue):
     assert expires <= T0 + timedelta(seconds=queue.lease_max_age)
 
 
-@pytest.mark.xfail(strict=True, reason="R6: /work/pull passes an unbounded ttl through")
 def test_pull_over_http_bounds_the_ttl(client):
     _post(client, "/work", {"title": "pin me"})
     zero = _post(client, "/work/pull", {"ttlSeconds": 0})
@@ -160,7 +152,6 @@ def test_pull_over_http_bounds_the_ttl(client):
 # --------------------------------------------------------------------------- R7
 
 
-@pytest.mark.xfail(strict=True, reason="R7: report accepts an expired lease that renew refuses")
 def test_report_and_renew_agree_about_an_expired_unreclaimed_lease(queue):
     """Same item state, same instant: both operations accept or both refuse."""
 
@@ -184,7 +175,6 @@ def test_report_and_renew_agree_about_an_expired_unreclaimed_lease(queue):
 # --------------------------------------------------------------------------- R8
 
 
-@pytest.mark.xfail(strict=True, reason="R8: a retried attest returns early and never applies the rider")
 def test_a_retried_attest_completes_a_missing_rider_exactly_once(queue, monkeypatch):
     queue.humans = frozenset({"dana"})
     queue.adjudicators = frozenset()

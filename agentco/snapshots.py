@@ -37,6 +37,7 @@ particular vendor, which is the same rule the repository is published under.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import sqlite3
 import ipaddress
 import os
@@ -385,6 +386,11 @@ def resolve(uri: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
         kind, value = resolver(uri)
     except ResolverError as exc:
         return None, None, str(exc)
+    except (OSError, http.client.HTTPException) as exc:
+        # URLError, socket.timeout and ssl.SSLError are all OSErrors: a host that
+        # is briefly down is a transient condition, and the pointer is still
+        # worth recording. Resolution never blocks the write.
+        return None, None, f"could not reach {scheme}: target unreachable ({type(exc).__name__})"
     return kind, value, None
 
 

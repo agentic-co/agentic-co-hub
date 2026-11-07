@@ -54,9 +54,11 @@ response path.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
+import uuid
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
 from fastapi import FastAPI, Request
@@ -64,6 +66,7 @@ from fastapi.responses import JSONResponse
 
 from agentco import verifiers as verifiers_module
 from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, envelope, events, leases, metrics, policy, snapshots, views
+from agentco import payload as pl
 from agentco.errors import Refusal, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
 from agentco.memory import memory_disabled, open_memory_store, resolve_hub_id
@@ -223,25 +226,14 @@ DEFAULT_DB = "registry.sqlite3"
 
 
 def _int(payload: dict, key: str, default: int) -> int:
-    """Coerce one integer field, refusing rather than exploding.
+    """Coerce one integer field, refusing rather than exploding (see `agentco/payload.py`).
 
-    `int(payload.get(...))` on caller-supplied text raises ValueError, which
-    the generic handler renders as HTTP 500 "this is a registry bug" — telling
-    a caller who sent a typo that the server is broken. Every integer that
-    crosses the wire goes through here instead.
+    `int(payload.get(...))` on caller-supplied text raises ValueError, and
+    `inf` raises OverflowError, which the generic handler renders as HTTP 500
+    "this is a registry bug". Every integer that crosses the wire goes through
+    here instead.
     """
-    raw = payload.get(key)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        raise Refusal(
-            code="not_an_integer",
-            message=f"{key} must be a whole number, got {raw!r}",
-            remediation=f"Send {key} as a JSON number, e.g. {{\"{key}\": {default}}}.",
-            http_status=400,
-        ) from None
+    return pl.int_value(key, payload.get(key), default=default)
 
 
 def _work_refusal(exc: Exception) -> Refusal:
@@ -599,14 +591,24 @@ def create_app(
                 agent_label=label,
                 via=via,
             )
-            # Named, never swallowed. A 500 that says nothing teaches the
-            # caller the tool lies.
+            # Named, never swallowed — but named by an id, not by the exception
+            # text. The text can carry a filesystem path, a host or a SQL
+            # fragment, and goes to whoever asked. The detail stays in the
+            # server log under the same id; the `calls` row records the type.
+            correlation_id = uuid.uuid4().hex[:12]
+            logging.getLogger("agentco.app").error(
+                "internal_error %s verb=%s actor=%s", correlation_id, verb, actor, exc_info=exc
+            )
             return JSONResponse(
                 {
                     "state": "error",
                     "code": "internal_error",
-                    "message": f"{type(exc).__name__}: {exc}",
-                    "remediation": "This is a registry bug — the message above is the whole of it.",
+                    "message": "the registry hit an unexpected error handling this request",
+                    "correlationId": correlation_id,
+                    "remediation": (
+                        "This is a registry bug, not a problem with your request. Report it "
+                        f"with correlationId {correlation_id}; the detail is in the server log."
+                    ),
                 },
                 status_code=500,
             )
@@ -617,12 +619,12 @@ def create_app(
             return leases.claim(
                 conn,
                 actor=actor,
-                repo=payload.get("repo", ""),
-                prefixes=payload.get("prefixes") or [],
-                intent=payload.get("intent", ""),
-                holder=payload.get("holder"),
-                ttl_seconds=int(payload.get("ttlSeconds") or leases.DEFAULT_TTL_S),
-                agent_label=payload.get("agentLabel"),
+                repo=pl.opt_str(payload, "repo", "") or "",
+                prefixes=pl.opt_str_list(payload, "prefixes"),
+                intent=pl.opt_str(payload, "intent", "") or "",
+                holder=pl.opt_str(payload, "holder"),
+                ttl_seconds=_int(payload, "ttlSeconds", leases.DEFAULT_TTL_S),
+                agent_label=pl.opt_str(payload, "agentLabel"),
             )
 
         return await _handle(request, "claim_scope", work)
@@ -634,8 +636,8 @@ def create_app(
                 conn,
                 actor=actor,
                 lease_uid=lease_uid,
-                action=payload.get("action") or "released",
-                agent_label=payload.get("agentLabel"),
+                action=pl.opt_str(payload, "action") or "released",
+                agent_label=pl.opt_str(payload, "agentLabel"),
             )
 
         return await _handle(request, "release_scope", work)
@@ -800,7 +802,7 @@ def create_app(
             return events.read(
                 conn,
                 since=params.get("since"),
-                limit=int(params.get("limit") or events.DEFAULT_LIMIT),
+                limit=pl.int_value("limit", params.get("limit"), default=events.DEFAULT_LIMIT),
                 kind=params.get("kind"),
                 # Memory off: no viewer, so no walled event is ever shown (and
                 # none exists, since no store was opened to announce one).
@@ -837,17 +839,17 @@ def create_app(
         def work(actor: str, payload: dict) -> dict:
             try:
                 item = queue.create(
-                    payload.get("title", ""),
+                    pl.opt_str(payload, "title", "") or "",
                     requires=payload.get("requires") or (),
                     blocked_by=payload.get("blockedBy") or (),
-                    assigned_agent=payload.get("assignedAgent"),
-                    natural_key=payload.get("naturalKey"),
-                    source=payload.get("source"),
-                    source_id=payload.get("sourceId"),
-                    kind=payload.get("kind"),
-                    subject=payload.get("subject"),
-                    period=payload.get("period"),
-                    metadata=payload.get("metadata"),
+                    assigned_agent=pl.opt_str(payload, "assignedAgent"),
+                    natural_key=pl.opt_str(payload, "naturalKey"),
+                    source=pl.opt_str(payload, "source"),
+                    source_id=pl.opt_str(payload, "sourceId"),
+                    kind=pl.opt_str(payload, "kind"),
+                    subject=pl.opt_str(payload, "subject"),
+                    period=pl.opt_str(payload, "period"),
+                    metadata=pl.opt_dict(payload, "metadata"),
                     # Validated in `work.build_item`, which refuses before the
                     # store is touched. Absent means ungated, which is what
                     # every item filed before gates existed is.
@@ -870,7 +872,9 @@ def create_app(
         """
 
         def work(actor: str, payload: dict) -> dict:
-            capabilities = payload.get("capabilities")
+            capabilities = (
+                pl.opt_str_list(payload, "capabilities") if payload.get("capabilities") is not None else None
+            )
             ttl = _int(payload, "ttlSeconds", DEFAULT_LEASE_TTL_S)
             for candidate in queue.ready(agent=actor):
                 try:

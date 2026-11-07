@@ -103,9 +103,14 @@ def claim(
     """
     from agentco.scope import validate_intent
 
+    from agentco import payload as pl
+
     at = now or datetime.now(timezone.utc)
     scope = Scope.parse(repo, prefixes)
     checked_intent = validate_intent(intent)
+    # Type first: a string or `inf` here used to be a TypeError / OverflowError.
+    ttl_seconds = pl.int_value("ttlSeconds", ttl_seconds, code="bad_ttl")
+    pl.str_value("holder", holder)
 
     if ttl_seconds <= 0 or ttl_seconds > MAX_TTL_S:
         raise Refusal(
@@ -226,6 +231,9 @@ def release(
     to an optimistic `narrowed`) keeps the metric honest when a client does
     not supply one.
     """
+    from agentco import payload as pl
+
+    action = pl.str_value("action", action, default="released") or "released"
     at = now or datetime.now(timezone.utc)
     row = conn.execute("SELECT * FROM leases WHERE uid = ?", (lease_uid,)).fetchone()
     if row is None:
