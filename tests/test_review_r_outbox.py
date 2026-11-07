@@ -1,8 +1,8 @@
 """R4 and R9 from the 2026-11-07 review (docs/known-issues.md), as properties.
 
 Conventions are those of `tests/test_adversarial_findings.py`: each test names
-the property that should hold, begins life `xfail(strict=True)`, and accepts any
-honest fix. Fix the defect, delete the marker, in one change.
+the property that should hold and accepts any honest fix. They began life
+`xfail(strict=True)`; the markers came off with the fix.
 
 **R4 — the outbox's republish window.** F2 made the drainer write a receipt
 before it removes the line, so the worst case after a crash is a receipt for a
@@ -26,6 +26,7 @@ it is a probe, not a synchronisation the test depends on to pass.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from typing import Optional
@@ -38,7 +39,6 @@ from agentco.app import create_app
 from agentco.outbox import Outbox, registry_publisher
 from agentco.publish import Registry, RegistryError
 
-from conftest import BACKENDS, PG_ENV_VAR  # noqa: F401  (rootdir conftest)
 
 KEYS = {"bigmac": "bigmac-secret", "reviewer-box": "reviewer-secret", "dana": "dana-secret",
         "operator": "op-secret"}
@@ -102,10 +102,6 @@ def _line(tmp_path, verb: str, payload: dict) -> dict:
 # R4 — one line published twice has one effect
 # --------------------------------------------------------------------------- #
 
-_R4 = "R4: the hub has no idempotency key on this verb, so a republished line acts twice"
-
-
-@pytest.mark.xfail(strict=True, reason=_R4)
 def test_republishing_a_claim_scope_line_opens_one_lease(hub):
     """Neighbour: `test_work_report_carries_the_line_id_as_its_idempotency_key`
     proves the KEY is passed for work_report. Nothing proves any other verb
@@ -118,7 +114,6 @@ def test_republishing_a_claim_scope_line_opens_one_lease(hub):
     assert _kinds(hub, "ScopeConflict") == [], "a lease must not conflict with its own republish"
 
 
-@pytest.mark.xfail(strict=True, reason=_R4)
 def test_republishing_a_snapshot_line_records_one_snapshot(hub):
     publish = registry_publisher(Loopback("bigmac", hub))
     line = _line(hub.tmp, "snapshot", {"artifactUri": "git:/r#main", "purpose": "baseline"})
@@ -137,7 +132,6 @@ def _executed(client) -> dict:
     return item
 
 
-@pytest.mark.xfail(strict=True, reason=_R4)
 def test_republishing_an_adjudicate_line_returns_the_recorded_tag_not_a_refusal(hub):
     """An adjudication is immutable, so the second send is refused
     `adjudication_exists` — the drainer then records a REFUSAL receipt for a line
@@ -162,7 +156,6 @@ def _a_procedure(client) -> str:
     return sop.asop_id
 
 
-@pytest.mark.xfail(strict=True, reason=_R4)
 def test_republishing_a_sop_revise_line_writes_one_version(hub):
     from agentco.sop import SopLibrary
 
@@ -174,7 +167,6 @@ def test_republishing_a_sop_revise_line_writes_one_version(hub):
     assert [a.version for a in SopLibrary(hub.tmp / "sops.jsonl").history(sop_id)] == [1, 2]
 
 
-@pytest.mark.xfail(strict=True, reason=_R4)
 def test_republishing_a_sop_activate_line_announces_one_activation(hub):
     from agentco.sop import SopLibrary
 
@@ -219,10 +211,10 @@ def test_one_actors_key_never_replays_another_actors_outcome(hub):
 # R9 — claim and release are one transaction each
 # --------------------------------------------------------------------------- #
 
-_R9 = "R9: leases.claim/release are check-then-act across separate commits"
 _WAIT_FOR_RIVAL = 1.0
 
-_R9_BACKENDS = [b for b in BACKENDS if b != "jsonl"]
+# The same two backends the `backend` fixture adds Postgres to, minus the file store.
+_R9_BACKENDS = ["sqlite"] + (["postgres"] if os.environ.get("AGENTCO_TEST_PG") else [])
 
 
 @pytest.fixture(params=_R9_BACKENDS)
@@ -276,7 +268,6 @@ def _rival(fn):
     return thread, box
 
 
-@pytest.mark.xfail(strict=True, reason=_R9)
 def test_two_overlapping_claims_cannot_both_miss_each_other(target):
     """Two processes claiming overlapping scope: at least one of them must be told.
 
@@ -306,7 +297,6 @@ def test_two_overlapping_claims_cannot_both_miss_each_other(target):
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_R9)
 def test_a_claim_whose_event_cannot_be_written_leaves_no_lease(target, monkeypatch):
     """A crash between the lease commit and the event commit leaves a lease no
     feed subscriber ever saw. Either both land or neither does."""
@@ -322,7 +312,6 @@ def test_a_claim_whose_event_cannot_be_written_leaves_no_lease(target, monkeypat
     assert leases.live_leases(conn, "acme/app") == []
 
 
-@pytest.mark.xfail(strict=True, reason=_R9)
 def test_two_concurrent_releases_announce_one_release(target):
     """`release`'s UPDATE has no `released_at IS NULL` guard, so two releasers
     that both read an open lease both write and both emit."""

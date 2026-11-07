@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from agentco import events
+from agentco import events, idempotency
 from agentco.errors import Refusal
 from agentco.scope import Scope, find_conflicts, reject_control_characters
 
@@ -92,8 +92,16 @@ def claim(
     ttl_seconds: int = DEFAULT_TTL_S,
     now: Optional[datetime] = None,
     agent_label: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> dict:
     """Open a `ScopeLease`. Returns the lease plus any conflicts it revealed.
+
+    **One transaction** (R9): the conflict read, the lease, its events and the
+    conflict rows commit together under a write lock — `BEGIN IMMEDIATE` on
+    SQLite, an advisory lock on the repo on Postgres — so two claimants cannot
+    both read "nobody here", and a crash cannot leave a lease the feed never
+    announced. `idempotency_key` (R4) joins that transaction: a retry with the
+    same key from the same actor returns the recorded outcome.
 
     Conflicts are computed BEFORE the insert and reported in the response, so
     the caller learns about the overlap in the same round trip that created
@@ -127,16 +135,20 @@ def claim(
     claimed_holder = reject_control_characters("holder", holder or actor).strip() or actor
     attested = claimed_holder != actor
 
-    existing = live_leases(conn, scope.repo, at)
-    conflicts = find_conflicts(
-        scope,
-        claimed_holder,
-        [(l["holder"], Scope(l["repo"], tuple(l["prefixes"])), l["intent"]) for l in existing],
-    )
-
+    key = idempotency.clean(idempotency_key)
     uid = f"lease_{uuid.uuid4().hex[:16]}"
     expires = at + timedelta(seconds=ttl_seconds)
-    with conn:
+    with idempotency.write_tx(conn, lock=f"claim:{scope.repo}"):
+        if key is not None:
+            prior = idempotency.recorded(conn, actor, "claim_scope", key)
+            if prior is not None:
+                return prior
+        existing = live_leases(conn, scope.repo, at)
+        conflicts = find_conflicts(
+            scope,
+            claimed_holder,
+            [(l["holder"], Scope(l["repo"], tuple(l["prefixes"])), l["intent"]) for l in existing],
+        )
         conn.execute(
             "INSERT INTO leases(uid, holder, holder_attested, repo, prefixes, intent, "
             "claimed_at, expires_at, released_at) VALUES (?,?,?,?,?,?,?,?,NULL)",
@@ -151,28 +163,9 @@ def claim(
                 _iso(expires),
             ),
         )
-
-    events.append(
-        conn,
-        kind="ScopeClaimed",
-        agent_label=agent_label,
-        actor=actor,
-        repo=scope.repo,
-        occurred_at=_iso(at),
-        payload={
-            "leaseUid": uid,
-            "holder": claimed_holder,
-            "holderAttested": attested,
-            "prefixes": list(scope.prefixes),
-            "intent": checked_intent,
-            "expiresAt": _iso(expires),
-        },
-    )
-
-    for conflict in conflicts:
-        events.append(
+        events.insert(
             conn,
-            kind="ScopeConflict",
+            kind="ScopeClaimed",
             agent_label=agent_label,
             actor=actor,
             repo=scope.repo,
@@ -180,32 +173,50 @@ def claim(
             payload={
                 "leaseUid": uid,
                 "holder": claimed_holder,
-                # the scope-model decision (docs/decisions/0001): carry BOTH intents so 'prototype vs implement' reads
-                # differently from 'implement vs implement'.
-                "myIntent": checked_intent,
-                **conflict,
+                "holderAttested": attested,
+                "prefixes": list(scope.prefixes),
+                "intent": checked_intent,
+                "expiresAt": _iso(expires),
             },
         )
-        with conn:
+        for conflict in conflicts:
+            events.insert(
+                conn,
+                kind="ScopeConflict",
+                agent_label=agent_label,
+                actor=actor,
+                repo=scope.repo,
+                occurred_at=_iso(at),
+                payload={
+                    "leaseUid": uid,
+                    "holder": claimed_holder,
+                    # the scope-model decision (docs/decisions/0001): carry BOTH intents so 'prototype vs implement' reads
+                    # differently from 'implement vs implement'.
+                    "myIntent": checked_intent,
+                    **conflict,
+                },
+            )
             conn.execute(
                 "INSERT INTO conflict_actions(lease_uid, with_holder, fired_at) VALUES (?,?,?)",
                 (uid, conflict["withHolder"], _iso(at)),
             )
-
-    return {
-        "leaseUid": uid,
-        "state": "accepted",
-        "holder": claimed_holder,
-        "holderAttested": attested,
-        "repo": scope.repo,
-        "prefixes": list(scope.prefixes),
-        "intent": checked_intent,
-        "expiresAt": _iso(expires),
-        "conflicts": conflicts,
-        # Advisory, always — stated in the payload so a client author reads it
-        # without having to find the design doc.
-        "enforcement": "advisory",
-    }
+        outcome = {
+            "leaseUid": uid,
+            "state": "accepted",
+            "holder": claimed_holder,
+            "holderAttested": attested,
+            "repo": scope.repo,
+            "prefixes": list(scope.prefixes),
+            "intent": checked_intent,
+            "expiresAt": _iso(expires),
+            "conflicts": conflicts,
+            # Advisory, always — stated in the payload so a client author reads it
+            # without having to find the design doc.
+            "enforcement": "advisory",
+        }
+        if key is not None:
+            idempotency.record(conn, actor, "claim_scope", key, outcome)
+    return outcome
 
 
 def release(
@@ -227,45 +238,52 @@ def release(
     not supply one.
     """
     at = now or datetime.now(timezone.utc)
-    row = conn.execute("SELECT * FROM leases WHERE uid = ?", (lease_uid,)).fetchone()
-    if row is None:
-        raise Refusal(
-            code="no_such_lease",
-            message=f"no lease {lease_uid!r}",
-            remediation="Use the 'leaseUid' returned by POST /scope-claims.",
-            http_status=404,
-        )
-    if row["released_at"] is not None:
-        return {"leaseUid": lease_uid, "state": "duplicate", "releasedAt": row["released_at"]}
-    if row["holder"] != actor:
-        raise Refusal(
-            code="not_the_holder",
-            message=f"lease {lease_uid!r} is held by another identity",
-            remediation=(
-                "Only the holder releases a lease. If it is stale, wait for it to "
-                "expire or ask the holder — releasing another person's claim is the "
-                "behaviour this registry exists to make visible, not to enable."
-            ),
-            http_status=403,
-        )
-
-    with conn:
-        conn.execute("UPDATE leases SET released_at = ? WHERE uid = ?", (_iso(at), lease_uid))
+    # One transaction (R9). The read, the guarded UPDATE and the event commit
+    # together, and only the release that actually flips `released_at` emits —
+    # two concurrent releasers used to both read an open lease and both announce.
+    with idempotency.write_tx(conn, lock=f"lease:{lease_uid}"):
+        row = conn.execute("SELECT * FROM leases WHERE uid = ?", (lease_uid,)).fetchone()
+        if row is None:
+            raise Refusal(
+                code="no_such_lease",
+                message=f"no lease {lease_uid!r}",
+                remediation="Use the 'leaseUid' returned by POST /scope-claims.",
+                http_status=404,
+            )
+        if row["released_at"] is not None:
+            return {"leaseUid": lease_uid, "state": "duplicate", "releasedAt": row["released_at"]}
+        if row["holder"] != actor:
+            raise Refusal(
+                code="not_the_holder",
+                message=f"lease {lease_uid!r} is held by another identity",
+                remediation=(
+                    "Only the holder releases a lease. If it is stale, wait for it to "
+                    "expire or ask the holder — releasing another person's claim is the "
+                    "behaviour this registry exists to make visible, not to enable."
+                ),
+                http_status=403,
+            )
+        flipped = conn.execute(
+            "UPDATE leases SET released_at = ? WHERE uid = ? AND released_at IS NULL",
+            (_iso(at), lease_uid),
+        ).rowcount
+        if flipped == 0:  # lost the race to another releaser: nothing to announce
+            again = conn.execute("SELECT released_at FROM leases WHERE uid = ?", (lease_uid,)).fetchone()
+            return {"leaseUid": lease_uid, "state": "duplicate", "releasedAt": again["released_at"]}
         conn.execute(
             "UPDATE conflict_actions SET acted_at = ?, action = ? "
             "WHERE lease_uid = ? AND acted_at IS NULL",
             (_iso(at), action, lease_uid),
         )
-
-    events.append(
-        conn,
-        kind="ScopeReleased",
-        agent_label=agent_label,
-        actor=actor,
-        repo=row["repo"],
-        occurred_at=_iso(at),
-        payload={"leaseUid": lease_uid, "action": action},
-    )
+        events.insert(
+            conn,
+            kind="ScopeReleased",
+            agent_label=agent_label,
+            actor=actor,
+            repo=row["repo"],
+            occurred_at=_iso(at),
+            payload={"leaseUid": lease_uid, "action": action},
+        )
     return {"leaseUid": lease_uid, "state": "accepted", "releasedAt": _iso(at)}
 
 

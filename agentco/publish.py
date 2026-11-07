@@ -185,6 +185,7 @@ class Registry:
         intent: str = "implement",
         ttl_seconds: Optional[int] = None,
         agent_label: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """Declare where you are about to work. Advisory — it blocks nothing.
 
@@ -204,6 +205,8 @@ class Registry:
             body["ttlSeconds"] = ttl_seconds
         if agent_label:
             body["agentLabel"] = agent_label
+        if idempotency_key:
+            body["idempotencyKey"] = idempotency_key
         return self._call("POST", "/scope-claims", body)
 
     def release_scope(
@@ -227,6 +230,7 @@ class Registry:
         purpose: str,
         agent_label: Optional[str] = None,
         ttl_days: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """Baseline a document by pointer. The body is never sent or stored.
 
@@ -239,6 +243,8 @@ class Registry:
             body["ttlDays"] = ttl_days
         if agent_label:
             body["agentLabel"] = agent_label
+        if idempotency_key:
+            body["idempotencyKey"] = idempotency_key
         return self._call("POST", "/snapshots", body)
 
     def events(self, since: Optional[str] = None, limit: int = 200, kind: Optional[str] = None) -> dict:
@@ -358,17 +364,23 @@ class Registry:
         """Author version 1 as a DRAFT. Activation is separate and deliberate."""
         return self._call("POST", "/sops", {"title": title, **body})
 
-    def sop_revise(self, sop_id: str, **body: Any) -> dict:
+    def sop_revise(self, sop_id: str, idempotency_key: Optional[str] = None, **body: Any) -> dict:
         """Write the next version — this is how a lesson learned becomes shared.
 
         Unset fields carry forward, so adding one line to `common_mistakes`
         does not blank the other four. The superseded version stays readable.
+        `idempotency_key` makes a retry return the recorded version.
         """
+        if idempotency_key:
+            body["idempotencyKey"] = idempotency_key
         return self._call("POST", f"/sops/{sop_id}/revise", body)
 
-    def sop_activate(self, sop_id: str, version: int) -> dict:
+    def sop_activate(self, sop_id: str, version: int, idempotency_key: Optional[str] = None) -> dict:
         """Make one version the one every reader gets by default."""
-        return self._call("POST", f"/sops/{sop_id}/activate", {"version": version})
+        body: dict[str, Any] = {"version": version}
+        if idempotency_key:
+            body["idempotencyKey"] = idempotency_key
+        return self._call("POST", f"/sops/{sop_id}/activate", body)
 
     def attest(
         self,
@@ -415,9 +427,12 @@ class Registry:
         verdict: str,
         evidence: str,
         agent_label: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """Tag a divergence `good` or `bad`. The adjudicator is the signature, never the body."""
         body: dict[str, Any] = {"verdict": verdict, "evidence": evidence}
+        if idempotency_key:
+            body["idempotencyKey"] = idempotency_key
         if agent_label:
             body["agentLabel"] = agent_label
         return self._call("POST", f"/work/{item_id}/adjudicate", body)

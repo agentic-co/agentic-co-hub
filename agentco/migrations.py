@@ -880,6 +880,30 @@ _0017: tuple[str, ...] = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 0018 — recorded outcomes for idempotent verbs (R4, agentco/idempotency.py).
+#
+# One row per (actor, verb, key): the outcome the first call returned, as JSON.
+# A retry with the same key from the same actor returns it instead of acting
+# again. Scoped to the actor so one machine cannot replay, or pre-empt, another's
+# line; bounded per (actor, verb) by the writer. `idem_key`, not `key`, which is
+# reserved in some dialects.
+# --------------------------------------------------------------------------- #
+
+_0018: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS idempotency_keys (
+        actor        TEXT NOT NULL,
+        verb         TEXT NOT NULL,
+        idem_key     TEXT NOT NULL,
+        outcome      TEXT NOT NULL,
+        recorded_at  TEXT NOT NULL,
+        PRIMARY KEY (actor, verb, idem_key)
+    )
+    """,
+)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "registry-core", _0001, pg_statements=_0001_pg),
     Migration(2, "durable-work-and-sops", _0002),
@@ -898,6 +922,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(15, "human-keys", _0015),
     Migration(16, "answer-nonces", _0016),
     Migration(17, "memory-spaces", _0017),
+    Migration(18, "idempotency-keys", _0018),
 )
 
 

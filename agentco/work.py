@@ -2685,8 +2685,13 @@ class Queue:
         evidence: object,
         *,
         adjudicator: object,
+        idempotency_key: Optional[str] = None,
     ) -> Optional[WorkItem]:
         """Tag a divergence `good` or `bad`, as somebody who did not execute it.
+
+        `idempotency_key` makes a republish safe (R4): the key rides in the
+        immutable record, and a retry with the same key from the same
+        adjudicator gets the item as recorded instead of `adjudication_exists`.
 
         The third ASOP property's first record. `good` says the procedure was
         wrong and the deviation feeds its next version; `bad` says the
@@ -2713,6 +2718,10 @@ class Queue:
                     f"The row is preserved on disk. Upgrade, or repair the row."
                 )
             return None
+        if idempotency_key:
+            prior = (current.metadata or {}).get(ADJUDICATION_KEY) or {}
+            if prior.get("idempotency_key") == idempotency_key and prior.get("by") == adjudicator:
+                return current
         # Validated on the read, and again inside the lock: the first refuses
         # before anything is touched, the second holds if the item moved.
         adjudication_record(current, verdict, evidence, adjudicator,
@@ -2721,6 +2730,8 @@ class Queue:
         def tag(item: WorkItem) -> dict:
             record = adjudication_record(item, verdict, evidence, adjudicator,
                                          humans=self.humans, adjudicators=self.adjudicators)
+            if idempotency_key:
+                record["idempotency_key"] = idempotency_key
             metadata = dict(item.metadata or {})
             metadata[ADJUDICATION_KEY] = record
             return {"metadata": metadata}
