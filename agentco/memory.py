@@ -49,6 +49,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
+from threading import local as thread_local
 from typing import Any, Callable, Iterator, Mapping, Optional, Sequence, TypeGuard
 
 from agentco.clearance import PUBLIC, ROOT_SPACE, Clearance, is_within, not_cleared, parse_space
@@ -855,16 +856,25 @@ class SqlMemoryStore(MemoryStore):
         self.quarantined = []
         self.announce = None
         self.params = engine.Params.from_env()
-        self._in_tx = False
+        # Per THREAD, not per store. A plain attribute was shared by every
+        # thread, so while one thread held the write transaction another
+        # thread's `_query` saw the flag, skipped `_read_tx`, and read the
+        # shared connection mid-transaction — rows that a rollback then erased.
+        self._tx_state = thread_local()
+
+    @property
+    def _in_tx(self) -> bool:
+        return getattr(self._tx_state, "active", False)
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
         with self._backing._write_tx():
-            self._in_tx = True
+            outer = self._in_tx
+            self._tx_state.active = True
             try:
                 yield
             finally:
-                self._in_tx = False
+                self._tx_state.active = outer
 
     def _conn(self):
         return self._backing._conn

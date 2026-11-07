@@ -378,7 +378,11 @@ class WorkItem:
         disk, because a stored copy of a derived fact is a cache, and this one
         had no invalidation path at all.
         """
-        return [dep for dep in self.blocked_by if dep not in done_ids]
+        # A non-string blocker can never be met, so it holds the item rather
+        # than crashing the caller. `build_item` refuses one at filing; this is
+        # for rows that reached disk before it did — one such row used to raise
+        # `TypeError` inside `ready()` and take down every worker's pull.
+        return [dep for dep in self.blocked_by if not isinstance(dep, str) or dep not in done_ids]
 
     def to_json(self) -> str:
         payload = asdict(self)
@@ -1222,6 +1226,32 @@ def self_verifying_gate(gate: Optional[dict], assigned_agent: Optional[str]) -> 
     )
 
 
+def _id_list(name: str, value: object) -> list[str]:
+    """Refuse anything but a list of non-empty strings for an id-list field.
+
+    `blocked_by` and `requires` arrive straight off a JSON payload. A bare
+    string is refused rather than split into characters, and a non-string
+    element is refused rather than stored: an unhashable one used to land on
+    disk and make every later `ready()` raise, for every worker.
+    """
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple)):
+        raise Refusal(
+            code="invalid_request",
+            message=f"{name} must be a list of strings, got {type(value).__name__}",
+            remediation=f"Send {name} as a JSON array of strings, e.g. [\"w-1234abcd\"].",
+            http_status=400,
+        )
+    bad = [v for v in value if not isinstance(v, str) or not v]
+    if bad:
+        raise Refusal(
+            code="invalid_request",
+            message=f"{name} must contain only non-empty strings; got {bad[:3]!r}",
+            remediation=f"Send {name} as a JSON array of non-empty strings.",
+            http_status=400,
+        )
+    return list(value)
+
+
 def build_item(
     title: str,
     *,
@@ -1261,8 +1291,8 @@ def build_item(
     return WorkItem(
         id=f"w-{uuid.uuid4().hex[:8]}",
         title=title,
-        requires=list(requires),
-        blocked_by=list(blocked_by),
+        requires=_id_list("requires", requires),
+        blocked_by=_id_list("blocked_by", blocked_by),
         assigned_agent=assigned_agent,
         natural_key=derive_natural_key(
             explicit=natural_key,
