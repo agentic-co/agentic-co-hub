@@ -66,7 +66,6 @@ def _contend(n, target):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=True, reason="R16: seq is assigned at INSERT and visible at COMMIT; nothing orders commits on Postgres")
 @needs_pg
 def test_a_feed_reader_never_skips_an_event_that_commits_after_a_later_seq(_pg_dsn):
     """T1 takes seq N and holds its transaction open; T2 takes N+1 and commits;
@@ -124,7 +123,6 @@ def test_a_feed_reader_never_skips_an_event_that_commits_after_a_later_seq(_pg_d
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=True, reason="R17: BEGIN IMMEDIATE is a plain BEGIN on Postgres; concurrent migrators collide")
 @needs_pg
 def test_concurrent_cold_starts_against_one_fresh_postgres_schema_both_succeed(_pg_dsn):
     """Four processes' worth of connections opening one EMPTY schema together.
@@ -150,7 +148,6 @@ def test_concurrent_cold_starts_against_one_fresh_postgres_schema_both_succeed(_
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=True, reason="R18: the parent's read-modify-write is unlocked on Postgres")
 @needs_pg
 def test_concurrent_child_creates_under_one_parent_keep_the_cap_and_every_block(_pg_dsn):
     """Several writers filing children of one goal at once. The cap must hold,
@@ -174,7 +171,6 @@ def test_concurrent_child_creates_under_one_parent_keep_the_cap_and_every_block(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=True, reason="R19: SqlSopLibrary._write_all deletes and re-inserts the whole table")
 @needs_pg
 def test_concurrent_revisions_of_one_sop_get_distinct_versions_and_lose_none(_pg_dsn):
     from tests.test_sop import feature_dev_body
@@ -195,7 +191,6 @@ def test_concurrent_revisions_of_one_sop_get_distinct_versions_and_lose_none(_pg
         "a version number now names different text than the revision that was issued it")
 
 
-@pytest.mark.xfail(strict=True, reason="R19: SqlSopLibrary._write_all deletes and re-inserts the whole table")
 @needs_pg
 def test_concurrent_creates_never_delete_a_committed_sop(_pg_dsn):
     """Creates of DIFFERENT SOPs racing while one already exists. Every
@@ -212,7 +207,6 @@ def test_concurrent_creates_never_delete_a_committed_sop(_pg_dsn):
     assert expected <= stored, f"committed SOPs deleted by a concurrent create: {expected - stored}"
 
 
-@pytest.mark.xfail(strict=True, reason="R19: no row to lock on an empty table; delete-all destroys the other create")
 @needs_pg
 def test_a_first_create_on_an_empty_sop_table_survives_a_concurrent_one(_pg_dsn):
     """The case no row lock can cover: the table is empty, so there is nothing
@@ -271,7 +265,7 @@ def memory(backend, tmp_path, request):
 
 
 @pytest.mark.parametrize("fails", ["_put_states", "_add_credits"])
-def test_a_trace_interrupted_between_its_two_writes_is_never_credited_twice(memory, backend, fails, request):
+def test_a_trace_interrupted_between_its_two_writes_is_never_credited_twice(memory, fails):
     """Fault injection between the state write and the dedupe marker, in either
     order. The trace is then redelivered — the at-least-once transport's normal
     behaviour after a failed call — and must not count twice.
@@ -280,10 +274,7 @@ def test_a_trace_interrupted_between_its_two_writes_is_never_credited_twice(memo
     one trace, never doubles it), or a state write that is itself idempotent on
     the trace id. The SQL stores write both in one transaction and hold this.
     """
-    if backend == "jsonl" and fails == "_add_credits":
-        request.applymarker(pytest.mark.xfail(strict=True, reason=(
-            "R20: JSONL record_trace writes states, then the credits ledger that _trace_seen reads")))
-    m = memory.create(actor="kofi", clearance=ACME, owner="acme", level="internal", layer="shared",
+    m =memory.create(actor="kofi", clearance=ACME, owner="acme", level="internal", layer="shared",
                       title="Retry the export once", body="A stalled export resumes after one retry.",
                       provenance=PROV)
 
@@ -324,7 +315,6 @@ def _forged(position: str) -> str:
     return base64.urlsafe_b64encode(f"{events.CURSOR_PREFIX}{position}".encode()).decode().rstrip("=")
 
 
-@pytest.mark.xfail(strict=True, reason="R21: an out-of-range seq reaches the driver (OverflowError) or the floor check (410)")
 @pytest.mark.parametrize("position", ["99999999999999999999", str(2**63), "-1"])
 def test_a_cursor_outside_the_seq_range_is_refused_as_a_bad_cursor(conn, position):
     """Refused at the layer that can name it (400 `bad_cursor`), never an
@@ -336,7 +326,6 @@ def test_a_cursor_outside_the_seq_range_is_refused_as_a_bad_cursor(conn, positio
     assert refused.value.code == "bad_cursor" and refused.value.http_status == 400
 
 
-@pytest.mark.xfail(strict=True, reason="R21: the floor check reads since='' as a cursor at seq 0")
 def test_an_empty_cursor_after_a_prune_starts_at_the_floor_like_no_cursor(conn):
     """`decode_cursor` reads `since=""` as no cursor; the floor check must too."""
     old, new = "2026-01-01T00:00:00+00:00", "2026-10-18T00:00:00+00:00"

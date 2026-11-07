@@ -595,8 +595,18 @@ class MemoryStore:
                 # Still recorded, so a redelivery stays a no-op.
                 rows = [{"trace_id": trace_id, "item_id": "", "invoked": False, "outcome": outcome,
                          "effect": "none", "actor": actor, "recorded_at": at}]
-            self._put_states(list(after.values()))
+            # The credits row FIRST: it is the dedupe marker `_trace_seen`
+            # reads, so it is the guard, and a guard goes before the write it
+            # guards (F1/F2). On JSONL the two are separate files with no
+            # shared transaction. States-then-credits meant a crash between
+            # them left the effect applied and the marker absent, and the
+            # at-least-once redelivery applied it again (R20). This order fails
+            # the other way: the trace is marked and its effect lost, which
+            # under-credits one run rather than double-counting it — a credit
+            # is evidence of usefulness, and inventing evidence is the worse
+            # error. The SQL stores write both in one transaction either way.
             self._add_credits(rows)
+            self._put_states(list(after.values()))
         return {"state": "accepted", "traceId": trace_id,
                 "credits": [r for r in rows if r["item_id"]]}
 

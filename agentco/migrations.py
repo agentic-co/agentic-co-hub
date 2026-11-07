@@ -910,6 +910,24 @@ def applied_versions(conn) -> set[int]:
     return {row[0] for row in conn.execute("SELECT version FROM schema_migrations")}
 
 
+def _serialise_migrators(conn, dialect: str) -> None:
+    """Make "the write lock is held" true on Postgres too (R17).
+
+    SQLite's `BEGIN IMMEDIATE` takes the whole-database write lock, which is
+    what the re-check of the ledger below relies on. The adapter turns it into
+    a plain `BEGIN` on Postgres, where two cold starts then both find a version
+    unapplied and the loser fails on a duplicate column or the ledger's primary
+    key. A transaction-scoped advisory lock restores the exclusion for exactly
+    this span: taken first, released at COMMIT/ROLLBACK, never left behind by a
+    crashed process. Keyed on the schema, so registries sharing a database in
+    different schemas migrate independently.
+    """
+    if dialect == "postgres":
+        conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('agentco.migrations:' || current_schema())::bigint)"
+        )
+
+
 def apply(conn, pending: Sequence[Migration] = MIGRATIONS) -> list[int]:
     """Bring `conn`'s file up to date. Returns the versions newly applied.
 
@@ -943,11 +961,24 @@ def apply(conn, pending: Sequence[Migration] = MIGRATIONS) -> list[int]:
     # attribute, which is exactly the "sqlite" default. One call site
     # (`migrations.apply(conn)`) stays unchanged for both backends this way.
     dialect = getattr(conn, "dialect", "sqlite")
-    done = applied_versions(conn)
     previous = conn.isolation_level
     conn.isolation_level = None
     newly: list[int] = []
     try:
+        if dialect == "postgres":
+            # Even the ledger's `CREATE TABLE IF NOT EXISTS` races on Postgres:
+            # two sessions both pass the IF NOT EXISTS and the loser fails on
+            # the catalog's unique index (R17). Created under the same lock.
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                _serialise_migrators(conn, dialect)
+                done = applied_versions(conn)
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+        else:
+            done = applied_versions(conn)
         for migration in pending:
             if migration.version in done:
                 continue
@@ -958,6 +989,7 @@ def apply(conn, pending: Sequence[Migration] = MIGRATIONS) -> list[int]:
             )
             conn.execute("BEGIN IMMEDIATE")
             try:
+                _serialise_migrators(conn, dialect)
                 # The authoritative check: the write lock is held, so no other
                 # process can apply this version between here and the COMMIT.
                 already = (
