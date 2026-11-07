@@ -65,7 +65,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from agentco import verifiers as verifiers_module
-from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, ownership, wire, digests, divergence, envelope, events, leases, metrics, policy, snapshots, views
+from agentco import auth, authz, chains, clearance as clearance_module, db, hubid, idempotency, ownership, wire, digests, divergence, envelope, events, leases, metrics, policy, snapshots, views
 from agentco import payload as pl
 from agentco.errors import Refusal, Unauthenticated, human_required, transfer_refused
 from agentco.keys import NaturalKeyError
@@ -141,9 +141,10 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     ("GET", "/views/me"): wire.lenient(),
     ("GET", "/work/{item_id}"): wire.lenient(),
     ("POST", "/scope-claims"): wire.strict(
-        ("repo", "prefixes", "intent", "holder", "ttlSeconds"), "a scope claim's paths and lease"),
+        ("repo", "prefixes", "intent", "holder", "ttlSeconds", "idempotencyKey"),
+        "a scope claim's paths, lease and idempotency key"),
     ("POST", "/scope-claims/{lease_uid}/release"): wire.lenient(("action",)),
-    ("POST", "/snapshots"): wire.lenient(("artifactUri", "purpose", "ttlDays")),
+    ("POST", "/snapshots"): wire.lenient(("artifactUri", "purpose", "ttlDays", "idempotencyKey")),
     ("POST", "/digests"): wire.lenient(("text", "generatedAt", "meta")),
     ("POST", "/work"): wire.strict(
         ("title", "requires", "blockedBy", "assignedAgent", "naturalKey", "source", "sourceId",
@@ -156,7 +157,8 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
         ("status", "attempt", "result", "idempotencyKey", "attestation"),
         "the fence, the idempotency key and the attestation"),
     ("POST", "/work/{item_id}/adjudicate"): wire.strict(
-        ("verdict", "evidence"), "the adjudication record", refused_by_name=("adjudicator", "by")),
+        ("verdict", "evidence", "idempotencyKey"), "the adjudication record and its idempotency key",
+        refused_by_name=("adjudicator", "by")),
     ("POST", "/answers"): wire.strict(
         ("envelope", "signature"), "the signed answer: a dropped key changes what was signed"),
     ("GET", "/answers/{key_id}/{nonce}"): wire.lenient(),
@@ -168,10 +170,10 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
         "the gate's evidence, the ownership epoch, the verify attempt and the idempotency key"),
     ("POST", "/sops"): wire.strict(("title", *SOP_BODY_KEYS), "a procedure's gates and chaining",
                                    refused_by_name=_IDENTITY),
-    ("POST", "/sops/{sop_id}/revise"): wire.strict(("title", *SOP_BODY_KEYS),
-                                                    "a procedure's gates and chaining",
+    ("POST", "/sops/{sop_id}/revise"): wire.strict(("title", "idempotencyKey", *SOP_BODY_KEYS),
+                                                    "a procedure's gates, chaining and idempotency key",
                                                     refused_by_name=_IDENTITY),
-    ("POST", "/sops/{sop_id}/activate"): wire.lenient(("version",), refused_by_name=_IDENTITY),
+    ("POST", "/sops/{sop_id}/activate"): wire.lenient(("version", "idempotencyKey"), refused_by_name=_IDENTITY),
     ("POST", "/sops/{sop_id}/retire"): wire.lenient(refused_by_name=_IDENTITY),
     ("POST", "/sops/{sop_id}/run"): wire.strict(
         (*RUN_BODY_FIELDS, "chain"), "a run's blockers, chain pin and bindings",
@@ -636,6 +638,7 @@ def create_app(
                 holder=pl.opt_str(payload, "holder"),
                 ttl_seconds=_int(payload, "ttlSeconds", leases.DEFAULT_TTL_S),
                 agent_label=pl.opt_str(payload, "agentLabel"),
+                idempotency_key=pl.opt_str(payload, "idempotencyKey"),
             )
 
         return await _handle(request, "claim_scope", work)
@@ -665,6 +668,7 @@ def create_app(
                 # accepted with a 200 and the default silently applied.
                 ttl_days=_int(payload, "ttlDays", snapshots.DEFAULT_TTL_DAYS),
                 agent_label=payload.get("agentLabel"),
+                idempotency_key=pl.opt_str(payload, "idempotencyKey"),
             )
 
         return await _handle(request, "snapshot", work)
@@ -968,7 +972,7 @@ def create_app(
                     attempt,
                     parsed,
                     result=payload.get("result"),
-                    idempotency_key=payload.get("idempotencyKey"),
+                    idempotency_key=pl.opt_str(payload, "idempotencyKey"),
                     attestation=payload.get("attestation"),
                     # From the signature, never the body. `auth.reject_actor_in_body`
                     # already refuses a payload that tries to name an actor; this
@@ -1013,6 +1017,7 @@ def create_app(
                     payload.get("verdict"),
                     payload.get("evidence"),
                     adjudicator=actor,
+                    idempotency_key=idempotency.clean(pl.opt_str(payload, "idempotencyKey")),
                 )
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
@@ -1072,7 +1077,7 @@ def create_app(
                     # on the wire (asop-spec has no such field); present, it must
                     # be current or the answer is `stale`.
                     verify_attempt=payload.get("verifyAttempt"),
-                    idempotency_key=payload.get("idempotencyKey"),
+                    idempotency_key=pl.opt_str(payload, "idempotencyKey"),
                 )
             except (WorkError, ValueError) as exc:
                 raise _work_refusal(exc) from exc
@@ -1213,17 +1218,21 @@ def create_app(
         def work(actor: str, payload: dict) -> dict:
             _reject_author_in_body(payload)
             body = {k: payload[k] for k in SOP_BODY_KEYS if k in payload}
-            try:
-                sop = library.revise(
-                    sop_id,
-                    title=payload.get("title"),
-                    author=actor,
-                    author_kind=policy.kind_of(actor, declared_humans),
-                    **body,
-                )
-            except (SopError, ValueError) as exc:
-                raise _work_refusal(exc) from exc
-            return {"state": "accepted", "sop": json.loads(sop.to_json())}
+
+            def revise() -> dict:
+                try:
+                    sop = library.revise(
+                        sop_id,
+                        title=payload.get("title"),
+                        author=actor,
+                        author_kind=policy.kind_of(actor, declared_humans),
+                        **body,
+                    )
+                except (SopError, ValueError) as exc:
+                    raise _work_refusal(exc) from exc
+                return {"state": "accepted", "sop": json.loads(sop.to_json())}
+
+            return idempotency.once(conn, actor, "sop_revise", idempotency.clean(pl.opt_str(payload, "idempotencyKey")), revise)
 
         return await _handle(request, "sop_revise", work)
 
@@ -1234,15 +1243,19 @@ def create_app(
         def work(actor: str, payload: dict) -> dict:
             _reject_author_in_body(payload)
             version = _int(payload, "version", -1)
-            try:
-                sop = library.activate(
-                    sop_id, version,
-                    author=actor,
-                    author_kind=policy.kind_of(actor, declared_humans),
-                )
-            except (SopError, ValueError) as exc:
-                raise _work_refusal(exc) from exc
-            return {"state": "accepted", "sop": json.loads(sop.to_json())}
+
+            def activate() -> dict:
+                try:
+                    sop = library.activate(
+                        sop_id, version,
+                        author=actor,
+                        author_kind=policy.kind_of(actor, declared_humans),
+                    )
+                except (SopError, ValueError) as exc:
+                    raise _work_refusal(exc) from exc
+                return {"state": "accepted", "sop": json.loads(sop.to_json())}
+
+            return idempotency.once(conn, actor, "sop_activate", idempotency.clean(pl.opt_str(payload, "idempotencyKey")), activate)
 
         return await _handle(request, "sop_activate", work)
 
