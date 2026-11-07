@@ -162,6 +162,8 @@ def test_an_unauthenticated_request_leaves_no_calls_row_and_parses_no_body(tmp_p
 # --- R14 ---------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not envelope.SUPPORTED,
+                    reason="installed asop-spec predates canonical JSON (0.6.0)")
 def test_a_future_dated_envelope_keeps_its_nonce_until_it_can_no_longer_be_valid(tmp_path):
     conn = db.connect(tmp_path / "r.sqlite3")
     hubid.ensure(conn)
