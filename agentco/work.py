@@ -421,7 +421,16 @@ ATTEST_KEYS_KEPT = 20
 #: earlier build keep refusing it.
 FAILED_VERDICTS_KEY = "failed_verdicts"
 
+#: Who filed an item, stamped by the plane from the AUTHENTICATED actor (never a
+#: payload field). It lets a filer keep sight of what they filed once it is
+#: assigned to somebody else (`authz.item_in_reach`). A metadata key rather than
+#: a column: metadata already persists on every backend and the plane already
+#: keeps its own facts there, so no migration is needed; old rows simply have
+#: none and keep the assignee-based rule.
+FILED_BY_KEY = "filed_by"
+
 RESERVED_METADATA_KEYS = frozenset({
+    FILED_BY_KEY,
     "verifies", "claims", "lease_report", "verify_parked_at", "verify_resolution",
     "verify_history", "verify_escalated", "verify_quarantined", "verify_retry",
     "verify_verdict", "natural_key_conflict",
@@ -1267,6 +1276,7 @@ def build_item(
     metadata: Optional[dict] = None,
     verify: Optional[dict] = None,
     by_plane: bool = False,
+    filed_by: Optional[str] = None,
 ) -> WorkItem:
     """Derive the natural key, validate the gate, and return the new item.
 
@@ -1302,7 +1312,7 @@ def build_item(
             subject=subject,
             period=period,
         ),
-        metadata=dict(metadata or {}),
+        metadata={**dict(metadata or {}), **({FILED_BY_KEY: filed_by} if filed_by else {})},
         verify=gate,
     )
 
@@ -1611,6 +1621,7 @@ class Queue:
         metadata: Optional[dict] = None,
         verify: Optional[dict] = None,
         by_plane: bool = False,
+        filed_by: Optional[str] = None,
     ) -> WorkItem:
         """Create one item. A duplicate natural key is a LOUD no-op.
 
@@ -1644,6 +1655,7 @@ class Queue:
             metadata=metadata,
             verify=verify,
             by_plane=by_plane,
+            filed_by=filed_by,
         )
         key = item.natural_key
 

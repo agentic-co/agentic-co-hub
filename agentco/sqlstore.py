@@ -423,6 +423,7 @@ class SqlQueue(_SqlBacked, Queue):
         metadata: Optional[dict] = None,
         verify: Optional[dict] = None,
         by_plane: bool = False,
+        filed_by: Optional[str] = None,
     ) -> WorkItem:
         """One item, with the same loud duplicate suppression as the JSONL store.
 
@@ -451,6 +452,7 @@ class SqlQueue(_SqlBacked, Queue):
             metadata=metadata,
             verify=verify,
             by_plane=by_plane,
+            filed_by=filed_by,
         )
         key = item.natural_key
 

@@ -869,6 +869,8 @@ def create_app(
                     # store is touched. Absent means ungated, which is what
                     # every item filed before gates existed is.
                     verify=payload.get("verify"),
+                    # The signer, never a payload field (`FILED_BY_KEY`).
+                    filed_by=actor,
                 )
             except (WorkError, NaturalKeyError, ValueError) as exc:
                 raise _work_refusal(exc) from exc

@@ -203,7 +203,6 @@ def test_clearance_key_table_is_not_reparsed_when_unchanged(tmp_path, monkeypatc
 # --- R10 residue: the filer stays in reach -------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason="R10 residue: no creator is recorded, so a filer loses an item once it is assigned")
 def test_a_filer_keeps_sight_of_what_they_filed_after_it_is_assigned_elsewhere(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     made = call(client, "alice", "POST", "/work", {"title": "for bob", "assignedAgent": "bob"})
@@ -220,7 +219,6 @@ def test_a_filer_keeps_sight_of_what_they_filed_after_it_is_assigned_elsewhere(t
     assert forged.status_code >= 400 and forged.json()["code"] == "metadata_reserved"
 
 
-@pytest.mark.xfail(strict=True, reason="R10 residue: run steps carry no creator")
 def test_every_item_a_run_files_is_in_reach_of_the_one_who_filed_it(library, queue):
     from agentco import authz
 
@@ -236,7 +234,6 @@ def test_every_item_a_run_files_is_in_reach_of_the_one_who_filed_it(library, que
     assert not any(authz.item_in_reach("ana", i, {}) for i in items if i.assigned_agent == "kofi")
 
 
-@pytest.mark.xfail(strict=True, reason="R10 residue: MCP work_create records no creator")
 def test_mcp_work_create_records_who_filed_it(tmp_path):
     pytest.importorskip("mcp")
     from agentco import authz

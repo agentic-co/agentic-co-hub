@@ -241,7 +241,7 @@ class _LocalBackend:
         return json.loads(updated.to_json()) if updated is not None else None
 
     def work_create(self, title: str, **kw) -> dict:
-        return json.loads(self.queue.create(title, **kw).to_json())
+        return json.loads(self.queue.create(title, filed_by=self.actor, **kw).to_json())
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
                capabilities=None, adjudication=None, epoch=None, verify_attempt=None) -> Optional[dict]:
