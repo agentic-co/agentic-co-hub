@@ -353,13 +353,14 @@ structural proposal on the sequence, because the same divergence recurring at
 the same boundary is evidence for a split or a reorder rather than another
 line of prose.
 
-Who may adjudicate is **declared**, like who may verify — `AGENTCO_ADJUDICATORS`
-alongside `AGENTCO_VERIFIERS`. The two defaults point opposite ways on purpose.
-An undeclared verifier set fails open, because the alternative is every judged
-gate resolving on its clock, which is work approved by a timer. An undeclared
-adjudicator set fails **closed** — only declared humans adjudicate — because
-what degrades when an agent grades the loop that revises the procedures it
-follows is not throughput but the evidence base, and nobody notices.
+Who may adjudicate is **declared**, like who may verify — `ASOP_ADJUDICATORS`
+alongside `ASOP_VERIFIERS` (the `AGENTCO_*` names are read as fallbacks). Both
+fail **closed** (ASOP §5.3, §9): an undeclared verifier set lets no route answer
+a judged or human gate — only a declared human may — and an undeclared
+adjudicator set lets only declared humans adjudicate. The verifier set used to
+fail open on the argument that refusing attesters makes judged gates resolve on
+their clock; it does not, because the clock path never attests. The timer
+hazard is reported by `agentco verifiers`, not prevented.
 
 **`promote(run_id)`** is the front door: a completed run tree becomes a draft
 ASOP, beads to steps, executors to roles, `blocked_by` to `after`. It is

@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional, Sequence
 
 from agentco import gates, policy
-from agentco.errors import Refusal
+from agentco.errors import UNAUTHENTICATED, Refusal
 from agentco.filelock import lock_exclusive, unlock
 from agentco.keys import derive_natural_key, natural_key_of
 
@@ -1430,9 +1430,11 @@ class Queue:
         adding a declaration here extends that test without anybody
         remembering to.
 
-        `verifiers` (`AGENTCO_VERIFIERS`): declared, the `verify` capability
-        is bound to these identities on every claim and every verdict;
-        undeclared, it stays self-asserted and the status report says so.
+        `verifiers` (`ASOP_VERIFIERS`): declared, the `verify` capability
+        is bound to these identities on every claim and every verdict.
+        Undeclared, no route may answer a judged or human gate (only a
+        declared human may — `policy.may_verify`), while claiming a vehicle
+        stays self-asserted; the status report says which.
 
         `humans` (`AGENTCO_HUMANS`): the same declaration the revision policy
         reads, and half of who may adjudicate.
@@ -2315,14 +2317,19 @@ class Queue:
         one that was not itself. Any future claim path has to hold the same line
         or this check is decoration.
 
+        **The registry (ASOP §5.3, §9; known-issues Finding 4).** A `judged` or
+        `human` verdict is accepted only from a declared verifier route or a
+        declared human (`policy.may_verify`); anyone else is refused
+        `unauthenticated`, 403. An undeclared registry authenticates nobody.
+        The park clock never reaches this method, so this cannot make a gate
+        resolve on its timer any sooner.
+
         `capabilities` is the same self-declared routing list `claim` takes, and
         a judged gate refuses a verdict from a node that does not declare
-        `verify`. Be precise about what that buys: capabilities are asserted by
-        the caller, so this is **routing hygiene, not authority** — it stops a
-        node answering gates it was never set up for, and a node determined to
-        answer one need only declare the string. The authority check for a
-        judged gate is the separation below, which is derived from the
-        authenticated actor and cannot be self-asserted.
+        `verify`. Capabilities are asserted by the caller, so that part is
+        **routing hygiene, not authority** — it stops a node answering gates it
+        was never set up for. The authority is the registry above plus the
+        separation below, both derived from the authenticated actor.
 
         Without it, though, the capability was decorative: `verifiers` routes a
         vehicle only a declaring node can claim, while the verdict path stayed
@@ -2455,6 +2462,30 @@ class Queue:
                 )
 
             gate = item.verify or {}
+            if gate.get("kind") in ("judged", "human") and not policy.may_verify(
+                    submitted_by, verifiers=self.verifiers, humans=self.humans):
+                # ASOP §5.3, §9: naming is not authenticating. The transport
+                # said who is calling; the operator's declaration says whether
+                # that caller may answer this kind of gate at all. Undeclared
+                # resolves nobody. The park clock never comes through here, so
+                # this cannot make a gate resolve on its timer any sooner.
+                raise Refusal(
+                    code=UNAUTHENTICATED,
+                    message=(
+                        f"{item.id} has a {gate.get('kind')!r} gate and {submitted_by!r} "
+                        f"is neither a declared verifier nor a declared human"
+                    ),
+                    remediation=(
+                        f"A verdict on a judged or human gate is accepted only from an "
+                        f"identity the operator declared: a route in "
+                        f"{policy.VERIFIERS_ENV_VAR} (currently: "
+                        f"{sorted(self.verifiers) or 'nothing declared'}) or a person in "
+                        f"ASOP_HUMANS. Exact spelling, comma-separated. Your credential is "
+                        f"fine — do not mint a new key; ask the operator to declare you, "
+                        f"or leave the gate to somebody who is declared."
+                    ),
+                    http_status=403,
+                )
             if gate.get("kind") == "judged":
                 held, unbound = policy.bind_capabilities(submitted_by, capabilities, self.verifiers)
                 if unbound:

@@ -90,7 +90,9 @@ def test_the_executors_own_node_cannot_sit_on_the_vehicle(queue):
 
 
 def test_an_undeclared_registry_is_self_asserted_as_before(queue):
-    assert queue.verifiers == frozenset()
+    """On the CLAIM side only. The verdict side fails closed (Finding 4,
+    tests/test_v1_verifier_fail_closed.py); routing a vehicle is still hygiene."""
+    queue.verifiers = frozenset()  # the shared fixture declares a set
     vehicle = queue.create("verify w-1", requires=["verify"])
     assert queue.claim(vehicle.id, "anyone", capabilities=["verify"]) is not None
 
@@ -111,8 +113,11 @@ def test_a_declared_registry_refuses_the_verdict_from_an_undeclared_node(queue):
     item = parked(queue)
     with pytest.raises(Refusal) as caught:
         queue.attest(item.id, attestation(), submitted_by="eve", capabilities=["verify"])
-    assert "bound it to ['dana']" in caught.value.message
-    assert "Declaring the capability was never the authority" in caught.value.remediation
+    # Inverted for Finding 4: an identity the registry cannot resolve is
+    # `unauthenticated` (ASOP §5.3, §10), 403, before any capability talk.
+    assert (caught.value.code, caught.value.http_status) == ("unauthenticated", 403)
+    assert "neither a declared verifier nor a declared human" in caught.value.message
+    assert "ASOP_VERIFIERS" in caught.value.remediation
     assert queue.get(item.id).status == WorkStatus.AWAITING_VERIFY
     closed = queue.attest(item.id, attestation(), submitted_by="dana", capabilities=["verify"])
     assert closed.status == WorkStatus.DONE
@@ -144,6 +149,7 @@ def test_a_deterministic_gate_is_not_a_verifiers_business(queue):
 
 
 def test_the_status_report_says_whether_verify_is_a_rail_or_a_word(queue):
+    queue.verifiers = frozenset()  # the shared fixture declares a set
     status = verifiers.verifier_status(queue)
     assert status["verifiersDeclared"] is None and status["capabilityBinding"] == "self-asserted"
     queue.verifiers = frozenset({"dana", "reviewer-box"})
@@ -184,7 +190,8 @@ def test_over_http_the_binding_holds_on_pull_and_attest(tmp_path):
     assert eve_pull["state"] == "empty", "the vehicle is not offered to an undeclared node"
     eve_attest = _post(client, f"/work/{item['id']}/attest", "eve",
                        {"attestation": attestation(), "capabilities": ["verify"]})
-    assert eve_attest.status_code >= 400 and "bound it to" in eve_attest.json()["message"]
+    # Inverted for Finding 4: unresolved by the registry is 403 `unauthenticated`.
+    assert (eve_attest.status_code, eve_attest.json()["code"]) == (403, "unauthenticated")
 
     dana_pull = _post(client, "/work/pull", "dana", {"capabilities": ["verify"]}).json()
     assert dana_pull["state"] == "leased" and dana_pull["item"]["id"] == vehicle["id"]
@@ -209,7 +216,7 @@ def test_over_mcp_the_binding_comes_from_the_operators_environment(tmp_path, mon
     assert tool(eve, "whoami")()["verifiers"] == ["dana"]
     with pytest.raises(Exception) as caught:
         tool(eve, "attest")(item_id=item["id"], attestation=attestation())
-    assert "bound it to" in str(caught.value)
+    assert "unauthenticated" in str(caught.value)  # Finding 4: was "bound it to"
     assert tool(dana, "attest")(item_id=item["id"], attestation=attestation())["status"] == "done"
 
     monkeypatch.delenv("AGENTCO_VERIFIERS")

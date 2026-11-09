@@ -21,14 +21,22 @@ match another:
 
 - `AGENTCO_HUMANS` (in `asop.revision`) — undeclared polices EVERYONE. An
   agent that could become human by asserting it makes the policy a suggestion.
-- `AGENTCO_VERIFIERS` — undeclared checks NOTHING, and `verify` stays
-  self-asserted. The alternative is a registry where nobody may verify, which
-  does not become safer: every judged gate then resolves on its clock, which
-  is work approved by a timer.
-- `AGENTCO_ADJUDICATORS` — undeclared allows only declared humans. This one
-  fails closed where verifiers fail open, because what degrades when an agent
-  grades the loop that revises its own procedures is the evidence base rather
-  than throughput, and nobody notices.
+- `ASOP_VERIFIERS` — undeclared authenticates NOBODY as a verifier route
+  (ASOP §5.3, §9). A `judged` or `human` verdict is accepted only from a
+  declared verifier or a declared human (`may_verify`); an undeclared set
+  leaves only declared humans, and with neither declared no verdict lands —
+  the gate waits for its park clock. This used to fail open on the argument
+  that a registry nobody is in "resolves every judged gate on the clock".
+  It does not: the clock path (`verifiers.sweep_park_clocks` ->
+  `Queue.resolve_by_default`) never attests, so refusing an unresolved
+  attester cannot make the timer fire more often. The timer hazard is real
+  and is reported, not prevented, by `verifier_status`. The CLAIM side
+  (`bind_capabilities`) still checks nothing while undeclared: routing a
+  vehicle is hygiene, the verdict is the authority.
+- `ASOP_ADJUDICATORS` — undeclared allows only declared humans, the same
+  shape as verifiers. What degrades when an agent grades the loop that
+  revises its own procedures is the evidence base rather than throughput,
+  and nobody notices.
 - the registry's ACTORS, from the key file (`SopLibrary.declare`) — undeclared
   checks NOTHING. An empty key file is what an in-process caller, a
   JSONL-only install and every library test have, so refusing every run on
@@ -104,16 +112,34 @@ def _declared(name: str, legacy: str) -> Optional[str]:
 def verifiers_from_env(value: Optional[str] = None) -> frozenset[str]:
     """The actors the operator declared as verifiers. Comma-separated, exact spelling.
 
-    Empty means UNDECLARED, and undeclared means the `verify` capability stays
-    self-asserted — routing hygiene, as it always was. That is the one place
-    this module fails open rather than closed, deliberately: a registry where
-    nobody may verify does not become safer, it resolves every judged gate on
-    the clock, which is work approved on a timer. Declaring the set is what
-    turns the capability into a rail, and `verifier_status` says out loud
-    whether the set is declared.
+    Empty means UNDECLARED, and an undeclared set resolves NOBODY (ASOP §5.3,
+    §9): no route may answer a `judged` or `human` gate, and only a declared
+    human can (`may_verify`). On the claim side it still binds nothing — the
+    `verify` capability stays self-asserted for ROUTING a vehicle — and
+    `verifier_status` says out loud which of the two this queue is.
     """
     return _split(value if value is not None else _declared(
         VERIFIERS_ENV_VAR, LEGACY_VERIFIERS_ENV_VAR))
+
+
+def may_verify(actor: Optional[str], *, verifiers: Iterable[str],
+               humans: Iterable[str]) -> bool:
+    """Whether this actor may answer a `judged` or `human` gate at all (ASOP §5.3, §9).
+
+    A declared verifier ROUTE, or a declared HUMAN — the same two-registry
+    shape as `may_adjudicate`, and for the same reason: the registries declare
+    routes, and a person verifies by being a declared person, not by also being
+    listed as a route. Nothing declared resolves nobody; `None` never resolves.
+
+    This is resolution, not authentication. `actor` is the identity the
+    transport already authenticated; this answers whether the operator
+    declared it for the role. Everything else a verdict must satisfy —
+    the gate's named person, executor separation, the `verify` capability
+    binding — is checked after, and separately.
+    """
+    if not actor:
+        return False
+    return actor in frozenset(verifiers) or kind_of(actor, humans) == HUMAN
 
 
 def bind_capabilities(
@@ -154,13 +180,11 @@ def adjudicators_from_env(value: Optional[str] = None) -> frozenset[str]:
     """The routes the operator declared as adjudicators. Same shape as verifiers.
 
     Empty means UNDECLARED, and undeclared means **only humans adjudicate** —
-    the opposite default from `verifiers_from_env`, and deliberately so. An
-    undeclared verifier set fails open because the alternative is every judged
-    gate resolving on its clock, which is work approved by a timer. An
-    undeclared adjudicator set fails CLOSED because the alternative is an
-    agent grading the loop that revises the procedures it follows, and the
-    thing that would degrade is not throughput but the evidence base. The
-    human-only posture is the default; a declared route is the opt-in.
+    the same default as `verifiers_from_env` (see `may_verify`). An undeclared
+    adjudicator set fails CLOSED because the alternative is an agent grading
+    the loop that revises the procedures it follows, and the thing that would
+    degrade is not throughput but the evidence base. The human-only posture is
+    the default; a declared route is the opt-in.
     """
     return _split(value if value is not None else _declared(
         ADJUDICATORS_ENV_VAR, LEGACY_ADJUDICATORS_ENV_VAR))

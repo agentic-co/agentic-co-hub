@@ -139,8 +139,12 @@ A deterministic gate wants the attestation on the report itself; judged and
 human gates refuse one from the executor, and require the attester's finding in
 the attestation: `"verdict": {"passed": true, "reason": "…"}` (`reason` nonblank;
 `asop-spec` 0.4+). A `passed: false` verdict fails the gate even at exit 0.
-Once the operator declares `AGENTCO_VERIFIERS`, `verify` counts only for those
-actors.
+The attester must also be declared by the operator: a route in `ASOP_VERIFIERS`
+or a person in `ASOP_HUMANS` (comma-separated, exact spelling). Anyone else is
+refused `unauthenticated` with HTTP 403 — the key is fine, do not mint another;
+the operator has not declared you. With `ASOP_VERIFIERS` unset no route may
+answer a judged or human gate at all. Once declared, `verify` also counts only
+for those actors when claiming a routed vehicle.
 
 ## Procedures: what a bead tells you about the ASOP it came from
 
