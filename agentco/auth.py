@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import time
 import urllib.parse
@@ -465,6 +466,15 @@ def authenticate(
     try:
         sent_at = float(timestamp)
     except ValueError:
+        raise _unauthenticated(
+            f"timestamp {timestamp!r} is not unix seconds",
+            f"Set {TIMESTAMP_HEADER} to the current time in unix seconds.",
+        )
+
+    # `float()` parses "nan" and "inf". NaN is the dangerous one: every
+    # comparison with it is False, so the skew check below never fires and a
+    # signature over "nan" is valid forever — the replay window, switched off.
+    if not math.isfinite(sent_at):
         raise _unauthenticated(
             f"timestamp {timestamp!r} is not unix seconds",
             f"Set {TIMESTAMP_HEADER} to the current time in unix seconds.",

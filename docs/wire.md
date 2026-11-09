@@ -13,8 +13,9 @@ on `POST /work` filed an **ungated** item with a 200.
 | `POST /work` | the gate (`verify`), blockers, assignment |
 | `POST /work/pull` | the capabilities a claim is checked against |
 | `POST /work/{id}/report` | the fence, the idempotency key, the attestation |
+| `POST /snapshots`, `/sops/{id}/revise`, `/sops/{id}/activate` | the optional `idempotencyKey`: a retry from the same actor returns the recorded outcome |
 | `POST /work/{id}/attest`, `/adjudicate` | the gate's evidence, the ownership epoch, `verifyAttempt` (the item's `verify_failures`), the idempotency key, the adjudication |
-| `POST /scope-claims` | a claim's paths and lease |
+| `POST /scope-claims` | a claim's paths and lease, and its optional `idempotencyKey` |
 | `POST /sops`, `/sops/{id}/revise` | a procedure's gates and chaining fields |
 | `POST /sops/{id}/run` | a run's blockers, chain pin, bindings |
 | `POST /chains/manifests`, `/chains/{chain}/adoptions` | a chain's pins, a person's adoption |

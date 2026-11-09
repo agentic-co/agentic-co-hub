@@ -504,3 +504,23 @@ def test_an_ordinary_unpinned_item_is_never_stranded(conn, queue):
     backlog, and the plane does not have an opinion about somebody's backlog."""
     queue.create("do the thing", assigned_agent="ghost-worker")
     assert run(conn, queue, now=at(pulse.DEFAULT_STRANDED_SECONDS + 60))["strandedSteps"] == []
+
+
+def test_an_unparseable_timestamp_skips_that_step_and_not_the_whole_check(conn, queue):
+    """`max()` over a parsed time and a None raised and took the stranded-step
+    check down for every item (found by pyright). It takes TWO stamps — a step
+    whose own creation time does not parse, behind a finished blocker — because
+    `max()` over a lone None never compares. Now that step is skipped and every other is reported."""
+    first = a_step_bead(queue, actor="alice", step=1)
+    leased = queue.claim(first.id, "alice")
+    queue.report_result(first.id, leased.lease_attempt, WorkStatus.DONE,
+                        attestation={"check": DETERMINISTIC["check"], "exit_status": 0,
+                                     "environment": "test", "at": NOW.isoformat()},
+                        submitted_by="alice")
+    blocked = a_step_bead(queue, actor="bob", step=2, blocked_by=[first.id])
+    healthy = a_step_bead(queue, actor="ghost-worker", step=3)
+    queue._mutate(blocked.id, lambda _item: {"created_at": "not a timestamp"})
+
+    report = run(conn, queue, now=at(pulse.DEFAULT_STRANDED_SECONDS + 60))
+    ids = [r["itemId"] for r in report["strandedSteps"]]
+    assert healthy.id in ids and blocked.id not in ids
