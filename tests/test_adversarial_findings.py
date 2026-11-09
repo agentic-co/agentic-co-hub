@@ -2284,11 +2284,6 @@ def test_a_row_this_version_cannot_model_never_escapes_as_a_raw_exception(
         fresh.claim("w-newer", "worker-a")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="done_ids comes from _read_all(), which drops unmodellable rows, so a "
-    "finished blocker this reader cannot model never counts as done",
-)
 def test_a_finished_blocker_releases_its_dependents_whatever_else_its_row_contains(queue):
     """Two of today's fixes compose into a defect neither has alone.
 
@@ -2327,11 +2322,17 @@ def test_a_finished_blocker_releases_its_dependents_whatever_else_its_row_contai
     rows = [json.loads(line) for line in queue.path.read_text(encoding="utf-8").splitlines()]
     for row in rows:
         if row["id"] == blocker.id:
-            # Still recorded as done; a field this reader cannot model was added.
-            row["lifecycle_state"] = "archived-by-a-newer-writer"
-            row["status"] = "archived"
+            # Still recorded as DONE, but a field this reader cannot model is
+            # gone (a newer writer renamed it). The status must stay "done":
+            # rewriting it to a value this version does not know would not be a
+            # finished blocker any more, and releasing on an unknown status
+            # would be fail-open.
+            del row["title"]
     queue.path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
+    assert dependent.id in [i.id for i in queue.ready()], (
+        "ready() hides a dependent whose blocker is finished"
+    )
     taken = queue.claim(dependent.id, "worker-b")
     assert taken is not None, "a dependent was stranded by a blocker that is finished"
 

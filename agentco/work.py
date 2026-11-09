@@ -1728,8 +1728,14 @@ class Queue:
         nothing depends on cannot change any answer. Returning them would be
         work done to be discarded.
         """
-        items = self._read_all()
-        return items, {i.id for i in items if releases_blockers(i.status)}
+        # The done set comes from the RAW rows, as `claim()` computes it:
+        # `_read_all` drops a row this version cannot model, and a finished
+        # blocker whose row carries something unmodellable would otherwise
+        # never count as done — `ready()` would hide its dependents while
+        # `claim()` accepted them. `status` is a plain string on the raw dict.
+        raw_rows, _ = self._read_raw()
+        done = {r["id"] for r in raw_rows if releases_blockers(r.get("status", ""))}
+        return self._read_all(), done
 
     # -- reading ---------------------------------------------------------
 
