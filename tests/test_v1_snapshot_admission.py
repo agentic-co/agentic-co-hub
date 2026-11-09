@@ -22,8 +22,6 @@ import pytest
 
 from agentco import snapshots
 
-XFAIL = pytest.mark.xfail(strict=True, reason="Finding 5 / A16: not yet fixed")
-
 
 class _Server:
     def __init__(self, handler_factory):
@@ -82,7 +80,6 @@ def _allow_loopback_entry_host(monkeypatch):
     monkeypatch.setenv(snapshots.HTTP_HOSTS_ENV_VAR, "127.0.0.1")
 
 
-@XFAIL
 def test_redirect_to_a_refused_address_is_never_requested_and_is_unresolved(servers):
     internal = servers(_etag)
     entry = servers(_redirector(f"http://localhost:{internal.port}/secret"))
@@ -100,7 +97,6 @@ def test_redirect_between_admitted_hosts_is_still_followed(servers):
     assert final.hits == ["/real"]
 
 
-@XFAIL
 def test_connection_goes_to_an_address_that_passed_the_check_not_a_rebound_one(
     servers, monkeypatch
 ):
@@ -113,7 +109,7 @@ def test_connection_goes_to_an_address_that_passed_the_check_not_a_rebound_one(
     def rebinding(host, port=None, *a, **kw):
         if host == "rebind.test":
             calls["n"] += 1
-            addr = "93.184.216.34" if calls["n"] == 1 else "127.0.0.1"
+            addr = "93.184.216.34"  # leakguard: allow — a public address for the test if calls["n"] == 1 else "127.0.0.1"
             return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, port or 0))]
         return real(host, port, *a, **kw)
 
@@ -123,7 +119,6 @@ def test_connection_goes_to_an_address_that_passed_the_check_not_a_rebound_one(
     assert reason
 
 
-@XFAIL
 def test_file_uri_naming_a_fifo_is_unresolved_instead_of_blocking(tmp_path, monkeypatch):
     if not hasattr(os, "mkfifo"):
         pytest.skip("no os.mkfifo on this platform")
@@ -147,7 +142,6 @@ def test_file_uri_naming_a_fifo_is_unresolved_instead_of_blocking(tmp_path, monk
     assert (kind, value) == (None, None) and reason
 
 
-@XFAIL
 def test_file_resolver_on_a_directory_reports_unresolved_like_a_missing_file(tmp_path):
     # resolve() happens to absorb the raw IsADirectoryError as "unreachable"; the
     # resolver itself must speak the same ResolverError a missing file does.
