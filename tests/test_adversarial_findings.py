@@ -95,13 +95,13 @@ def client(tmp_path):
     return TestClient(app)
 
 
-def signed(method: str, path: str, actor: str, body: dict | None = None) -> dict:
+def signed(method: str, path: str, actor: str, body: dict | None = None, query: str = "") -> dict:
     raw = json.dumps(body).encode() if body is not None else b""
     ts = str(int(time.time()))
     return {
         "X-AgentCo-Actor": actor,
         "X-AgentCo-Timestamp": ts,
-        "X-AgentCo-Signature": auth.sign(KEYS[actor], method, path, ts, raw),
+        "X-AgentCo-Signature": auth.sign(KEYS[actor], method, path, ts, raw, query=query.lstrip("?") or None),
         "Content-Type": "application/json",
     }
 
@@ -1519,14 +1519,15 @@ def test_a_non_numeric_limit_is_refused_not_reported_as_a_registry_bug(client):
     Why the existing test misses it: `test_a_malformed_cursor_is_refused_not_silently_reset`
     covers the parameter that IS validated. No test passes a non-numeric limit.
     """
-    response = client.get("/events?limit=abc", headers=signed("GET", "/events", "dana", None))
+    response = client.get("/events?limit=abc", headers=signed("GET", "/events", "dana", None, "?limit=abc"))
     assert_is_a_refusal_not_a_server_error(response, "a non-numeric limit")
 
     # The parameters that already work must keep working.
-    ok = client.get("/events?limit=5", headers=signed("GET", "/events", "dana", None))
+    ok = client.get("/events?limit=5", headers=signed("GET", "/events", "dana", None, "?limit=5"))
     assert ok.status_code == 200
     bad_cursor = client.get(
-        "/events?since=not-a-cursor", headers=signed("GET", "/events", "dana", None)
+        "/events?since=not-a-cursor",
+        headers=signed("GET", "/events", "dana", None, "?since=not-a-cursor"),
     )
     assert bad_cursor.json()["code"] == "bad_cursor"
 
@@ -1977,11 +1978,6 @@ def test_a_path_needing_percent_encoding_still_authenticates(client):
     assert tampered.status_code == 401, "a signature must still be bound to its path"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the signing string covers method, path, timestamp and a body digest, but "
-    "not the query string, so one signed GET is valid for every query",
-)
 def test_the_signature_covers_the_query_string(client):
     """One captured `GET /events` replays as any feed query for the full window.
 

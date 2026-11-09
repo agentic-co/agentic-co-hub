@@ -92,11 +92,25 @@ none. It already reads the whole queue through the unfiltered list, so the filte
 from it, and it is how an operator sees queue health across lanes. A human or an administrator who is
 not the operator gets no exception.
 
-**Signed queries.** Set `ASOP_REQUIRE_SIGNED_QUERY=1` on every hub in a control-loop topology (the
-rig does). A signature over the old string, without the canonical query line, is then refused `401`.
-The client library (`Registry._call`, and so the MCP remote backend and the federation push) signs
-the query already, and so do `agentco/conformance.py`'s loopback client and `tools/loadtest.py`;
-a test runs both against a hub that sets the variable.
+**Signed queries — required by default since 1.0.** A signature over the old string, without the
+canonical query line, is refused `401` on any request that has a query, with no configuration. The
+client library (`Registry._call`, and so the CLI, the outbox drainer, the MCP remote backend and the
+federation push) signs the query already, and so do `agentco/conformance.py`'s loopback client and
+`tools/loadtest.py`; `tests/test_signed_query_clients.py` runs them against a hub with the variable
+**unset**.
+
+`ASOP_REQUIRE_SIGNED_QUERY` is kept for one release as the **opt-out**. Unset, empty, `1`, `true`
+or any value this build does not recognise means *required*. Only an explicit `0`, `false`, `no` or
+`off` (case-insensitive, surrounding whitespace ignored) re-allows the legacy signature, and while it
+does, known issue 6b is open for whoever still signs the old string. A typo can therefore never
+re-open it. The variable is removed together with the legacy signature in the release after 1.0.
+
+**Upgrade note (pre-1.0 to 1.0).** Behaviour change: a client that signs `METHOD\npath\ntimestamp\nsha256(body)`
+and sends a query now gets `401 unauthenticated`. Requests with no query are unaffected, and so is
+every client that signs the fifth line. Before upgrading a hub, find any such client (the `401`s on
+`GET /events?…` and `GET /work?…` are the signal) and move it; if one cannot move yet, set
+`ASOP_REQUIRE_SIGNED_QUERY=0` on the hub for this release only. Hubs that already set `=1` need no
+change.
 
 ## Scope conflicts carry `holderAttested`
 
