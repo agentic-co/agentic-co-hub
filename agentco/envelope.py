@@ -81,6 +81,7 @@ from typing import Any, Optional
 
 from agentco import humankeys
 from agentco.errors import Refusal
+from agentco.timeutil import iso_utc
 
 TYPE = "asop.answer/1"
 
@@ -256,7 +257,7 @@ def verify_signature(key: humankeys.HumanKey, payload: dict, signature: Any) -> 
 
 
 def _iso(at: datetime) -> str:
-    return at.astimezone(timezone.utc).isoformat()
+    return iso_utc(at)
 
 
 def _row(conn, key_id: str, nonce: str):

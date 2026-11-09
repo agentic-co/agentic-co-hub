@@ -37,10 +37,11 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from agentco import events, snapshots
+from agentco.timeutil import iso_utc
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return iso_utc(dt)
 
 
 def collect(conn: sqlite3.Connection, now: Optional[datetime] = None) -> dict:

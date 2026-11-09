@@ -64,6 +64,7 @@ from typing import Any, Iterable, Mapping, Optional
 
 from agentco import events, hubid, migrations, verifiers
 from agentco.work import WorkStatus, executors_of, pin_of, rerun_pending
+from agentco.timeutil import iso_utc
 
 EVENT_KIND = "PulseObserved"
 
@@ -159,7 +160,7 @@ def _now() -> datetime:
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return iso_utc(dt)
 
 
 def _parse(value: Optional[str]) -> Optional[datetime]:

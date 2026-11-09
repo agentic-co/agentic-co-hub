@@ -736,11 +736,6 @@ def test_a_conflict_from_an_unverified_holder_claim_is_distinguishable(client):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the bad-signature branch appends the signing-string spec to its "
-    "remediation, so the two refusals differ in a field to_dict() ships to the client",
-)
 def test_an_unknown_actor_and_a_bad_signature_are_indistinguishable_refusals():
     """The two refusals differ in `remediation`, which makes the endpoint an identity oracle.
 
@@ -790,6 +785,30 @@ def test_an_unknown_actor_and_a_bad_signature_are_indistinguishable_refusals():
     assert unknown_actor == wrong_secret, (
         "the refusals are distinguishable, so actor existence is a one-request oracle"
     )
+
+
+def test_an_unknown_actor_costs_the_same_hmac_work_as_a_bad_signature(monkeypatch):
+    """The timing half of the oracle, asserted as work done rather than as a stopwatch.
+
+    A wall-clock comparison is flaky; counting `compare_digest` calls is not. An
+    unknown actor must reach the same comparison a known actor with a wrong
+    signature reaches, so the refusal costs the same on both paths.
+    """
+    calls = []
+    real = auth.hmac.compare_digest
+    monkeypatch.setattr(auth.hmac, "compare_digest", lambda a, b: calls.append(1) or real(a, b))
+    ts = str(int(time.time()))
+
+    def attempt(actor: str) -> int:
+        calls.clear()
+        with pytest.raises(Unauthenticated):
+            auth.authenticate(
+                {"x-agentco-actor": actor, "x-agentco-timestamp": ts, "x-agentco-signature": "00" * 32},
+                "POST", "/scope-claims", b"{}", keys=KEYS,
+            )
+        return len(calls)
+
+    assert attempt("nobody-is-registered-here") == attempt("dana") >= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -2235,11 +2254,6 @@ def test_a_row_this_version_cannot_model_never_escapes_as_a_raw_exception(
         fresh.claim("w-newer", "worker-a")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="done_ids comes from _read_all(), which drops unmodellable rows, so a "
-    "finished blocker this reader cannot model never counts as done",
-)
 def test_a_finished_blocker_releases_its_dependents_whatever_else_its_row_contains(queue):
     """Two of today's fixes compose into a defect neither has alone.
 
@@ -2278,11 +2292,17 @@ def test_a_finished_blocker_releases_its_dependents_whatever_else_its_row_contai
     rows = [json.loads(line) for line in queue.path.read_text(encoding="utf-8").splitlines()]
     for row in rows:
         if row["id"] == blocker.id:
-            # Still recorded as done; a field this reader cannot model was added.
-            row["lifecycle_state"] = "archived-by-a-newer-writer"
-            row["status"] = "archived"
+            # Still recorded as DONE, but a field this reader cannot model is
+            # gone (a newer writer renamed it). The status must stay "done":
+            # rewriting it to a value this version does not know would not be a
+            # finished blocker any more, and releasing on an unknown status
+            # would be fail-open.
+            del row["title"]
     queue.path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
+    assert dependent.id in [i.id for i in queue.ready()], (
+        "ready() hides a dependent whose blocker is finished"
+    )
     taken = queue.claim(dependent.id, "worker-b")
     assert taken is not None, "a dependent was stranded by a blocker that is finished"
 
@@ -2358,11 +2378,6 @@ def test_truncate_never_returns_more_than_the_budget_it_was_given():
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_read_all re-serialises an unmodellable row with json.dumps instead of "
-    "keeping the bytes that were read",
-)
 def test_a_quarantined_row_is_preserved_as_the_bytes_that_were_read(queue):
     """Two docstrings promise verbatim bytes; one code path re-encodes them.
 

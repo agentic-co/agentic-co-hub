@@ -54,6 +54,7 @@ from urllib.parse import urlparse
 
 from agentco import events, idempotency
 from agentco.errors import Refusal
+from agentco.timeutil import iso_utc
 
 DEFAULT_TTL_DAYS = 90
 
@@ -68,7 +69,7 @@ class ResolverError(Exception):
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return iso_utc(dt)
 
 
 def resolve_git(uri: str) -> tuple[str, str]:
