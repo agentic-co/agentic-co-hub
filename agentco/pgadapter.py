@@ -437,14 +437,18 @@ class PgConnection:
             rowcount = cur.rowcount if cur.rowcount is not None else -1
             return PgCursor(rows, lastrowid=lastrowid, rowcount=rowcount)
 
-    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> None:  # pragma: no cover - unused today
+    def executemany(self, sql: str, seq_of_params: Sequence[Sequence[Any]]) -> None:
+        """`sqlite3.Connection.executemany`'s shape. psycopg puts it on a
+        CURSOR, not the connection: both branches called it on the connection
+        and would have raised `AttributeError` (found by pyright)."""
         translated = _translate_placeholders(sql.strip())
         rows = [tuple(p) for p in seq_of_params]
         if self._depth > 0:
-            self._local.conn.executemany(translated, rows)
+            with self._local.conn.cursor() as cur:
+                cur.executemany(translated, rows)
             return
-        with self._pool.connection() as conn:
-            conn.executemany(translated, rows)  # pyright: ignore[reportAttributeAccessIssue] -- unused today; psycopg Connection has no executemany (needs a cursor)
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.executemany(translated, rows)
 
     def commit(self) -> None:
         """Only meaningful inside a transaction now.

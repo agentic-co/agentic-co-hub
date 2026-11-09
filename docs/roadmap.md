@@ -458,8 +458,11 @@ belonging to the one that did.
 
 ## Known issues
 
-Eleven open defects — eight with a failing test naming the property that should
-hold, three recorded without one yet: [`docs/known-issues.md`](known-issues.md).
+Open defects live in [`docs/known-issues.md`](known-issues.md): thirteen strict-xfail
+tests still stand (6a, the claim-3 scope-evasion routes, MCP refusals, and the
+6b/A15 transition tests among them), and four findings are recorded without a test
+yet (A13, A16, Finding 4, Finding 5). The 21 findings of the 2026-11-07 review are
+fixed, with three residues recorded beside them.
 None of them lose work or report a wrong result as a right one — those were fixed.
 
 ## The adoption gate

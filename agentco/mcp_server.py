@@ -241,7 +241,7 @@ class _LocalBackend:
         return json.loads(updated.to_json()) if updated is not None else None
 
     def work_create(self, title: str, **kw) -> dict:
-        return json.loads(self.queue.create(title, **kw).to_json())
+        return json.loads(self.queue.create(title, filed_by=self.actor, **kw).to_json())
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
                capabilities=None, adjudication=None, epoch=None, verify_attempt=None) -> Optional[dict]:
@@ -474,6 +474,13 @@ def create_server(
         from agentco import envelope as envelope_module
 
         _queue.envelope_required_for = envelope_module.required_for(_conn)
+        # Owner-party separation, resolved from the same key table the HTTP app
+        # reads (app.py): without it `party_of` is the actor, and one person's
+        # two agents could execute and verify the same judged gate here while
+        # HTTP refuses it.
+        _queue.owners = lambda: {
+            name: ident.owner for name, ident in auth.load_identities().items() if ident.owner
+        }
         backend = _LocalBackend(
             _conn,
             _queue,

@@ -25,6 +25,8 @@ from typing import Any, Callable, Optional
 from agentco.errors import Refusal
 
 CURSOR_PREFIX = "v1:"
+#: The widest seq either backend stores (SQLite INTEGER, Postgres BIGINT).
+MAX_SEQ = 2**63 - 1
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 500
 
@@ -180,7 +182,7 @@ def decode_cursor(cursor: Optional[str]) -> int:
     events and conclude the feed is broken. Refusing names the fault at the
     layer it occurred.
     """
-    if cursor is None or cursor == "":
+    if not cursor:
         return 0
     padded = cursor + "=" * (-len(cursor) % 4)
     try:
@@ -207,7 +209,7 @@ def decode_cursor(cursor: Optional[str]) -> int:
             http_status=400,
         )
     try:
-        return int(raw[len(CURSOR_PREFIX) :])
+        seq = int(raw[len(CURSOR_PREFIX) :])
     except ValueError:
         raise Refusal(
             code="bad_cursor",
@@ -215,6 +217,21 @@ def decode_cursor(cursor: Optional[str]) -> int:
             remediation="Omit the cursor to resume from the beginning of the feed.",
             http_status=400,
         )
+    if not 0 <= seq <= MAX_SEQ:
+        # Python reads any length of digits, but no seq this registry issued is
+        # negative or wider than a 64-bit column. Past it, the driver raises
+        # `OverflowError` (a 500); below zero the floor check would answer 410,
+        # telling the client a cursor it forged had merely expired (R21).
+        raise Refusal(
+            code="bad_cursor",
+            message=f"cursor {cursor!r} carries a position outside any seq this registry issues",
+            remediation=(
+                "Use the 'nextCursor' value from your last successful GET /events "
+                "verbatim, or omit it to start from the beginning."
+            ),
+            http_status=400,
+        )
+    return seq
 
 
 def append(
@@ -261,6 +278,26 @@ def insert(
     uid = f"evt_{uuid.uuid4().hex[:16]}"
     at = occurred_at or now_iso()
     body = json.dumps(payload, sort_keys=True)
+    if getattr(conn, "dialect", "sqlite") == "postgres":
+        # Commit order must equal seq order, or the feed loses events (R16).
+        # `seq` is drawn at INSERT and becomes visible at COMMIT; two writers
+        # can commit out of order, a reader then sees N+1 before N, advances
+        # its cursor past N, and N is never delivered. SQLite cannot do this —
+        # its single writer lock orders commits — so this restores the same
+        # ordering for the feed alone: one transaction-scoped lock, taken
+        # before the seq is drawn and released at COMMIT/ROLLBACK, so the next
+        # writer draws its seq only after this one is visible.
+        #
+        # The cost is that event-writing transactions serialise with each
+        # other (not with anything else). Every caller makes the event its
+        # LAST statement before commit, so the lock is held for one INSERT and
+        # a commit, and no caller takes another lock after it — which is also
+        # why it cannot form a deadlock cycle. A reader-side visibility horizon
+        # was the alternative; it needs an xid column and a snapshot query on
+        # every read, to buy write concurrency the feed has not been shown to
+        # need. Keyed on the schema, so two registries sharing one database in
+        # different schemas do not queue behind each other.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('agentco.events:' || current_schema())::bigint)")
     cur = conn.execute(
         "INSERT INTO events(uid, kind, actor, agent_label, repo, occurred_at, payload) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -388,7 +425,9 @@ def read(
     """
     start = decode_cursor(since)
     floor = retention_floor(conn)
-    if since is not None and start < floor - 1:
+    # Truthiness, not `is not None`: `decode_cursor` already reads `since=""`
+    # as no cursor, and the floor check has to agree with it (R21).
+    if since and start < floor - 1:
         # Events after this cursor and below the floor were pruned. Reading on
         # would skip them in silence, which is the one thing a feed must not do.
         raise Refusal(
@@ -403,7 +442,7 @@ def read(
             ),
             http_status=410,
         )
-    if since is None and start < floor - 1:
+    if not since and start < floor - 1:
         start = floor - 1
     bounded = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
     sql = "SELECT * FROM events WHERE seq > ?"

@@ -37,6 +37,7 @@ particular vendor, which is the same rule the repository is published under.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import sqlite3
 import ipaddress
 import os
@@ -48,7 +49,7 @@ from pathlib import Path
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
-from agentco import events
+from agentco import events, idempotency
 from agentco.errors import Refusal
 
 DEFAULT_TTL_DAYS = 90
@@ -385,6 +386,11 @@ def resolve(uri: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
         kind, value = resolver(uri)
     except ResolverError as exc:
         return None, None, str(exc)
+    except (OSError, http.client.HTTPException) as exc:
+        # URLError, socket.timeout and ssl.SSLError are all OSErrors: a host that
+        # is briefly down is a transient condition, and the pointer is still
+        # worth recording. Resolution never blocks the write.
+        return None, None, f"could not reach {scheme}: target unreachable ({type(exc).__name__})"
     return kind, value, None
 
 
@@ -397,8 +403,14 @@ def take(
     ttl_days: int = DEFAULT_TTL_DAYS,
     now: Optional[datetime] = None,
     agent_label: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> dict:
-    """Record a pointer plus its current version token. Returns the receipt."""
+    """Record a pointer plus its current version token. Returns the receipt.
+
+    `idempotency_key` (R4): a retry with the same key from the same actor
+    returns the first receipt. The lookup, the row, the event and the key commit
+    in one transaction.
+    """
     at = now or datetime.now(timezone.utc)
     if not (purpose or "").strip():
         raise Refusal(
@@ -411,11 +423,21 @@ def take(
             ),
         )
 
+    key = idempotency.clean(idempotency_key)
+    if key is not None:
+        # Before `resolve`, which can touch the network: a replay needs none of it.
+        prior = idempotency.recorded(conn, actor, "snapshot", key)
+        if prior is not None:
+            return prior
     hash_kind, content_hash, unresolved = resolve(artifact_uri)
     uid = f"snap_{uuid.uuid4().hex[:12]}"
     expires = at + timedelta(days=ttl_days)
 
-    with conn:
+    with idempotency.write_tx(conn, lock=f"idem:{actor}:snapshot:{key}" if key else None):
+        if key is not None:
+            prior = idempotency.recorded(conn, actor, "snapshot", key)
+            if prior is not None:
+                return prior
         conn.execute(
             "INSERT INTO snapshots(uid, actor, artifact_uri, purpose, hash_kind, "
             "content_hash, taken_at, expires_at, last_seen_hash, last_checked_at) "
@@ -434,41 +456,43 @@ def take(
             ),
         )
 
-    events.append(
-        conn,
-        kind="SnapshotTaken",
-        actor=actor,
-        agent_label=agent_label,
-        occurred_at=_iso(at),
-        payload={
+        events.insert(
+            conn,
+            kind="SnapshotTaken",
+            actor=actor,
+            agent_label=agent_label,
+            occurred_at=_iso(at),
+            payload={
+                "snapId": uid,
+                "artifactUri": artifact_uri,
+                "purpose": purpose.strip(),
+                "hashKind": hash_kind,
+                "contentHash": content_hash,
+                "resolution": "resolved" if content_hash else "unresolvable",
+            },
+        )
+
+        receipt = {
             "snapId": uid,
+            "state": "accepted",
             "artifactUri": artifact_uri,
-            "purpose": purpose.strip(),
             "hashKind": hash_kind,
             "contentHash": content_hash,
-            "resolution": "resolved" if content_hash else "unresolvable",
-        },
-    )
-
-    receipt = {
-        "snapId": uid,
-        "state": "accepted",
-        "artifactUri": artifact_uri,
-        "hashKind": hash_kind,
-        "contentHash": content_hash,
-        "expiresAt": _iso(expires),
-        # Never silent: the caller is told in the receipt that this pointer
-        # cannot fire, and why.
-        "freshness": {
-            "externalResolution": "resolved" if content_hash else "unresolvable",
-            "reason": unresolved,
-        },
-    }
-    if unresolved:
-        receipt["warning"] = (
-            f"Recorded, but this pointer cannot report divergence yet: {unresolved}. "
-            f"It will begin reporting the first time a check can read its version token."
-        )
+            "expiresAt": _iso(expires),
+            # Never silent: the caller is told in the receipt that this pointer
+            # cannot fire, and why.
+            "freshness": {
+                "externalResolution": "resolved" if content_hash else "unresolvable",
+                "reason": unresolved,
+            },
+        }
+        if unresolved:
+            receipt["warning"] = (
+                f"Recorded, but this pointer cannot report divergence yet: {unresolved}. "
+                f"It will begin reporting the first time a check can read its version token."
+            )
+        if key is not None:
+            idempotency.record(conn, actor, "snapshot", key, receipt)
     return receipt
 
 

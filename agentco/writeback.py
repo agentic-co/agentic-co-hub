@@ -50,7 +50,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
 
-from agentco import events
+from agentco import appendlog, events
 
 WRITEBACK_URL_ENV_VAR = "AGENTCO_WRITEBACK_URL"
 CURSOR_ENV_VAR = "AGENTCO_WRITEBACK_CURSOR"
@@ -206,8 +206,7 @@ def _write_deadletter(notice: dict, exc: BaseException) -> None:
         "status": getattr(exc, "status", None),
         "detail": str(exc),
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    appendlog.append_lines(path, [json.dumps(record, sort_keys=True).encode("utf-8")])
 
 
 def run(

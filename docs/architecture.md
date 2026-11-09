@@ -124,8 +124,8 @@ uniqueness rule on the ingest path, so no source can invent its own idempotency 
 **Renewing a lease** (owner decision 10, 2026-10-18). A long step keeps its lease alive with
 `POST /work/{id}/renew {attempt, ttlSeconds}` (`Registry.work_renew`):
 
-- only the **current fence holder** renews: another actor is `not_the_holder`; a superseded or expired
-  attempt is the stale-fence `work_conflict`; a step of a run moved by an administrative transfer is
+- only the **current fence holder** renews: another actor is `not_the_holder`; a superseded
+  attempt is the stale-fence `work_conflict` (a lapsed-but-unreclaimed lease is still renewable, as it is still reportable); a step of a run moved by an administrative transfer is
   `not_the_owner`;
 - a renewal changes **only the expiry**: the fence (`lease_attempt`) does not move, so the holder reports
   on the same attempt afterwards; the repair budget is untouched; nothing is emitted on the change feed;
