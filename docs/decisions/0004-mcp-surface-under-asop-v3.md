@@ -1,9 +1,10 @@
 # 0004 — The MCP surface under ASOP v3
 
-**Date:** 2026-09-04 · **Status:** NOT TAKEN — recommendation C noted, the
-surface stays at twelve for now (mabidoli, 2026-09-04). HTTP is what the
-runtime uses for P3; revisit when an MCP-only harness needs one of these
-verbs. · **Relates to:** [`0002-participation-ladder.md`](0002-participation-ladder.md)
+**Date:** 2026-09-04 · **Status:** ACCEPTED, option C (mabidoli, 2026-11-09, with
+[`0011-v1-definition.md`](0011-v1-definition.md)), and built: fourteen tools,
+14,000-byte budget, 13,497 used. Not taken on 2026-09-04; taken when the R4
+idempotency residue and the MCP refusal code both turned out to need the room. ·
+**Relates to:** [`0002-participation-ladder.md`](0002-participation-ladder.md)
 (the ceiling), [`0003-asop-v3-adoption.md`](0003-asop-v3-adoption.md)
 
 ## The problem
@@ -115,8 +116,11 @@ plane could have answered. One such report is enough; it means the
 harness/operator split above is a distinction the plane made and its users do
 not have.
 
-## Not decided here
+## As built
 
-Nothing changes until this is decided. The MCP surface stays at twelve tools
-and inside the 12,500-byte budget, which is where it is today and which the
-suite enforces.
+`sop_run` and `adjudicate` are tools thirteen and fourteen, and both are in the
+conformance roster for the MCP transports. The budget also paid for an
+`idempotency_key` on every mutating tool and for refusals carrying their code as
+structured content. `sop_run` has no gate parameter, so the rule that a filer
+cannot author the gate holds on MCP by omission: the one conformance step that
+tests the refusal runs through the core and is recorded `via: core`.

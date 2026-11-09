@@ -49,7 +49,7 @@ in exactly the place it should have, the connectors.
 | Silent-schedule audit | ✅ | ✅ | `agentco pulse`: an actor silent past its declared cadence (`AGENTCO_CADENCE`) is a finding; undeclared is `null`, never a guess — and the pulse judges its own gap first. Reservations-style scheduling of work itself is still ⏳ |
 | Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ✅ | `agentco pulse` — exit code is the worst class (ok / attention / fatal), never a count; dry-run by default, `--apply` runs the sweeps nobody was running (expired leases, park clocks, quarantine) and records a `PulseObserved` heartbeat — see [`docs/pulse.md`](pulse.md) |
-| MCP surface | ✅ | ✅ | 12 tools of a stated 12 — the ceiling is binding; a byte budget over the schemas is published beside the count. **v3 puts seven verbs on the wire the surface does not carry, and the byte budget is now at its limit (12,496 of 12,500): a decision, not an oversight — [`docs/decisions/0004-mcp-surface-under-asop-v3.md`](decisions/0004-mcp-surface-under-asop-v3.md), proposed, undecided** |
+| MCP surface | ✅ | ✅ | 14 tools of a stated 14, inside a published 14,000-byte schema budget (13,497 measured). [ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md) option C, accepted 2026-11-09: `sop_run` and `adjudicate` joined the twelve; the five operator verbs stay on HTTP. Every mutating tool takes an idempotency key, and a refusal carries its code as structured content |
 | Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
 | Session-hook injection (tier 3) | ✅ | ✅ | Fail-open per dependency; byte-identical uninstall |
 | Outbox + drainer + receipts (L1) | 🆕 | ✅ | `.agentco/outbox.jsonl` plus `agentco drain`; appending a line needs no package on the writer's side. The tier-1 splice carries the instructions, the tier-3 session block carries the receipts — see [`docs/outbox.md`](outbox.md) |
@@ -166,27 +166,23 @@ tests against both — `tests/conftest.py` parametrises the queue and library
 fixtures, so every work-queue and ASOP test is a conformance test. A contract
 proven against one implementation is a description of that implementation.
 
-Twelve tools, and twelve is a ceiling enforced by a test rather than
-remembered. All twelve are built: `claim_scope`, `release_scope`, `snapshot`,
+Fourteen tools, and fourteen is a ceiling enforced by a test rather than
+remembered. All fourteen are built: `claim_scope`, `release_scope`, `snapshot`,
 `events`, `work_pull`, `work_report`, `work_create`, `sop_get`, `whoami`,
-`attest`, and — with Phase 4, behind the revision policy — `sop_revise` and
-`sop_activate`, the two names `docs/decisions/0002-participation-ladder.md`
-reserved before either shipped.
+`attest`, `sop_revise`, `sop_activate`, and, since
+[ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md) option C was accepted on
+2026-11-09, `sop_run` and `adjudicate`.
 A large tool surface costs every calling harness context on every
 tool-choice decision it makes — that is paid by every conversation, not just
-the one using it. A thirteenth tool means deleting one. The count is a proxy
-for that cost, and the cost is bytes, not names, so a byte budget over the
-registered tools' schemas is published alongside the count
-(`tests/test_mcp_server.py`) and fails if it grows while the count holds.
+the one using it. A fifteenth tool means deleting one or a new decision. The
+count is a proxy for that cost, and the cost is bytes, not names, so a byte
+budget over the registered tools' schemas is published alongside the count
+(`tests/test_mcp_server.py`) and fails if it grows while the count holds: 14,000
+bytes, with 13,497 used.
 
-**That revisit condition has now fired.** ASOP v3 added seven verbs to the
-HTTP surface and the schemas sit at 12,496 of 12,500 bytes with the count
-still at twelve, so there is no room for a thirteenth tool at any description
-length — the v3 tool docstrings were written down to fit rather than the
-budget being raised. What to do about it is
-[`docs/decisions/0004-mcp-surface-under-asop-v3.md`](decisions/0004-mcp-surface-under-asop-v3.md),
-which is **proposed and undecided**: the surface stays at twelve until it is
-settled.
+The five operator verbs ASOP v3 added (`sop_retire`, `run_get`, `run_list`,
+`promote`, `outcomes`) stay on HTTP. The revisit condition is ADR 0004's: one
+report of an MCP-only harness working around a missing operator verb.
 
 Over stdio there is no request to sign, so the actor is whatever `AGENTCO_ACTOR`
 asserts at process start — exactly as trustworthy as the process that launched
@@ -458,11 +454,12 @@ belonging to the one that did.
 
 ## Known issues
 
-Open defects live in [`docs/known-issues.md`](known-issues.md): thirteen strict-xfail
-tests still stand (6a, the claim-3 scope-evasion routes, MCP refusals, and the
-6b/A15 transition tests among them), and four findings are recorded without a test
-yet (A13, A16, Finding 4, Finding 5). The 21 findings of the 2026-11-07 review are
-fixed, with three residues recorded beside them.
+Open defects live in [`docs/known-issues.md`](known-issues.md): ten strict-xfail
+tests still stand (the claim-3 scope-evasion routes among them), and three findings
+are recorded without a test yet (A13, A16, Finding 5). The 21 findings of the
+2026-11-07 review are fixed, with two residues recorded beside them. The six
+decisions of [ADR 0011](decisions/0011-v1-definition.md) closed 6a, the 6b default,
+Finding 4, the MCP refusal code and the MCP idempotency residue on 2026-11-09.
 None of them lose work or report a wrong result as a right one — those were fixed.
 
 ## The adoption gate
