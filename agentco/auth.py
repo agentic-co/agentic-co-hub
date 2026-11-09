@@ -26,6 +26,7 @@ import hmac
 import json
 import math
 import os
+import secrets
 import time
 import urllib.parse
 from pathlib import Path
@@ -387,6 +388,23 @@ def sign(secret: str, method: str, path: str, timestamp: str, body: bytes,
 # stripped of anything that could escape the context it is rendered into.
 AGENT_LABEL_MAX = 64
 
+#: Key used to do the same HMAC work for an actor that is not in the table, so
+#: an unknown actor costs what a wrong signature costs. Random per process; it
+#: is never a valid credential because no table entry can equal it and
+#: `authenticate` only accepts for a known actor.
+_DUMMY_SECRET = secrets.token_hex(32)
+
+#: The remediation for EVERY actor-or-signature refusal. It names the signing
+#: scheme, which is public and in the docs; what it must not do is differ
+#: between "no such actor" and "wrong secret".
+_REJECTED_REMEDIATION = (
+    "Check the actor name and shared secret against the registry's key file. "
+    "The signed string is 'METHOD\\npath\\ntimestamp\\nsha256(body)', plus a "
+    "fifth line with the canonical query when the request has one — parameters "
+    "sorted and percent-encoded, so a proxy reordering them cannot invalidate "
+    "the signature. The path is the DECODED path: decode before signing."
+)
+
 
 def normalise_agent_label(value: object) -> Optional[str]:
     """Validate a self-reported harness name, or raise `Refusal`.
@@ -501,19 +519,19 @@ def authenticate(
 
     table = load_keys() if keys is None else keys
     secret = table.get(actor)
-    if not secret:
-        # Deliberately the same message as a bad signature: distinguishing
-        # "no such actor" from "wrong secret" turns this endpoint into an
-        # identity oracle for anyone who can reach it.
-        raise _unauthenticated(
-            "actor or signature rejected",
-            "Check the actor name and shared secret against the registry's key file.",
-        )
+    known = bool(secret)
+    # An unknown actor takes the SAME path as a known one with a wrong
+    # signature: the HMAC is computed and compared, against a dummy key, and
+    # the refusal below is built from one place. "No such actor" and "wrong
+    # secret" must be indistinguishable in status, code, body and (as far as a
+    # comparison of this size allows) cost, or the endpoint is an identity
+    # oracle for anyone who can reach it. A caller holding the real key sees no
+    # change: `accepted` is only ever true for a known actor.
+    key = secret if known else _DUMMY_SECRET
 
     # The current form first: the query is part of what was signed.
-    expected = sign(secret, method, path, timestamp, body, query=query)
-    if hmac.compare_digest(expected, presented):
-        return actor
+    expected = sign(key, method, path, timestamp, body, query=query)
+    accepted = hmac.compare_digest(expected, presented)
 
     # Then, ONLY if the operator explicitly opted out (ASOP_REQUIRE_SIGNED_QUERY=0
     # and friends), the legacy form — the same string without the query line.
@@ -522,15 +540,11 @@ def authenticate(
     # reachable only as a one-release opt-out: while a caller can authenticate
     # without signing the query, one captured `GET /events` replays as any feed
     # query inside the timestamp window.
-    if legacy_signature_allowed() and query:
-        if hmac.compare_digest(sign(secret, method, path, timestamp, body), presented):
-            return actor
+    if not accepted and legacy_signature_allowed() and query:
+        accepted = hmac.compare_digest(sign(key, method, path, timestamp, body), presented)
 
-    raise _unauthenticated(
-        "actor or signature rejected",
-        "Check the actor name and shared secret against the registry's key file. "
-        "The signed string is 'METHOD\\npath\\ntimestamp\\nsha256(body)', plus a "
-        "fifth line with the canonical query when the request has one — parameters "
-        "sorted and percent-encoded, so a proxy reordering them cannot invalidate "
-        "the signature. The path is the DECODED path: decode before signing.",
-    )
+    if accepted and known:
+        return actor
+
+    # One refusal for both causes, so the two cannot drift apart again.
+    raise _unauthenticated("actor or signature rejected", _REJECTED_REMEDIATION)

@@ -736,11 +736,6 @@ def test_a_conflict_from_an_unverified_holder_claim_is_distinguishable(client):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the bad-signature branch appends the signing-string spec to its "
-    "remediation, so the two refusals differ in a field to_dict() ships to the client",
-)
 def test_an_unknown_actor_and_a_bad_signature_are_indistinguishable_refusals():
     """The two refusals differ in `remediation`, which makes the endpoint an identity oracle.
 
@@ -790,6 +785,30 @@ def test_an_unknown_actor_and_a_bad_signature_are_indistinguishable_refusals():
     assert unknown_actor == wrong_secret, (
         "the refusals are distinguishable, so actor existence is a one-request oracle"
     )
+
+
+def test_an_unknown_actor_costs_the_same_hmac_work_as_a_bad_signature(monkeypatch):
+    """The timing half of the oracle, asserted as work done rather than as a stopwatch.
+
+    A wall-clock comparison is flaky; counting `compare_digest` calls is not. An
+    unknown actor must reach the same comparison a known actor with a wrong
+    signature reaches, so the refusal costs the same on both paths.
+    """
+    calls = []
+    real = auth.hmac.compare_digest
+    monkeypatch.setattr(auth.hmac, "compare_digest", lambda a, b: calls.append(1) or real(a, b))
+    ts = str(int(time.time()))
+
+    def attempt(actor: str) -> int:
+        calls.clear()
+        with pytest.raises(Unauthenticated):
+            auth.authenticate(
+                {"x-agentco-actor": actor, "x-agentco-timestamp": ts, "x-agentco-signature": "00" * 32},
+                "POST", "/scope-claims", b"{}", keys=KEYS,
+            )
+        return len(calls)
+
+    assert attempt("nobody-is-registered-here") == attempt("dana") >= 1
 
 
 # --------------------------------------------------------------------------- #
