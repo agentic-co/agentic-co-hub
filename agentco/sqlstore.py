@@ -50,6 +50,7 @@ from agentco.db import BUSY_TIMEOUT_MS, AnyConnection
 from agentco.pgadapter import PgConnection, is_postgres_target
 from agentco.sop import ASOP, SOP, SopLibrary, SopStatus, Step
 from agentco.work import (
+    PARENT_KEY,
     Queue,
     WorkError,
     WorkItem,
@@ -422,6 +423,7 @@ class SqlQueue(_SqlBacked, Queue):
         metadata: Optional[dict] = None,
         verify: Optional[dict] = None,
         by_plane: bool = False,
+        filed_by: Optional[str] = None,
     ) -> WorkItem:
         """One item, with the same loud duplicate suppression as the JSONL store.
 
@@ -450,6 +452,7 @@ class SqlQueue(_SqlBacked, Queue):
             metadata=metadata,
             verify=verify,
             by_plane=by_plane,
+            filed_by=filed_by,
         )
         key = item.natural_key
 
@@ -528,6 +531,23 @@ class SqlQueue(_SqlBacked, Queue):
                     if is_child_row({"metadata": json.loads(r["metadata"] or "{}")}, parent_id)
                 )
 
+            parent_ref = (item.metadata or {}).get(PARENT_KEY)
+            if (getattr(conn, "dialect", "sqlite") == "postgres"
+                    and isinstance(parent_ref, str) and parent_ref.strip()):
+                # The decomposition check below is a read-modify-write of the
+                # PARENT: count its children, then append to its `blocked_by`.
+                # SQLite's `BEGIN IMMEDIATE` serialises that whole span; a
+                # plain Postgres `BEGIN` does not, so two creates under one
+                # parent both counted six, both inserted, and the second
+                # `blocked_by` write overwrote the first — a cap exceeded and a
+                # parent that could close with a child open (R18). Locking the
+                # parent ROW first serialises exactly the creates that contend
+                # (and a concurrent close of that parent, which updates the
+                # same row); under READ COMMITTED every statement after the
+                # lock is granted sees the winner's committed child and list.
+                # Taken after the natural-key lock above, never before it, so
+                # the two locks are always acquired in one order.
+                conn.execute("SELECT id FROM work_items WHERE id = ? FOR UPDATE", (parent_ref,))
             blocked_parent = enforce_decomposition(
                 item, lookup=lookup, count_children=count_children
             )
@@ -773,9 +793,12 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
     table gives the durable version with the version-numbering rules — the
     part that is genuinely subtle — untouched.
 
-    Rewriting the whole table per authoring call is fine and stays fine: this
-    holds procedures, not instances. The queue is the table that grows, and
-    the queue does targeted updates.
+    The write is per ROW, never a rewrite of the table: an existing version is
+    updated in place, a new one inserted, and nothing is ever deleted. A
+    delete-all/re-insert is only as safe as the lock around it, and on
+    Postgres the lock it had did not cover what mattered (R19) — so the write
+    no longer depends on it to avoid destroying a committed version, and the
+    `(asop_id, version)` primary key makes a reissued number fail loudly.
     """
 
     def __init__(self, path: Path | str = "agentco.sqlite3", protected_tags: Optional[Sequence[str]] = None,
@@ -794,7 +817,27 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
-        with self._write_tx():
+        """`BEGIN IMMEDIATE`, plus on Postgres the lock it stands for (R19).
+
+        Every authoring call reads the WHOLE history and decides from it — the
+        next version number, which version to demote. On SQLite the write lock
+        serialises that. On Postgres `FOR UPDATE` in `_read_all` locks only
+        rows that exist: a create on an empty table locks nothing, a create
+        beside an unrelated SOP contends on rows the other writer then
+        replaces, and a waiter whose locked rows were deleted wakes up to an
+        empty read. A transaction-scoped advisory lock is the whole-library
+        exclusion `BEGIN IMMEDIATE` provides, released at COMMIT/ROLLBACK.
+
+        Re-entrant by construction: a nested `_locked()` on the same thread
+        runs on the same pinned connection (the adapter's depth counter), and
+        Postgres advisory locks stack within a session, so the inner call
+        acquires immediately rather than waiting on itself.
+        """
+        with self._write_tx() as conn:
+            if getattr(conn, "dialect", "sqlite") == "postgres":
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext('agentco.asops:' || current_schema())::bigint)"
+                )
             yield
 
     def _read_all(self) -> list[ASOP]:
@@ -844,52 +887,55 @@ class SqlSopLibrary(_SqlBacked, SopLibrary):
         return out
 
     def _write_all(self, asops: Sequence[ASOP], quarantined: Sequence = ()) -> None:
-        """Replace the table's contents. Called only inside `_locked`.
+        """Write the history back, row by row. Called only inside `_locked`.
 
-        The delete-then-insert is safe precisely because it is inside the
-        caller's transaction: a reader either sees the whole previous history
-        or the whole new one. Doing this outside a transaction would expose an
-        instant in which every SOP has been destroyed — and `_write_all`'s own
-        docstring in `sop.py` explains what a lost version row costs.
+        **Never a delete.** What stood here was `DELETE FROM asops` and a
+        re-insert of what the caller had read, which made "every version
+        survives" a property of the lock rather than of the write: under
+        Postgres's READ COMMITTED a second author could read a stale or empty
+        history and then delete versions another author had already committed,
+        and reuse their numbers (R19). Now an existing `(asop_id, version)` is
+        UPDATEd in place and anything new is INSERTed; a version the caller did
+        not pass is left exactly as it is. A version number can therefore never
+        be freed, and the primary key turns any attempt to issue one twice into
+        an error instead of an overwrite.
 
-        Two things survive the delete that the `SOP` dataclass cannot carry:
+        Two things the `SOP` dataclass cannot carry survive untouched as a
+        consequence, with no read-back needed:
 
-          * **`unknown`**, per version, read back before the DELETE and
-            re-attached to the row it belongs to. It is deliberately absent
-            from `SOP_COLUMNS` — nothing here models those fields — and a
-            rewrite that simply omitted it reset a newer writer's field to
-            `{}` on every create, revise and activate. Migration 0002 promises
-            the opposite in as many words, and the queue keeps that promise;
-            this is the SOP side of it.
-          * **Quarantined rows**, re-inserted verbatim. Same promise the JSONL
-            `_write_all` keeps by writing the raw lines back out: preserving
-            the bytes is what stops the data being lost, and only `revise()`'s
-            refusal stops the NUMBER being reused. Dropping them here would
-            make the refusal moot by deleting the thing it protects.
+          * **`unknown`**, per version — never in the UPDATE's column list, so
+            a newer writer's fields stay on the row (migration 0002's promise).
+          * **Quarantined rows** — already in the table, never deleted, so the
+            raw bytes stay where they are. One the table somehow lacks is
+            re-inserted verbatim with every column, as before.
         """
+        keys = ("asop_id", "version")
+        settable = tuple(c for c in ASOP_COLUMNS if c not in keys)
+        update = (
+            f"UPDATE asops SET {', '.join(f'{_quote(c)} = ?' for c in settable)} "
+            f"WHERE asop_id = ? AND version = ?"
+        )
+
         def insert_for(columns: Sequence[str]) -> str:
             quoted = ", ".join(_quote(c) for c in columns)
             placeholders = ", ".join("?" for _ in columns)
             return f"INSERT INTO asops ({quoted}) VALUES ({placeholders})"
 
         insert = insert_for(ASOP_COLUMNS + ("unknown",))
-        # A quarantined row goes back with EVERY column, including the ones this
-        # contract does not model: those values are usually why it was
-        # quarantined, and they are exactly what has to survive the rewrite.
         raw_columns = ASOP_SCHEMA_COLUMNS + ("unknown",)
         insert_raw = insert_for(raw_columns)
-        clear = "DELETE FROM asops"
         with self._read_tx() as conn:
-            preserved = {
-                (row["asop_id"], row["version"]): row["unknown"]
-                for row in conn.execute("SELECT asop_id, version, unknown FROM asops")
+            present = {
+                (row["asop_id"], row["version"])
+                for row in conn.execute("SELECT asop_id, version FROM asops")
             }
-            conn.execute(clear)
             for asop in asops:
-                conn.execute(
-                    insert,
-                    _asop_to_row(asop)
-                    + (preserved.get((asop.asop_id, asop.version), "{}"),),
-                )
+                values = dict(zip(ASOP_COLUMNS, _asop_to_row(asop)))
+                if (asop.asop_id, asop.version) in present:
+                    conn.execute(update, tuple(values[c] for c in settable) + (asop.asop_id, asop.version))
+                else:
+                    conn.execute(insert, tuple(values[c] for c in ASOP_COLUMNS) + ("{}",))
+                    present.add((asop.asop_id, asop.version))
             for row in quarantined:
-                conn.execute(insert_raw, tuple(row[c] for c in raw_columns))
+                if (row["asop_id"], row["version"]) not in present:
+                    conn.execute(insert_raw, tuple(row[c] for c in raw_columns))

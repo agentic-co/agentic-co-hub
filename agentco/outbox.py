@@ -36,9 +36,10 @@ silently dropped stops pushing and is right to.
 **Delivery is at-least-once, and that is a choice with a reason.** Lines are
 removed from the outbox only after they have a terminal receipt. A drainer that
 dies between publishing and truncating will publish those lines again on the
-next run, and `work_report` and `attest` carry the line id as their idempotency
-key so that retry is free. For `claim_scope` and `snapshot` a duplicate costs a redundant
-row; the alternative ordering — truncate first, then publish — loses the write
+next run, and every verb the hub could otherwise act on twice (`claim_scope`,
+`snapshot`, `work_report`, `attest`, `adjudicate`, `sop_revise`, `sop_activate`)
+carries the line id as its idempotency key, so the hub returns the recorded
+outcome and the retry is free (`release_scope` is idempotent by state). The alternative ordering — truncate first, then publish — loses the write
 outright on the same crash. A silently dropped claim is the failure the registry
 exists to prevent, and a duplicate one is visible and harmless.
 
@@ -62,6 +63,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Optional, Sequence
 
 from agentco.errors import Refusal
+from agentco import appendlog
 from agentco.filelock import lock_exclusive, unlock
 
 NODE_DIR_ENV_VAR = "AGENTCO_NODE_DIR"
@@ -384,10 +386,8 @@ class Outbox:
             # exist if the process dies inside this call, which is why the
             # drainer quarantines rather than fails — but nothing here writes a
             # line in two pieces and hopes.
-            with open(self.path, "ab") as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
+            # After a torn tail, the line starts on a fresh one (F3).
+            appendlog.append_lines(self.path, [encoded.rstrip(b"\n")])
         return record
 
     # -- the drainer's end -----------------------------------------------
@@ -511,10 +511,15 @@ class Outbox:
         settled = {r["line_id"] for r in receipts if r.get("state") in ("published", "refused")}
         with self._locked():
             good, bad = self._read_raw()
-            if settled or bad:
-                self._rewrite([r for r in good if r["line_id"] not in settled])
+            # Receipts FIRST, then the lines go (F2). The other order lost both
+            # when it died in between: the lines were gone and no receipt said
+            # what became of them. This order's worst case is a receipt for a
+            # line still in the outbox, which the next drain republishes and
+            # the hub dedupes on the line id.
             if receipts:
                 self._append_jsonl(self.receipts_path, list(receipts), keep=RECEIPT_HISTORY)
+            if settled or bad:
+                self._rewrite([r for r in good if r["line_id"] not in settled])
             counts: dict[str, int] = {}
             for receipt in receipts:
                 state = str(receipt.get("state"))
@@ -600,6 +605,8 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
                 payload["prefixes"],
                 payload["intent"],
                 agent_label=label,
+                # Every verb the hub can act on twice carries the line id (R4).
+                idempotency_key=record["line_id"],
             )
         if verb == "release_scope":
             return registry.release_scope(payload["leaseUid"], action=payload.get("action"))
@@ -608,6 +615,7 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
                 payload["artifactUri"],
                 payload["purpose"],
                 agent_label=label,
+                idempotency_key=record["line_id"],
             )
         if verb == "attest":
             return registry.attest(
@@ -632,14 +640,15 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
                 payload["verdict"],
                 payload["evidence"],
                 agent_label=label,
+                idempotency_key=record["line_id"],
             )
         if verb == "sop_revise":
             body = dict(payload.get("changes") or {})
             if payload.get("title") is not None:
                 body["title"] = payload["title"]
-            return registry.sop_revise(payload["sopId"], **body)
+            return registry.sop_revise(payload["sopId"], idempotency_key=record["line_id"], **body)
         if verb == "sop_activate":
-            return registry.sop_activate(payload["sopId"], payload["version"])
+            return registry.sop_activate(payload["sopId"], payload["version"], idempotency_key=record["line_id"])
         if verb == "work_report":
             return registry.work_report(
                 payload["itemId"],

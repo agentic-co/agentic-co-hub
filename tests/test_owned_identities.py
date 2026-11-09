@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from agentco import auth
 from agentco.app import create_app
+from agentco.errors import Refusal
 from agentco.work import Queue, WorkStatus
 
 JUDGED = {"kind": "judged", "check": "somebody reads the diff",
@@ -172,10 +173,10 @@ def test_with_no_ownership_declared_the_old_rule_is_unchanged(tmp_path):
     assert queue.get(item.id).status is WorkStatus.DONE
 
 
-def test_a_table_that_cannot_be_read_falls_back_to_the_stricter_rule(tmp_path):
-    """An unreadable key table must not turn every attestation into a 500, and
-    must not become a way to bypass the check either. Falling back to comparing
-    actors is the pre-ownership rule, which is stricter than nothing."""
+def test_a_table_that_cannot_be_read_refuses_rather_than_skipping_the_check(tmp_path):
+    """An unreadable key table must not become a way to bypass owner separation,
+    and falling back to comparing actors is weaker than comparing parties (R12):
+    the operation that needed the party is refused, naming the key table."""
     queue = Queue(tmp_path / "work.jsonl", verifiers=["alice-claude-01"])
 
     def broken():
@@ -183,12 +184,14 @@ def test_a_table_that_cannot_be_read_falls_back_to_the_stricter_rule(tmp_path):
 
     queue.owners = broken
     item = a_reported_item(queue, "alice-codex-01")
-    queue.attest(item.id,
-                 {"check": "somebody reads the diff", "exit_status": 0, "environment": "local",
-                  "at": "2026-09-22T10:00:00Z", "submitted_by": "alice-claude-01",
+    with pytest.raises(Refusal) as refused:
+        queue.attest(item.id,
+                     {"check": "somebody reads the diff", "exit_status": 0, "environment": "local",
+                      "at": "2026-09-22T10:00:00Z", "submitted_by": "alice-claude-01",
                       "verdict": {"passed": True, "reason": "somebody read the diff and judged it sound"}},
-                 "alice-claude-01", capabilities=["verify"])
-    assert queue.get(item.id).status is WorkStatus.DONE
+                     "alice-claude-01", capabilities=["verify"])
+    assert "key table" in refused.value.message
+    assert queue.get(item.id).status is not WorkStatus.DONE
 
 
 # --------------------------------------------------------------------------- #

@@ -58,6 +58,7 @@ from agentco import policy
 from agentco.errors import Refusal
 from agentco.filelock import lock_exclusive, unlock
 from agentco.work import (
+    FILED_BY_KEY,
     PARENT_KEY,
     PLAN_KEY,
     REF_KEY,
@@ -889,6 +890,8 @@ class SopLibrary:
         from agentco import ownership
 
         parent_metadata[ownership.RUN_OWNER_KEY] = ownership.initial_record(owner, filed_by, _iso(_now()))
+        if filed_by:
+            parent_metadata[FILED_BY_KEY] = filed_by
         parent_metadata[PLAN_KEY] = {
             "title": asop.title,
             **{k: getattr(asop, k) for k in ASOP_TEXT_FIELDS if getattr(asop, k)},
@@ -929,7 +932,7 @@ class SopLibrary:
             "bindings": bound,
             "chain": dict(chain_pin) if chain_pin is not None else None,
             "blockedBy": blockers,
-            "steps": self._file(plan, queue, parent.id, inherited=blockers),
+            "steps": self._file(plan, queue, parent.id, inherited=blockers, filed_by=filed_by),
         }
 
     def _runnable(self, asop_id: str, version: Optional[int], *, nested: bool = False) -> ASOP:
@@ -1176,7 +1179,7 @@ class SopLibrary:
         return ids
 
     def _file(self, nodes: list[dict], queue: Queue, parent_id: str,
-              inherited: Sequence[str] = ()) -> list[dict]:
+              inherited: Sequence[str] = (), filed_by: Optional[str] = None) -> list[dict]:
         """File one level of the tree, in order, resolving `after` to ids.
 
         A node with no `after` is a ROOT of its level and waits on `inherited`
@@ -1195,6 +1198,7 @@ class SopLibrary:
                 PARENT_KEY: parent_id,
                 REF_KEY: node["pin"],
                 PLAN_KEY: node["plan"],
+                **({FILED_BY_KEY: filed_by} if filed_by else {}),
             }
             item = queue.create(
                 node["name"],
@@ -1215,7 +1219,8 @@ class SopLibrary:
             }
             if node["children"]:
                 entry["uses"] = node["uses"]
-                entry["children"] = self._file(node["children"], queue, item.id, inherited=own_blockers)
+                entry["children"] = self._file(node["children"], queue, item.id, inherited=own_blockers,
+                                                filed_by=filed_by)
             filed.append(entry)
         return filed
 
