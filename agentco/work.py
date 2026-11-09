@@ -1501,9 +1501,22 @@ class Queue:
         re-encoding a guess at it is how the original bytes get lost on the
         next write.
         """
+        pairs, quarantined = self._scan()
+        self.quarantined = quarantined
+        return [row for row, _ in pairs], quarantined
+
+    def _scan(self) -> tuple[list[tuple[dict, Optional[bytes]]], list[bytes]]:
+        """`_read_raw`, with each parseable row paired with the bytes it came from.
+
+        The pairing is what lets `_read_all` quarantine a row it cannot MODEL
+        as the exact line that was read, rather than as `json.dumps` of the
+        parsed dict (which re-encodes, e.g. `ensure_ascii` rewrites `café`).
+        A backend with no line of bytes to point at pairs each row with `None`
+        (see `SqlQueue._scan`) and its unmodellable rows are simply not listed.
+        """
         if not self.path.exists():
             return [], []
-        rows: list[dict] = []
+        pairs: list[tuple[dict, Optional[bytes]]] = []
         quarantined: list[bytes] = []
         for raw_line in self.path.read_bytes().split(b"\n"):
             if not raw_line.strip():
@@ -1514,11 +1527,10 @@ class Queue:
                 quarantined.append(raw_line)
                 continue
             if isinstance(parsed, dict) and "id" in parsed:
-                rows.append(parsed)
+                pairs.append((parsed, raw_line))
             else:
                 quarantined.append(raw_line)
-        self.quarantined = quarantined
-        return rows, quarantined
+        return pairs, quarantined
 
     def _read_all(self) -> list[WorkItem]:
         """Rows this version can model. A row it cannot is quarantined, not fatal.
@@ -1529,26 +1541,30 @@ class Queue:
         would mean a forward-compatible store bricks an older reader, so they
         land in the same quarantine as a corrupt line.
         """
-        rows, quarantined = self._read_raw()
+        pairs, quarantined = self._scan()
+        items, unmodellable = self._model_rows(pairs)
+        # The exact bytes read, in file order. These rows are ALSO in the row
+        # list every write path carries through (`_read_raw`), so a caller must
+        # never hand this attribute AND those rows to `_write_all` together —
+        # none does; the write paths take the corrupt-line list from
+        # `_read_raw`, which does not include these.
+        self.quarantined = quarantined + unmodellable
+        return items
+
+    @staticmethod
+    def _model_rows(
+        pairs: list[tuple[dict, Optional[bytes]]],
+    ) -> tuple[list[WorkItem], list[bytes]]:
+        """`(items this version can model, raw lines of the rows it cannot)`."""
         items: list[WorkItem] = []
-        for row in rows:
+        unmodellable: list[bytes] = []
+        for row, raw_line in pairs:
             try:
                 items.append(WorkItem.from_json(json.dumps(row)))
             except (ValueError, TypeError):
-                # NOT appended to `quarantined`. Two docstrings promise that
-                # list holds the exact bytes read — `_read_raw` says re-encoding
-                # a guess is how the original bytes get lost, `_write_all` says
-                # they go back verbatim — and `json.dumps(row)` is a
-                # re-serialisation, not the original line. Worse, this row is
-                # ALSO in `rows`, so passing both to `_write_all` would write it
-                # twice: once as a row and once as a "quarantined line".
-                #
-                # The row is already preserved by being in `raw_rows`, which
-                # every write path carries through. Nothing is lost by leaving
-                # it out of a list whose contract it does not satisfy.
-                pass
-        self.quarantined = quarantined
-        return items
+                if raw_line is not None:
+                    unmodellable.append(raw_line)
+        return items, unmodellable
 
     def _write_all(self, rows: list[dict], quarantined: Sequence[bytes] = ()) -> None:
         """Atomic whole-file replace, CARRYING QUARANTINED LINES THROUGH VERBATIM.
@@ -1733,9 +1749,10 @@ class Queue:
         # blocker whose row carries something unmodellable would otherwise
         # never count as done — `ready()` would hide its dependents while
         # `claim()` accepted them. `status` is a plain string on the raw dict.
-        raw_rows, _ = self._read_raw()
-        done = {r["id"] for r in raw_rows if releases_blockers(r.get("status", ""))}
-        return self._read_all(), done
+        pairs, quarantined = self._scan()
+        done = {r["id"] for r, _ in pairs if releases_blockers(r.get("status", ""))}
+        self.quarantined = quarantined
+        return self._model_rows(pairs)[0], done
 
     # -- reading ---------------------------------------------------------
 

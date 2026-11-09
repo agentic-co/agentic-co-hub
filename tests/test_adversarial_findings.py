@@ -2408,11 +2408,6 @@ def test_truncate_never_returns_more_than_the_budget_it_was_given():
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_read_all re-serialises an unmodellable row with json.dumps instead of "
-    "keeping the bytes that were read",
-)
 def test_a_quarantined_row_is_preserved_as_the_bytes_that_were_read(queue):
     """Two docstrings promise verbatim bytes; one code path re-encodes them.
 
