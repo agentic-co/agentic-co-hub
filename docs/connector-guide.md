@@ -21,8 +21,9 @@ Content-Type:        application/json
 - `path` is the decoded path without the query string. When the request has a
   query, its canonical form is appended as a fifth line: parameters sorted and
   percent-encoded (`GET /events?since=x&limit=1` signs `/events`, then
-  `limit=1&since=x`). Registries still accept the four-line form until the
-  operator sets `ASOP_REQUIRE_SIGNED_QUERY=1`; sign the query anyway.
+  `limit=1&since=x`). Since 1.0 a registry refuses the four-line form on a request
+  that has a query (`401`); only an operator's explicit
+  `ASOP_REQUIRE_SIGNED_QUERY=0` re-allows it, for one release. Sign the query.
 - An empty body hashes as the sha256 of zero bytes. Send no body on `GET`.
 - The actor is whatever the signature authenticates. A payload that names an
   `actor` is refused (`400`); a harness that wants to say which tool it is uses

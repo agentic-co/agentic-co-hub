@@ -300,12 +300,22 @@ def owner_of(actor: Optional[str], identities: Mapping[str, "Identity"]) -> Opti
     return ident.owner if (ident and ident.owner) else actor
 
 
-#: Set to refuse signatures that do not cover the query string. Off by default
-#: because both ends must change together and a registry that stopped serving
-#: every existing client on upgrade is a registry nobody upgrades; ON is the
-#: destination, and until it is on, known issue 6b remains open for whoever is
-#: still signing the old string.
+#: Opt-out for the signed query, kept for ONE release after 1.0. Since 1.0 a
+#: signature must cover the canonical query (known issue 6b) and this variable
+#: is only read to let an operator whose clients have not moved re-allow the
+#: legacy string: an explicit falsy value (`0`, `false`, `no`, `off`) does that.
+#: Unset, empty, `1`, `true`, or anything unrecognised means REQUIRED, so a typo
+#: can never re-open the hole. The name is unchanged so a deployment that already
+#: sets `=1` keeps working; it will be removed with the legacy signature.
 REQUIRE_SIGNED_QUERY_ENV_VAR = "ASOP_REQUIRE_SIGNED_QUERY"
+
+_LEGACY_OPT_OUT = frozenset({"0", "false", "no", "off"})
+
+
+def legacy_signature_allowed() -> bool:
+    """True only when the operator explicitly opted out of the signed query."""
+    value = (os.environ.get(REQUIRE_SIGNED_QUERY_ENV_VAR) or "").strip().lower()
+    return value in _LEGACY_OPT_OUT
 
 
 def canonical_query(query: Optional[str]) -> str:
@@ -505,18 +515,14 @@ def authenticate(
     if hmac.compare_digest(expected, presented):
         return actor
 
-    # Then, unless the operator has closed it, the legacy form — the same
-    # string without the query line. Both ends have to change together, and a
-    # registry that stopped serving every existing client the moment it was
-    # upgraded is a registry nobody upgrades.
+    # Then, ONLY if the operator explicitly opted out (ASOP_REQUIRE_SIGNED_QUERY=0
+    # and friends), the legacy form — the same string without the query line.
     #
-    # This branch IS known issue 6b, deliberately left reachable and deliberately
-    # switchable: while a caller can still authenticate without signing the
-    # query, one captured `GET /events` replays as any feed query inside the
-    # timestamp window. Set ASOP_REQUIRE_SIGNED_QUERY=1 once every client has
-    # moved, and the hole closes.
-    legacy_allowed = not _truthy(os.environ.get(REQUIRE_SIGNED_QUERY_ENV_VAR))
-    if legacy_allowed and query:
+    # This branch IS known issue 6b. Since 1.0 it is closed by default and
+    # reachable only as a one-release opt-out: while a caller can authenticate
+    # without signing the query, one captured `GET /events` replays as any feed
+    # query inside the timestamp window.
+    if legacy_signature_allowed() and query:
         if hmac.compare_digest(sign(secret, method, path, timestamp, body), presented):
             return actor
 
@@ -528,7 +534,3 @@ def authenticate(
         "sorted and percent-encoded, so a proxy reordering them cannot invalidate "
         "the signature. The path is the DECODED path: decode before signing.",
     )
-
-
-def _truthy(value: Optional[str]) -> bool:
-    return (value or "").strip().lower() in {"1", "true", "yes", "on"}

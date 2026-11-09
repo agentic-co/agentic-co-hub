@@ -188,16 +188,16 @@ class SignedTransport:
         self.client = client
         self.actor = actor
 
-    def _headers(self, method, path, body=None):
+    def _headers(self, method, path, body=None, query=""):
         raw = json.dumps(body).encode() if body is not None else b""
         ts = str(int(time.time()))
         return {"X-AgentCo-Actor": self.actor, "X-AgentCo-Timestamp": ts,
-                "X-AgentCo-Signature": auth.sign(KEYS[self.actor], method, path, ts, raw),
+                "X-AgentCo-Signature": auth.sign(KEYS[self.actor], method, path, ts, raw, query=query.lstrip("?") or None),
                 "Content-Type": "application/json"}
 
     def events(self, since=None, limit=200):
         query = f"?limit={limit}" + (f"&since={since}" if since else "")
-        r = self.client.get(f"/events{query}", headers=self._headers("GET", "/events"))
+        r = self.client.get(f"/events{query}", headers=self._headers("GET", "/events", None, query))
         assert r.status_code == 200, r.text
         return r.json()
 

@@ -56,13 +56,13 @@ def client(tmp_path):
     ))
 
 
-def signed(method, path, actor, body=None):
+def signed(method, path, actor, body=None, query=""):
     raw = json.dumps(body).encode() if body is not None else b""
     ts = str(int(time.time()))
     return {
         "X-AgentCo-Actor": actor,
         "X-AgentCo-Timestamp": ts,
-        "X-AgentCo-Signature": auth.sign(KEYS[actor], method, path, ts, raw),
+        "X-AgentCo-Signature": auth.sign(KEYS[actor], method, path, ts, raw, query=query.lstrip("?") or None),
         "Content-Type": "application/json",
     }
 
@@ -86,7 +86,7 @@ class Harness:
         """The one call this harness makes on a timer."""
         query = "?limit=100" + (f"&since={self.cursor}" if self.cursor else "")
         r = self.client.get(f"/events{query}",
-                            headers=signed("GET", "/events", self.actor))
+                            headers=signed("GET", "/events", self.actor, None, query))
         assert r.status_code == 200, r.text
         page = r.json()
         self.cursor = page["nextCursor"]

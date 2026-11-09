@@ -53,7 +53,7 @@ class LoopbackRegistry(Registry):
         headers = {
             "X-AgentCo-Actor": self.actor,
             "X-AgentCo-Timestamp": ts,
-            "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw),
+            "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw, query=query.lstrip("?") or None),
             "Content-Type": "application/json",
         }
         response = self.client.request(

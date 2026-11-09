@@ -421,10 +421,10 @@ always taken from the token, never from the payload.**
 That is narrower than it sounds and the difference matters. The *actor* — who made the
 call — cannot be forged. The `holder` field of a scope claim is a separate, payload-supplied
 value, so a caller can file a lease naming a colleague. The lease records that as
-`holderAttested`, but **the conflict record other people actually read does not currently
-carry that flag**, so a conflict raised by an unverified claim is presently
-indistinguishable from a real one. That is a known open defect with a failing test against
-it, not a property of the design.
+`holderAttested`, and **the conflict record other people read carries that flag too**
+(`docs/wire.md`, "Scope conflicts carry `holderAttested`"), so a conflict raised by an
+unverified claim is distinguishable from a verified one. The conflict still fires; the
+flag lets the reader weigh it.
 
 ## Connectors
 

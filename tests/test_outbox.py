@@ -393,7 +393,7 @@ class LoopbackRegistry(Registry):
             headers={
                 "X-AgentCo-Actor": self.actor,
                 "X-AgentCo-Timestamp": ts,
-                "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw),
+                "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw, query=query.lstrip("?") or None),
                 "Content-Type": "application/json",
                 # Mirrors `Registry._call`. Without it this stand-in could not
                 # exercise the transport marker at all, and the L1-conversion
