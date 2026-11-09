@@ -118,13 +118,6 @@ def remote(client, actor: str):
 # --------------------------------------------------------------------------- #
 
 
-XFAIL_R4 = pytest.mark.xfail(
-    strict=True,
-    reason="R4 residue: the MCP tool does not take an idempotency key, so the SDK drops it and a retry repeats",
-)
-
-
-@XFAIL_R4
 def test_a_retried_claim_scope_over_mcp_returns_the_first_lease(tmp_path):
     mcp = local(tmp_path, "dana")
     args = {"repo": "acme/web", "prefixes": ["src/billing/invoices"], "intent": "implement",
@@ -132,11 +125,10 @@ def test_a_retried_claim_scope_over_mcp_returns_the_first_lease(tmp_path):
     first = call(mcp, "claim_scope", **args)
     again = call(mcp, "claim_scope", **args)
     assert again == first, "a retry under the same key must be answered with the first outcome"
-    claims = [e for e in call(mcp, "events")["events"] if e["kind"] == "scope_claimed"]
+    claims = [e for e in call(mcp, "events")["events"] if e["kind"] == "ScopeClaimed"]
     assert len(claims) == 1, f"the retry filed a second claim: {len(claims)} claim events"
 
 
-@XFAIL_R4
 def test_a_retried_snapshot_over_mcp_returns_the_first_receipt(tmp_path):
     mcp = local(tmp_path, "dana")
     args = {"artifact_uri": "git:/repo#main", "purpose": "baseline", "idempotency_key": "line-2"}
@@ -144,7 +136,6 @@ def test_a_retried_snapshot_over_mcp_returns_the_first_receipt(tmp_path):
     assert call(mcp, "snapshot", **args) == first
 
 
-@XFAIL_R4
 def test_a_retried_sop_revise_over_mcp_writes_one_version(tmp_path):
     sop_id = a_sop(tmp_path)
     mcp = local(tmp_path, "kofi")
@@ -156,7 +147,6 @@ def test_a_retried_sop_revise_over_mcp_writes_one_version(tmp_path):
     assert [v.version for v in SopLibrary(tmp_path / "sops.jsonl").history(sop_id)] == [1, 2]
 
 
-@XFAIL_R4
 def test_a_late_retried_sop_activate_over_mcp_does_not_undo_a_later_activation(tmp_path, monkeypatch):
     """The dangerous one: activate v1, someone activates v2, then the lost
     acknowledgement for v1 is retried. Without the key the retry re-activates
@@ -172,7 +162,6 @@ def test_a_late_retried_sop_activate_over_mcp_does_not_undo_a_later_activation(t
     assert call(mcp, "sop_get", sop_id=sop_id)["version"] == 2, "and it changed nothing"
 
 
-@XFAIL_R4
 def test_a_retried_attest_over_mcp_is_answered_not_refused(tmp_path, monkeypatch):
     """HTTP's attest takes `idempotencyKey`; the MCP tool did not, so a lost
     acknowledgement retried against the now-closed item was refused."""
@@ -190,7 +179,6 @@ def test_a_retried_attest_over_mcp_is_answered_not_refused(tmp_path, monkeypatch
     assert again["status"] == first["status"] == "done"
 
 
-@XFAIL_R4
 def test_a_retried_call_over_remote_mcp_carries_its_key_to_the_registry(registry_client, tmp_path):
     """Remote mode proxies to HTTP, which already dedupes — but only on a key
     the proxy forwards."""
@@ -207,10 +195,6 @@ def test_a_retried_call_over_remote_mcp_carries_its_key_to_the_registry(registry
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_refuse() renders the Refusal into ToolError text; the wire result carries no structured code",
-)
 def test_a_refusal_over_the_mcp_wire_carries_its_code_as_structured_content(tmp_path):
     """Over a real (in-process) MCP session, not the raw tool function: the
     property is about what a client receives. The text a current client
@@ -236,7 +220,6 @@ def test_a_refusal_over_the_mcp_wire_carries_its_code_as_structured_content(tmp_
     assert "Re-claim naming at least" in (structured.get("remediation") or "")
 
 
-@pytest.mark.xfail(strict=True, reason="a remote refusal reaches the MCP client as text only")
 def test_a_remote_refusal_keeps_the_registrys_code_as_a_field(registry_client):
     """Remote mode: the registry's own code, carried through the proxy onto the field."""
     from mcp import Client

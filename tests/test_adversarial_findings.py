@@ -1648,11 +1648,6 @@ def test_an_unexpected_error_is_identifiable_without_leaking_internals(client, m
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_refuse() stringifies the Refusal into ToolError, so the code survives only "
-    "as a prefix inside prose and a client must parse it back out",
-)
 def test_a_refusal_over_mcp_carries_its_code_as_a_field(tmp_path):
     """The MCP encoding drops the machine half of every refusal.
 

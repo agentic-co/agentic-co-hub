@@ -56,13 +56,14 @@ def tool(mcp, name):
 # --------------------------------------------------------------------------- #
 
 
-def test_tool_count_is_capped_at_twelve(mcp):
+def test_tool_count_is_capped_at_fourteen(mcp):
     """0002-participation-ladder.md moved the ceiling from nine to twelve to
-    make room for `attest`, `sop_revise`, and `sop_activate` — all three now
-    built, so the ceiling is binding. A thirteenth tool must fail this, not
-    slip in because nobody counted."""
+    make room for `attest`, `sop_revise`, and `sop_activate`; ADR 0004 option C
+    moved it to fourteen for `sop_run` and `adjudicate`. The ceiling is
+    binding: a fifteenth tool must fail this, not slip in because nobody
+    counted."""
     names = sorted(t.name for t in mcp._tool_manager.list_tools())
-    assert len(names) <= 12, f"{len(names)} tools registered: {names}"
+    assert len(names) <= 14, f"{len(names)} tools registered: {names}"
 
 
 def test_the_implemented_tools_are_the_ones_the_design_names(mcp):
@@ -120,7 +121,12 @@ def test_the_implemented_tools_are_the_ones_the_design_names(mcp):
 # left room for the two then-reserved verbs at roughly the observed per-tool
 # cost and nothing more. With `sop_revise` and `sop_activate` landed (Phase 4)
 # the twelve tools measure 12,407 bytes: 93 to spare. Binding, as intended.
-TOOL_SCHEMA_BYTE_BUDGET = 12_500
+#
+# Republished to 14,000 by ADR 0004 option C (accepted), for two named
+# additions and nothing else: the idempotency key on claim_scope, snapshot,
+# sop_revise, sop_activate and attest (R4's MCP residue, ~105 bytes each), and
+# the `sop_run` and `adjudicate` tools. The measured total is printed below.
+TOOL_SCHEMA_BYTE_BUDGET = 14_000
 
 
 def test_tool_schema_byte_budget_is_published_and_enforced(mcp, capsys):

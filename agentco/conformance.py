@@ -896,8 +896,10 @@ def _mcp(world: World, s: dict, remote: bool = False) -> dict:
             if verb == "sop_activate":
                 tool("sop_activate")(sop_id=a["sop"], version=int(a["version"]))
                 return _ok()
-        except Exception as exc:  # noqa: BLE001 - ToolError carries the code first
-            return _refused(_code_of(str(exc)))
+        except Exception as exc:  # noqa: BLE001 - classified below
+            # The field when there is one (`RefusedToolError.code`); the
+            # rendered prefix otherwise, for anything raised before `_refuse`.
+            return _refused(getattr(exc, "code", None) or _code_of(str(exc)))
     raise ConformanceError(f"mcp does not perform {verb!r}")
 
 
