@@ -135,9 +135,9 @@ uniqueness rule on the ingest path, so no source can invent its own idempotency 
   and re-file;
 - the pulse reports every held lease's age, time left and renewals against the cap (`housekeeping.leases`).
 
-There is no MCP `work_renew` tool: the MCP surface is at its twelve-tool ceiling and a thirteenth tool
-needs [ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md)'s decision. The remote MCP backend already
-carries the call for when it is.
+There is no MCP `work_renew` tool: the MCP surface is at its fourteen-tool ceiling
+([ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md), option C) and a fifteenth tool is a new
+decision. The remote MCP backend already carries the call for when it is.
 
 ### Hub network *(planned)*
 
