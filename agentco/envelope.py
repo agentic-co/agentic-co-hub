@@ -290,7 +290,12 @@ def prune(conn, *, now: Optional[datetime] = None, fresh: Optional[int] = None,
     deleting it would let the same envelope land a second time as new."""
     at = now or datetime.now(timezone.utc)
     default_fresh, default_grace = windows_from_env()
-    keep = (fresh if fresh is not None else default_fresh) + (grace if grace is not None else default_grace)
+    # MAX_FUTURE_S too: a row is keyed on arrival, but an envelope dated up to
+    # MAX_FUTURE_S ahead stays valid until issued_at + fresh, which is that much
+    # later than arrival + fresh. Dropping the nonce before then would let a
+    # refused or held envelope be resubmitted as new.
+    keep = ((fresh if fresh is not None else default_fresh) + (grace if grace is not None else default_grace)
+            + MAX_FUTURE_S)
     cutoff = at.timestamp() - keep
     with conn:
         return conn.execute(

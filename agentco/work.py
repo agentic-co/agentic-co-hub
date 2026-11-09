@@ -421,7 +421,16 @@ ATTEST_KEYS_KEPT = 20
 #: earlier build keep refusing it.
 FAILED_VERDICTS_KEY = "failed_verdicts"
 
+#: Who filed an item, stamped by the plane from the AUTHENTICATED actor (never a
+#: payload field). It lets a filer keep sight of what they filed once it is
+#: assigned to somebody else (`authz.item_in_reach`). A metadata key rather than
+#: a column: metadata already persists on every backend and the plane already
+#: keeps its own facts there, so no migration is needed; old rows simply have
+#: none and keep the assignee-based rule.
+FILED_BY_KEY = "filed_by"
+
 RESERVED_METADATA_KEYS = frozenset({
+    FILED_BY_KEY,
     "verifies", "claims", "lease_report", "verify_parked_at", "verify_resolution",
     "verify_history", "verify_escalated", "verify_quarantined", "verify_retry",
     "verify_verdict", "natural_key_conflict",
@@ -1267,6 +1276,7 @@ def build_item(
     metadata: Optional[dict] = None,
     verify: Optional[dict] = None,
     by_plane: bool = False,
+    filed_by: Optional[str] = None,
 ) -> WorkItem:
     """Derive the natural key, validate the gate, and return the new item.
 
@@ -1302,7 +1312,7 @@ def build_item(
             subject=subject,
             period=period,
         ),
-        metadata=dict(metadata or {}),
+        metadata={**dict(metadata or {}), **({FILED_BY_KEY: filed_by} if filed_by else {})},
         verify=gate,
     )
 
@@ -1374,10 +1384,22 @@ class Queue:
             return actor
         try:
             return self.owners().get(actor, actor)
-        except Exception:  # noqa: BLE001 - a table that cannot be read must not
-            # turn every attestation into a 500. Falling back to the actor is
-            # the pre-ownership rule, which is stricter than nothing.
-            return actor
+        except Exception as exc:  # noqa: BLE001 - fail CLOSED. Falling back to
+            # the actor would compare actors where parties are meant, which is
+            # weaker than the rule it replaces and turns owner separation off
+            # without a word whenever the key table is malformed.
+            raise Refusal(
+                code="owner_table_unreadable",
+                message=(
+                    f"cannot tell who answers for {actor!r}: the key table that names "
+                    f"owners could not be read ({type(exc).__name__}: {exc})"
+                ),
+                remediation=(
+                    "Repair the key table (AGENTCO_REGISTRY_KEYS) so it parses; owner "
+                    "separation is refused rather than skipped while it is broken."
+                ),
+                http_status=503,
+            ) from exc
 
     def __init__(self, path: Path | str = "work.jsonl", verifiers: Optional[Sequence[str]] = None,
                  humans: Optional[Sequence[str]] = None,
@@ -1599,6 +1621,7 @@ class Queue:
         metadata: Optional[dict] = None,
         verify: Optional[dict] = None,
         by_plane: bool = False,
+        filed_by: Optional[str] = None,
     ) -> WorkItem:
         """Create one item. A duplicate natural key is a LOUD no-op.
 
@@ -1632,6 +1655,7 @@ class Queue:
             metadata=metadata,
             verify=verify,
             by_plane=by_plane,
+            filed_by=filed_by,
         )
         key = item.natural_key
 
@@ -1901,7 +1925,13 @@ class Queue:
         are unaffected: nothing is required, so nothing can be missing.
         """
         from agentco import ownership
+        from agentco import payload as pl
 
+        # The same rule `renew` applies: positive, finite, and never longer than
+        # one lease may live. Clamped rather than refused at the top, because a
+        # caller asking for "a long time" wants the longest lease it may have.
+        ttl_seconds = pl.int_value("ttlSeconds", ttl_seconds, lo=1, code="bad_ttl")
+        ttl_seconds = min(ttl_seconds, self.lease_max_age)
         owned = None
         if self.stores:
             current = self.get(item_id)
@@ -2371,10 +2401,19 @@ class Queue:
             # with nothing exported would refuse the rider here and accept the
             # identical adjudication there, which is two answers to one
             # question depending on how the caller reached the plane.
-            adjudication_record(
-                current, adjudication.get("verdict"), adjudication.get("evidence"), submitted_by,
-                humans=self.humans, adjudicators=self.adjudicators,
+            # A retry of a call whose verdict already landed skips it: the item
+            # may carry the adjudication from the first attempt (which this
+            # check would refuse as `adjudication_exists`), and the retry path
+            # below decides whether a rider is still owed (R8).
+            retry = bool(idempotency_key) and any(
+                prior.get("key") == idempotency_key and prior.get("by") == submitted_by
+                for prior in (current.metadata or {}).get(ATTEST_KEYS_KEY) or []
             )
+            if not retry:
+                adjudication_record(
+                    current, adjudication.get("verdict"), adjudication.get("evidence"), submitted_by,
+                    humans=self.humans, adjudicators=self.adjudicators,
+                )
 
         def verdict(item: WorkItem) -> dict:
             if item.is_gated and item.status == WorkStatus.DONE:
@@ -2670,12 +2709,27 @@ class Queue:
         try:
             attested = self._mutate(item_id, keyed, cascade=self._run_cascade)
         except _AlreadyAttested as recorded:
-            return recorded.item
+            # The verdict landed on an earlier call, but the rider is a second
+            # write and may not have. A retry completes it: the item carries the
+            # adjudication or it does not, and `adjudicate` is immutable, so
+            # applying only when absent makes a double application impossible.
+            if adjudication is None or (recorded.item.metadata or {}).get(ADJUDICATION_KEY):
+                return recorded.item
+            attested = recorded.item
         if attested is not None and adjudication is not None:
-            return self.adjudicate(
-                item_id, adjudication.get("verdict"), adjudication.get("evidence"),
-                adjudicator=submitted_by,
-            )
+            try:
+                return self.adjudicate(
+                    item_id, adjudication.get("verdict"), adjudication.get("evidence"),
+                    adjudicator=submitted_by,
+                )
+            except Refusal as exc:
+                # Two retries racing: the other one wrote it between our read
+                # and our write. Theirs stands; ours was never needed.
+                landed = self.get(item_id)
+                prior = ((landed.metadata or {}).get(ADJUDICATION_KEY) or {}) if landed else {}
+                if exc.code == ADJUDICATION_EXISTS and prior.get("by") == submitted_by:
+                    return landed
+                raise
         return attested
 
     def adjudicate(
@@ -2685,8 +2739,13 @@ class Queue:
         evidence: object,
         *,
         adjudicator: object,
+        idempotency_key: Optional[str] = None,
     ) -> Optional[WorkItem]:
         """Tag a divergence `good` or `bad`, as somebody who did not execute it.
+
+        `idempotency_key` makes a republish safe (R4): the key rides in the
+        immutable record, and a retry with the same key from the same
+        adjudicator gets the item as recorded instead of `adjudication_exists`.
 
         The third ASOP property's first record. `good` says the procedure was
         wrong and the deviation feeds its next version; `bad` says the
@@ -2713,6 +2772,10 @@ class Queue:
                     f"The row is preserved on disk. Upgrade, or repair the row."
                 )
             return None
+        if idempotency_key:
+            prior = (current.metadata or {}).get(ADJUDICATION_KEY) or {}
+            if prior.get("idempotency_key") == idempotency_key and prior.get("by") == adjudicator:
+                return current
         # Validated on the read, and again inside the lock: the first refuses
         # before anything is touched, the second holds if the item moved.
         adjudication_record(current, verdict, evidence, adjudicator,
@@ -2721,6 +2784,8 @@ class Queue:
         def tag(item: WorkItem) -> dict:
             record = adjudication_record(item, verdict, evidence, adjudicator,
                                          humans=self.humans, adjudicators=self.adjudicators)
+            if idempotency_key:
+                record["idempotency_key"] = idempotency_key
             metadata = dict(item.metadata or {})
             metadata[ADJUDICATION_KEY] = record
             return {"metadata": metadata}
@@ -2738,10 +2803,11 @@ class Queue:
         """Extend a held lease — the heartbeat a long step sends (owner decision 10).
 
         Only for the current fence holder: `agent` must hold the lease, at
-        `attempt`, and the lease must still be live. Otherwise it is refused
-        exactly as a report would be — a stale or expired fence is `LeaseError`
-        (work_conflict), another holder is `not_the_holder`, and a run moved by
-        an administrative transfer is `not_the_owner`.
+        `attempt`. Otherwise it is refused exactly as a report would be — a
+        stale fence is `LeaseError` (work_conflict), another holder is
+        `not_the_holder`, and a run moved by an administrative transfer is
+        `not_the_owner`. A lease that has lapsed but not been reclaimed or
+        reaped is still renewable, exactly as it is still reportable (R7).
 
         A renewal changes ONLY the expiry. It never advances the fence (the
         holder's attempt is still the one its report will carry), never touches
@@ -2750,9 +2816,9 @@ class Queue:
         is refused `lease_max_age`.
         """
         at = now or _now()
-        if not isinstance(ttl_seconds, int) or isinstance(ttl_seconds, bool) or ttl_seconds <= 0:
-            raise Refusal(code="bad_ttl", message=f"ttlSeconds must be a positive integer, got {ttl_seconds!r}",
-                          remediation="Send the seconds the lease should run from now.", http_status=400)
+        from agentco import payload as pl
+
+        ttl_seconds = pl.int_value("ttlSeconds", ttl_seconds, lo=1, code="bad_ttl")
         if self.stores:
             from agentco import ownership
 
@@ -2792,11 +2858,13 @@ class Queue:
                     remediation="Report what is done and re-file the rest; a lease is not renewed forever.",
                     http_status=409,
                 )
-            if not item.lease_active_at(at):
-                raise LeaseError(
-                    f"cannot renew {item_id}: the lease at attempt {attempt} expired at "
-                    f"{item.lease_expires_at}. An expired lease is not renewed; pull the work again."
-                )
+            # An EXPIRED lease is not refused here. The attempt-number fence is
+            # the authority on who may act; expiry only makes the item eligible
+            # for reclaim. Until someone reclaims it (which bumps the attempt) or
+            # the reaper takes it, the holder of record is still the holder —
+            # the same rule `report_result` follows, so a late heartbeat and a
+            # late report cannot disagree. Requiring a reaper to have NOT run
+            # would make it load-bearing. The cap above still bounds the total.
             renewed: dict[str, Any] = dict((item.metadata or {}).get("lease_renewed") or {})
             if renewed.get("attempt") != item.lease_attempt:
                 renewed = {"attempt": item.lease_attempt, "count": 0}
@@ -2954,6 +3022,9 @@ class Queue:
                     f"completion with no executor is one the separation check on a "
                     f"judged gate can never see. Claim it first."
                 )
+            # Expiry is deliberately NOT checked here: the attempt fence above is
+            # the authority, and a lapsed-but-unreclaimed holder is still the
+            # holder of record (R7; `renew` follows the same rule).
             if submitted_by is not None and submitted_by != item.leased_by:
                 raise LeaseError(
                     f"refusing result for {item_id}: {submitted_by!r} is reporting "

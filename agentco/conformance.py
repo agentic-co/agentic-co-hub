@@ -1072,6 +1072,9 @@ def photograph(world: World) -> dict:
                 # Transport bookkeeping, like lease_report's key: only a path
                 # that sends an idempotency key (the outbox) records one.
                 "attest_keys",
+                # Who the transport authenticated the filer as (work.FILED_BY_KEY):
+                # a fact about the caller, not about the item's behaviour.
+                "filed_by",
             )),
         })
     sops = []

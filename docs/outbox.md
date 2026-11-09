@@ -221,11 +221,15 @@ again.
 A line is removed from the outbox only once it has a *terminal* receipt —
 `published` or `refused`. A drainer that crashes between publishing a line and
 truncating the outbox will publish that same line again on the next run.
-`work_report` passes its own `line_id` as the idempotency key specifically so
-that a repeat costs nothing: the registry recognizes it and returns the
-recorded outcome instead of recording a second one. `claim_scope` and
-`snapshot` are not idempotency-keyed the same way, so a duplicate there costs
-a redundant row.
+Every verb the hub could otherwise act on twice passes its own `line_id` as the
+idempotency key (`idempotencyKey` on the wire) so that a repeat costs nothing: the
+registry recognizes it and returns the recorded outcome instead of acting again.
+That is `claim_scope`, `snapshot`, `work_report`, `attest`, `adjudicate`,
+`sop_revise` and `sop_activate`; `release_scope` is idempotent by state (a second
+release answers `duplicate`). A key is scoped to the actor that sent it. For
+`claim_scope` and `snapshot` the key commits in the same transaction as the write;
+for the SOP verbs it is recorded right after, which narrows the window without
+closing it across a file-backed SOP store.
 
 The alternative — truncate first, publish second — was rejected because it
 loses the write outright on the same crash: the line is gone from the outbox
