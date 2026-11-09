@@ -9,17 +9,26 @@ functions the HTTP handlers call. Reimplementing the lease fence or the scope
 intersection at this layer would mean two protocols that can drift; there is
 exactly one, and this is a second door into it.
 
-**Tool count is capped at twelve, and the cap is enforced by a test, not memory.**
+**Tool count is capped at fourteen, and the cap is enforced by a test, not memory.**
 A large surface costs every calling harness context on every single tool-choice
 decision it makes — that cost is paid by every conversation, not just this one.
 0002-participation-ladder.md moved the ceiling from nine to twelve to reserve
-room for `attest`, `sop_revise` and `sop_activate`. `attest` shipped with the
-Phase 1 transports; the other two landed with Phase 4, so all twelve are
-registered below and no names are held. Adding a thirteenth tool means
-deleting one, not extending the budget. A published byte budget
-(`tests/test_mcp_server.py`) sits alongside the count, because the count is a
-proxy for context cost, and a proxy that stops tracking the thing it measures
-is worse than no proxy.
+room for `attest`, `sop_revise` and `sop_activate`; ADR 0004 (option C) moved
+it to fourteen for `sop_run` and `adjudicate`, the two ASOP v3 verbs an
+executing harness performs in its own loop. The other v3 verbs (`sop_retire`,
+`run_get`, `run_list`, `promote`, `outcomes`) are operator verbs and stay on
+HTTP. All fourteen are registered below and no names are held. Adding a
+fifteenth tool means deleting one or a new decision, not extending the budget.
+A published byte budget (14,000, `tests/test_mcp_server.py`) sits alongside the
+count, because the count is a proxy for context cost, and a proxy that stops
+tracking the thing it measures is worse than no proxy.
+
+**Refusals carry their code as a field.** A tool raises `RefusedToolError`, a
+`ToolError` whose text is unchanged (`"{code}: {message} — {remediation}"`) and
+which also carries `.code` and `.data` (`Refusal.to_dict()`, the HTTP error
+body). `AgentcoMCPServer.call_tool` puts `.data` on the wire as the error
+result's `structuredContent`, so a client branches on `code` the way it does
+over HTTP instead of parsing prose.
 
 **Config deliberately does NOT import `agentco.app`.** `app.py` pulls in FastAPI,
 which lives in the `server` extra; this module lives in the `mcp` extra, and a
@@ -62,10 +71,14 @@ import json
 import os
 from typing import Optional
 
+import logging
+from typing import Any
+
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, TextContent
 
-from agentco import auth, db, events as events_module, leases, policy, scope, snapshots
+from agentco import auth, db, events as events_module, idempotency, leases, policy, scope, snapshots
 from agentco.errors import Refusal
 from agentco.keys import NaturalKeyError
 # publish.py is standard-library only, so importing it here costs the `mcp`
@@ -180,7 +193,54 @@ def resolve_capabilities(capabilities: Optional[list[str]] = None) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def _refuse(exc: Exception) -> ToolError:
+class RefusedToolError(ToolError):
+    """A `ToolError` that keeps the refusal it renders, as fields.
+
+    The text is exactly what `_refuse` produced before this class existed, so a
+    client that parses the `code: ` prefix keeps working. `code` and `data` are
+    for everything else: `data` is `Refusal.to_dict()` — the same
+    `{state, code, message, remediation}` body HTTP answers with — and is what
+    `AgentcoMCPServer` puts on the wire as `structuredContent`.
+    """
+
+    def __init__(self, refusal: Refusal):
+        super().__init__(str(refusal))
+        self.code: str = refusal.code
+        self.data: dict = refusal.to_dict()
+
+
+class AgentcoMCPServer(MCPServer):
+    """`MCPServer`, with a refusal's code on the wire as a field.
+
+    The SDK renders every `ToolError` as an error result holding only text. A
+    refusal raised through `_refuse` is instead answered here with the same
+    text AND `structuredContent` = the refusal body, so the machine half of a
+    refusal survives the MCP encoding the way it survives HTTP. `is_error`
+    results are exempt from output-schema validation on both sides of the SDK,
+    so the field cannot collide with a tool's declared output.
+
+    Anything else — an unknown tool, arguments that fail the schema, a crash —
+    still raises exactly as the SDK does. One visible change for an in-process
+    caller of `call_tool`: a refusal is now RETURNED as that error result
+    rather than raised, which is what the stdio wire always delivered.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Any = None) -> Any:
+        try:
+            return await super().call_tool(name, arguments, context)
+        except ToolError as exc:
+            refused = exc.__cause__
+            if not isinstance(refused, RefusedToolError):
+                raise
+            logging.getLogger(__name__).info("Tool %r refused: %r", name, refused.code)
+            return CallToolResult(
+                content=[TextContent(type="text", text=str(exc))],
+                structured_content=refused.data,
+                is_error=True,
+            )
+
+
+def _refuse(exc: Exception) -> RefusedToolError:
     """The one seam every tool raises through, so a refusal is never a bare 500.
 
     `Refusal.__str__` already renders `"{code}: {message} — {remediation}"`
@@ -191,9 +251,11 @@ def _refuse(exc: Exception) -> ToolError:
     surface uses — and arrive as `work_conflict: ...`, `sop_refused: ...` and
     so on. Before that, the same wrong input read as a code on one transport
     and as prose on another, which is exactly the drift the conformance suite
-    exists to catch. The library's own words are kept; only the code is added.
+        The library's own words are kept; only the code is added.
+
+    The returned error carries the code as a field as well (`RefusedToolError`).
     """
-    return ToolError(str(classify(exc)))
+    return RefusedToolError(classify(exc))
 
 
 class _LocalBackend:
@@ -244,25 +306,50 @@ class _LocalBackend:
         return json.loads(self.queue.create(title, filed_by=self.actor, **kw).to_json())
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
-               capabilities=None, adjudication=None, epoch=None, verify_attempt=None) -> Optional[dict]:
+               capabilities=None, adjudication=None, epoch=None, verify_attempt=None,
+               idempotency_key=None) -> Optional[dict]:
         updated = self.queue.attest(
             item_id, attestation, submitted_by=submitted_by, capabilities=capabilities,
             adjudication=adjudication, epoch=epoch, verify_attempt=verify_attempt,
+            idempotency_key=idempotency_key,
         )
         return json.loads(updated.to_json()) if updated is not None else None
+
+    def adjudicate(self, item_id: str, verdict: str, evidence: str, idempotency_key=None) -> Optional[dict]:
+        updated = self.queue.adjudicate(
+            item_id, verdict, evidence, adjudicator=self.actor,
+            idempotency_key=idempotency.clean(idempotency_key),
+        )
+        return json.loads(updated.to_json()) if updated is not None else None
+
+    def sop_run(self, sop_id: str, inputs: dict, bindings: dict, **fields) -> dict:
+        return self.library.run(sop_id, self.queue, inputs=inputs, bindings=bindings,
+                                filed_by=self.actor, **fields)
 
     def sop_get(self, sop_id: str, version: Optional[int]) -> Optional[dict]:
         sop = self.library.get(sop_id, version=version)
         return json.loads(sop.to_json()) if sop is not None else None
 
+    # The two SOP writes record their key exactly as the HTTP handlers do — the
+    # same table, verb name and `{"state", "sop"}` outcome — so a key replays
+    # the same answer whichever door the first call came through. The residue
+    # R4 names holds here too: on a file SOP store the key is recorded just
+    # after the write, so a crash between the two can still repeat it.
     def sop_revise(self, sop_id: str, changes: dict, title: Optional[str],
-                   author: str, author_kind: str) -> dict:
-        sop = self.library.revise(sop_id, title=title, author=author, author_kind=author_kind, **changes)
-        return json.loads(sop.to_json())
+                   author: str, author_kind: str, idempotency_key=None) -> dict:
+        def revise() -> dict:
+            sop = self.library.revise(sop_id, title=title, author=author, author_kind=author_kind, **changes)
+            return {"state": "accepted", "sop": json.loads(sop.to_json())}
 
-    def sop_activate(self, sop_id: str, version: int, author: str, author_kind: str) -> dict:
-        sop = self.library.activate(sop_id, version, author=author, author_kind=author_kind)
-        return json.loads(sop.to_json())
+        return idempotency.once(self.conn, author, "sop_revise", idempotency.clean(idempotency_key), revise)["sop"]
+
+    def sop_activate(self, sop_id: str, version: int, author: str, author_kind: str,
+                     idempotency_key=None) -> dict:
+        def activate() -> dict:
+            sop = self.library.activate(sop_id, version, author=author, author_kind=author_kind)
+            return {"state": "accepted", "sop": json.loads(sop.to_json())}
+
+        return idempotency.once(self.conn, author, "sop_activate", idempotency.clean(idempotency_key), activate)["sop"]
 
     def describe(self) -> dict:
         return {
@@ -292,18 +379,19 @@ class _RemoteBackend:
         self.registry = registry
         self.actor = registry.actor
 
-    def claim_scope(self, repo, prefixes, intent, holder=None, ttl_seconds=None) -> dict:
+    def claim_scope(self, repo, prefixes, intent, holder=None, ttl_seconds=None, idempotency_key=None) -> dict:
         # `holder` is dropped deliberately: over HTTP the registry records
         # `holderAttested` against the AUTHENTICATED actor, and passing an
         # unverified name through would be the one case where the two encodings
         # disagree about who made a claim.
-        return self.registry.claim_scope(repo, list(prefixes), intent, ttl_seconds=ttl_seconds)
+        return self.registry.claim_scope(repo, list(prefixes), intent, ttl_seconds=ttl_seconds,
+                                         idempotency_key=idempotency_key)
 
     def release_scope(self, lease_uid: str, action: str) -> dict:
         return self.registry.release_scope(lease_uid, action)
 
-    def snapshot(self, artifact_uri: str, purpose: str, ttl_days=None) -> dict:
-        return self.registry.snapshot(artifact_uri, purpose, ttl_days=ttl_days)
+    def snapshot(self, artifact_uri: str, purpose: str, ttl_days=None, idempotency_key=None) -> dict:
+        return self.registry.snapshot(artifact_uri, purpose, ttl_days=ttl_days, idempotency_key=idempotency_key)
 
     def events(self, since=None, limit=events_module.DEFAULT_LIMIT, kind=None) -> dict:
         return self.registry.events(since=since, limit=limit, kind=kind)
@@ -314,7 +402,8 @@ class _RemoteBackend:
 
     def work_renew(self, item_id: str, attempt: int, ttl_seconds: int) -> Optional[dict]:
         # Ready for a `work_renew` tool; not exposed as one: the MCP surface is
-        # at its twelve-tool ceiling and a thirteenth needs ADR 0004's decision.
+        # at its fourteen-tool ceiling (ADR 0004 option C) and adding one is a
+        # new decision.
         return self.registry.work_renew(item_id, attempt, ttl_seconds=ttl_seconds).get("item")
 
     def work_report(self, item_id: str, attempt: int, status: WorkStatus, result=None,
@@ -329,11 +418,23 @@ class _RemoteBackend:
         ).get("item")
 
     def attest(self, item_id: str, attestation: dict, submitted_by: str,
-               capabilities=None, adjudication=None, epoch=None, verify_attempt=None) -> Optional[dict]:
+               capabilities=None, adjudication=None, epoch=None, verify_attempt=None,
+               idempotency_key=None) -> Optional[dict]:
         return self.registry.attest(
             item_id, attestation, capabilities=list(capabilities or ()) or None,
             adjudication=adjudication, epoch=epoch, verify_attempt=verify_attempt,
+            idempotency_key=idempotency_key,
         ).get("item")
+
+    def adjudicate(self, item_id: str, verdict: str, evidence: str, idempotency_key=None) -> Optional[dict]:
+        # No adjudicator is sent: the registry takes it from the signature and
+        # refuses a body that names one.
+        return self.registry.adjudicate(item_id, verdict, evidence, idempotency_key=idempotency_key).get("item")
+
+    def sop_run(self, sop_id: str, inputs: dict, bindings: dict, **fields) -> dict:
+        return self.registry.sop_run(
+            sop_id, inputs, bindings, **{k: v for k, v in fields.items() if v is not None}
+        )["run"]
 
     def work_create(self, title: str, requires=(), blocked_by=(), assigned_agent=None,
                     natural_key=None, source=None, source_id=None, kind=None,
@@ -353,7 +454,7 @@ class _RemoteBackend:
         return self.registry.sop_get(sop_id, version=version).get("sop")
 
     def sop_revise(self, sop_id: str, changes: dict, title: Optional[str],
-                   author: str, author_kind: str) -> dict:
+                   author: str, author_kind: str, idempotency_key=None) -> dict:
         # `author` and `author_kind` are dropped deliberately: over HTTP the
         # registry takes the author from the signature and the kind from ITS
         # declaration of who is human. A proxy that forwarded its own reading
@@ -361,10 +462,11 @@ class _RemoteBackend:
         body = dict(changes)
         if title is not None:
             body["title"] = title
-        return self.registry.sop_revise(sop_id, **body)["sop"]
+        return self.registry.sop_revise(sop_id, idempotency_key=idempotency_key, **body)["sop"]
 
-    def sop_activate(self, sop_id: str, version: int, author: str, author_kind: str) -> dict:
-        return self.registry.sop_activate(sop_id, version)["sop"]
+    def sop_activate(self, sop_id: str, version: int, author: str, author_kind: str,
+                     idempotency_key=None) -> dict:
+        return self.registry.sop_activate(sop_id, version, idempotency_key=idempotency_key)["sop"]
 
     def describe(self) -> dict:
         return {"mode": "remote", "registryUrl": self.registry.base_url}
@@ -490,7 +592,7 @@ def create_server(
             resolve_agent_label(agent_label),
         )
 
-    mcp = MCPServer(
+    mcp = AgentcoMCPServer(
         name="agentco",
         instructions=(
             "Coordination primitives for a team running more than one agent "
@@ -508,6 +610,7 @@ def create_server(
         intent: str,
         holder: Optional[str] = None,
         ttl_seconds: int = leases.DEFAULT_TTL_S,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """Open an advisory ScopeLease: 'I am working in these directories, with this intent.'
 
@@ -519,7 +622,7 @@ def create_server(
         try:
             return backend.claim_scope(
                 repo=repo, prefixes=prefixes, intent=intent,
-                holder=holder, ttl_seconds=ttl_seconds,
+                holder=holder, ttl_seconds=ttl_seconds, idempotency_key=idempotency_key,
             )
         except (Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
@@ -544,6 +647,7 @@ def create_server(
         artifact_uri: str,
         purpose: str,
         ttl_days: int = snapshots.DEFAULT_TTL_DAYS,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """Record 'I am working from this version of that' — a pointer, never a copy.
 
@@ -554,7 +658,8 @@ def create_server(
         the write.
         """
         try:
-            return backend.snapshot(artifact_uri=artifact_uri, purpose=purpose, ttl_days=ttl_days)
+            return backend.snapshot(artifact_uri=artifact_uri, purpose=purpose, ttl_days=ttl_days,
+                                    idempotency_key=idempotency_key)
         except (Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
 
@@ -580,25 +685,27 @@ def create_server(
     def work_pull(ttl_seconds: int = DEFAULT_LEASE_TTL_S) -> Optional[dict]:
         """Claim the next ready work item this identity can run, with a fenced lease.
 
-        Claims as THIS NODE — never as a name the model supplies. An earlier
-        version took `agent` as a tool argument, and the lease holder is what a
-        judged gate's separation check compares the verifier against, so a model
-        could pull as "ghost-worker", report, and then attest its own work from
-        the same node and pass. Identity is configuration (`AGENTCO_ACTOR`), and
-        so are capabilities (`AGENTCO_CAPABILITIES`): a model is in no position
-        to declare, per call, who the machine it runs on is or what it is set up
-        to do.
+        Claims as THIS NODE — never as a name the model supplies. Identity is
+        configuration (`AGENTCO_ACTOR`), and so are capabilities
+        (`AGENTCO_CAPABILITIES`).
 
         `None` means nothing is claimable right now — an empty queue and a
-        lost race to another claimant look identical from here, and both are
-        the ordinary shape of a poller finding nothing to do this cycle, not
-        an error. An item this worker can never satisfy (its `requires` are
-        not in `capabilities`) is skipped rather than raised: `ready()`
-        deliberately does not pre-filter by capability, because the
-        enforcement belongs inside `claim()` under the same lock as the CAS —
-        so a poller is expected to move past it to the next candidate exactly
-        the way this loop does, rather than stopping on the first miss.
+        lost race look identical, and both are the ordinary shape of a poller
+        finding nothing to do this cycle, not an error. Items whose `requires`
+        this node lacks are skipped.
         """
+        # Why identity is not an argument: an earlier version took `agent`, and
+        # the lease holder is what a judged gate's separation check compares the
+        # verifier against, so a model could pull as "ghost-worker", report, and
+        # then attest its own work from the same node and pass. A model is in no
+        # position to declare, per call, who its machine is or what it can run.
+        #
+        # Why a capability miss is skipped rather than raised: `ready()`
+        # deliberately does not pre-filter by capability, because enforcement
+        # belongs inside `claim()` under the same lock as the CAS — so a poller
+        # moves past it to the next candidate, exactly as this loop does.
+        # (Moved out of the docstring for ADR 0004's byte budget: every byte of
+        # a docstring is paid by every MCP session.)
         try:
             return backend.work_pull(backend.actor, resolve_capabilities(), ttl_seconds)
         except (Refusal, WorkError, RegistryError) as exc:
@@ -710,7 +817,8 @@ def create_server(
             raise _refuse(exc) from exc
 
     @mcp.tool(name="sop_revise")
-    def sop_revise(sop_id: str, changes: dict, title: Optional[str] = None) -> dict:
+    def sop_revise(sop_id: str, changes: dict, title: Optional[str] = None,
+                   idempotency_key: Optional[str] = None) -> dict:
         """Write the next version of a procedure as a DRAFT; the old one stays readable.
 
         `changes` holds ASOP fields (purpose, trigger, task_type, roles,
@@ -724,24 +832,27 @@ def create_server(
             return backend.sop_revise(
                 sop_id, changes, title,
                 author=who, author_kind=policy.kind_of(who, policy.humans_from_env()),
+                idempotency_key=idempotency_key,
             )
         except (SopError, ValueError, Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
 
     @mcp.tool(name="sop_activate")
-    def sop_activate(sop_id: str, version: int) -> dict:
+    def sop_activate(sop_id: str, version: int, idempotency_key: Optional[str] = None) -> dict:
         """Make one version the one every reader gets. Policed like a revision."""
         try:
             return backend.sop_activate(
                 sop_id, version,
                 author=who, author_kind=policy.kind_of(who, policy.humans_from_env()),
+                idempotency_key=idempotency_key,
             )
         except (SopError, ValueError, Refusal, RegistryError) as exc:
             raise _refuse(exc) from exc
 
     @mcp.tool(name="attest")
     def attest(item_id: str, attestation: dict, adjudication: Optional[dict] = None,
-               epoch: Optional[int] = None, verify_attempt: Optional[int] = None) -> dict:
+               epoch: Optional[int] = None, verify_attempt: Optional[int] = None,
+               idempotency_key: Optional[str] = None) -> dict:
         """Answer a gate on an item parked in `awaiting_verify` (or re-run a failed one).
 
         The verifier's verb, as distinct from the executor's `work_report`: a
@@ -771,6 +882,7 @@ def create_server(
                 adjudication=adjudication,
                 epoch=epoch,
                 verify_attempt=verify_attempt,
+                idempotency_key=idempotency_key,
                 # The NODE's declared capabilities, from its own configuration —
                 # not an argument on the tool. A model that could pass this
                 # would be declaring, per call, what the machine it runs on is
@@ -782,6 +894,32 @@ def create_server(
         if updated is None:
             raise _refuse(unknown_item(item_id, "attest against"))
         return updated
+
+    @mcp.tool(name="adjudicate")
+    def adjudicate(item_id: str, verdict: str, evidence: str, idempotency_key: Optional[str] = None) -> dict:
+        """Tag an executed item's divergence: `good` (the procedure was wrong) or `bad` (a shortcut).
+
+        You may not be the executor. Immutable once written.
+        """
+        try:
+            updated = backend.adjudicate(item_id, verdict, evidence, idempotency_key=idempotency_key)
+        except (WorkError, ValueError, Refusal, RegistryError) as exc:
+            raise _refuse(exc) from exc
+        if updated is None:
+            raise _refuse(unknown_item(item_id, "adjudicate"))
+        return updated
+
+    @mcp.tool(name="sop_run")
+    def sop_run(sop_id: str, inputs: dict, bindings: dict, version: Optional[int] = None,
+                metadata: Optional[dict] = None) -> dict:
+        """File a run of a procedure's active (or `version`) version: one bead per step.
+
+        Supply every input and bind every role to an agent. Each step carries its own gate.
+        """
+        try:
+            return backend.sop_run(sop_id, inputs, bindings, version=version, metadata=metadata)
+        except (SopError, WorkError, NaturalKeyError, ValueError, Refusal, RegistryError) as exc:
+            raise _refuse(exc) from exc
 
     @mcp.tool(name="whoami")
     def whoami() -> dict:

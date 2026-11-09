@@ -148,7 +148,7 @@ def test_conform_exits_zero_when_the_level_conforms(level, capsys):
     out = _json.loads(capsys.readouterr().out)
     assert out["conforms"] and out["missing"] == [] and out["level"] == level
     if level == "L2":
-        assert out["budget"]["tools"] <= 12 and out["budget"]["schemaBytes"] <= 12_500
+        assert out["budget"]["tools"] <= 14 and out["budget"]["schemaBytes"] <= 14_000
 
 
 def test_conform_exits_non_zero_and_names_what_is_missing(monkeypatch, capsys):
@@ -181,10 +181,10 @@ def test_conform_refuses_an_unknown_level(capsys):
 
 
 def test_the_budget_is_held_by_conform_not_only_by_the_test_suite(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "_mcp_budget", lambda: {"tools": 13, "toolCeiling": 12, "schemaBytes": 13_000, "byteBudget": 12_500})
+    monkeypatch.setattr(cli, "_mcp_budget", lambda: {"tools": 15, "toolCeiling": 14, "schemaBytes": 15_000, "byteBudget": 14_000})
     assert cli.main(["conform", "--level", "L2", "--json"]) == 1
     out = _json.loads(capsys.readouterr().out)
-    assert any("13 MCP tools" in m for m in out["missing"]) and any("13000 bytes" in m for m in out["missing"])
+    assert any("15 MCP tools" in m for m in out["missing"]) and any("15000 bytes" in m for m in out["missing"])
 
 
 # --------------------------------------------------------------------------- #

@@ -324,8 +324,9 @@ divergence risk.
   what is missing. The test of the test is in
   [`tests/test_conformance.py`](../tests/test_conformance.py): break a transport
   and the suite names it.
-- **Published byte budget** alongside the twelve-tool count — held by `conform
-  --level L2` as well as by the test suite: twelve tools, 12,500 schema bytes,
+- **Published byte budget** alongside the fourteen-tool count — held by `conform
+  --level L2` as well as by the test suite: fourteen tools, 14,000 schema bytes
+  (ADR 0004 option C),
   measured the same way in both places.
 
 ---

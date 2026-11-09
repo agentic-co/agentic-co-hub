@@ -201,7 +201,7 @@ def test_an_empty_queue_is_none_rather_than_an_error_or_an_envelope(remote):
 
 
 def test_sop_get_returns_the_sop_itself_and_none_for_a_miss(remote, filer, client):
-    """`sop_create` is not an MCP tool — the twelve-tool budget — so the ASOP
+    """`sop_create` is not an MCP tool — the fourteen-tool budget — so the ASOP
     is authored over HTTP, which is exactly how the other machine would do it."""
     filer_reg = LoopbackRegistry("bigmac", client)
     sop = filer_reg.sop_create(

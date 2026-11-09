@@ -87,7 +87,7 @@ flowchart TD
     feed[["Change feed"]]
 
     feed --> t1["<b>Tier 1 — the repo</b><br/>a managed block spliced into<br/>CLAUDE.md / AGENTS.md, on a schedule"]
-    feed --> t2["<b>Tier 2 — MCP</b><br/>twelve-tool ceiling; the model calls<br/><code>events(since=cursor)</code>"]
+    feed --> t2["<b>Tier 2 — MCP</b><br/>fourteen-tool ceiling; the model calls<br/><code>events(since=cursor)</code>"]
     feed --> t3["<b>Tier 3 — session hook</b><br/>fetch-and-inject at session start"]
     feed --> t4["<b>Tier 4 — a person</b><br/>a digest to chat; they forward<br/>what matters"]
 
@@ -262,20 +262,20 @@ One entry in your `.mcp.json`, and nothing about how your harness works changes:
 }
 ```
 
-Twelve tools, and twelve is a ceiling enforced by a test rather than
+Fourteen tools, and fourteen is a ceiling enforced by a test rather than
 remembered — a large tool surface costs every calling harness context on
-every tool-choice decision it makes. All twelve are built — the last two,
-`sop_revise` and `sop_activate`, landed with Phase 4 behind the revision
-policy, closing the reservations `docs/decisions/0002-participation-ladder.md`
-made — so the ceiling is binding. A
-byte budget over the registered schemas is published alongside the count
-(`tests/test_mcp_server.py`), because the count is a stand-in for context
-cost, not the thing itself, and a ceiling that holds while the bytes behind
-it grow has stopped measuring what it was chosen to measure. ASOP v3 added
-seven verbs to the HTTP surface and the schemas now sit at 12,496 of 12,500
-bytes, so that condition has fired: what the MCP surface should carry is
-[`docs/decisions/0004-mcp-surface-under-asop-v3.md`](docs/decisions/0004-mcp-surface-under-asop-v3.md),
-proposed and not yet decided. The surface stays at twelve until it is.
+every tool-choice decision it makes. All fourteen are built, so the ceiling
+is binding. A byte budget over the registered schemas is published alongside
+the count (`tests/test_mcp_server.py`), because the count is a stand-in for
+context cost, not the thing itself, and a ceiling that holds while the bytes
+behind it grow has stopped measuring what it was chosen to measure. ASOP v3
+added seven verbs to the HTTP surface;
+[`docs/decisions/0004-mcp-surface-under-asop-v3.md`](docs/decisions/0004-mcp-surface-under-asop-v3.md)
+(option C) put the two a harness performs in its own loop — `sop_run` and
+`adjudicate` — on MCP and left the five operator verbs on HTTP. The budget
+is 14,000 bytes; the fourteen schemas measure 13,497. A refusal over MCP
+carries its `code` as a field (`structuredContent`, the same body HTTP
+returns) beside the familiar `code: message — remediation` text.
 
 That entry points the harness at **local files**, which is right when the
 harness and the registry share a disk. When they do not — a second machine, a
