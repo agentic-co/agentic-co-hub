@@ -1,7 +1,9 @@
 # Known issues
 
-Everything here is known, reproduced, and deliberately not yet fixed. Nothing
-here loses work or reports a wrong result as a right one — those were fixed.
+As of 2026-11-09 nothing here is an open defect: every finding below is fixed,
+and what remains is one accepted residue (the JSONL SOP store, under R4) and one
+open question (under Finding 4). The record is kept because the fixes are only
+as good as the tests that pin them, and the next defect belongs here first.
 
 **Most of these have a failing test already.** `tests/test_adversarial_findings.py`
 holds one test per defect, each named for the property that *should* hold rather
@@ -25,7 +27,7 @@ because they are easy to get wrong:
 | # | Defect | Why it is still open |
 |---|---|---|
 | ~~**6a**~~ | ~~A scope conflict raised by an unverified `holder` claim is indistinguishable from a verified one.~~ **Fixed 2026-11-09 (ADR 0011, decision 3: propagate).** The conflict record (`scope.find_conflicts`, so `POST /scope-claims`, `leases.conflicts_for` and the session hook) now carries `holderAttested` for the other lease, and the session block marks it `(attested, unverified)`. The conflict still fires; the flag is information for the reader. Additive on the wire. | |
-| **claim 3** | Seven scope-evasion routes: repo-name case, prefix case, zero-width characters, BOM, Unicode NFC/NFD, trailing dot, and `Scope()` bypassing validation. | Each makes two claims that overlap in reality fail to intersect. The repo-name one is worst — it hides a lease from the whole registry, and GitHub and ADO both treat `Acme/X` and `acme/x` as one repository. |
+| ~~**claim 3**~~ | ~~Seven scope-evasion routes: repo-name case, prefix case, zero-width characters, BOM, Unicode NFC/NFD, trailing dot, and `Scope()` bypassing validation.~~ **Fixed 2026-11-09** by one normalisation applied in `Scope` construction and at comparison time. Repo and prefix segments compare NFC + case-folded, with trailing dots and spaces dropped per segment; invisible characters are refused (`control_character`), not stripped; a segment of only dots or spaces is refused (`bad_path_segment`); `Scope(...)` validates like `Scope.parse`. Existing leases are matched by the same keys at read time, so there is no migration, and the claim lock is taken on the folded repo key. Case is folded for directory prefixes even though git paths are case-sensitive: a false conflict is the accepted cost. Responses still echo each party's own spelling. Rules: [`wire.md`](wire.md) § Scope claims. | |
 | ~~**claim 5**~~ | ~~Four paths returned HTTP 500 with "This is a registry bug" instead of a refusal, and the generic handler echoed raw exception text.~~ **Fixed 2026-11-07** with R5: one coercion layer (`agentco/payload.py`); an unreachable snapshot URI is recorded unresolved; the generic handler logs the exception and returns a `correlationId`, never its text. | |
 | ~~**6b**~~ | ~~The HMAC covers the path but not the query string, so one captured signed `GET /events` replays as any feed query for the replay window.~~ **Fixed 2026-09-22; required by default since 2026-11-09 (ADR 0011, decision 4).** The signed string carries a fifth line, the canonical query. A legacy signature on a request with a query is now refused `401` with no configuration. `ASOP_REQUIRE_SIGNED_QUERY` remains for one release as an opt-out: only an explicit `0`, `false`, `no` or `off` re-allows the legacy string, and any other value, a typo included, keeps it required. The variable goes with the legacy signature after 1.0. `tests/test_v1_wire_defaults.py` pins the default and the opt-out, `tests/test_replay_window.py` proves the replay, and `tests/test_signed_query_clients.py` proves every shipped client signs the query with the variable unset. | |
 | ~~**A15**~~ | ~~The server signs the percent-decoded path while a client signs the wire form.~~ **Fixed 2026-09-22.** Settled the other way from the old remediation text: BOTH ends sign the DECODED path, and the remediation now says so. The server cannot reliably recover the wire form — ASGI's `raw_path` is optional and proxies rewrite it — while decoding is deterministic on both sides. Two encodings of one path denote one resource and should produce one signature; what must not happen is the ends disagreeing. |
@@ -73,6 +75,22 @@ fsync the directory after creating a file; the outbox quarantine keeps the
 last 200 rows, not all of them; `settle` discards torn tails without
 quarantining them.
 
+## Fixed: the last strict-xfail tests (2026-11-09)
+
+Three defects that lived only as tests in `tests/test_adversarial_findings.py`,
+closed with gate 1 of [ADR 0011](decisions/0011-v1-definition.md).
+
+| Defect | Fix |
+|---|---|
+| An unknown actor and a bad signature were distinguishable refusals, which told a caller which actor names exist. | Both return one 401 with the same code, message and remediation, and an unknown actor costs the same HMAC comparison against a per-process dummy key. |
+| `ready()` hid a dependent whose finished blocker had a row this version cannot model, while `claim()` would have accepted it. | Both derive the done set from the raw row status. An unknown status never releases anything, on purpose. |
+| A quarantined work row was re-encoded, so the bytes kept were not the bytes read. | `Queue.quarantined` holds the exact line read, including rows this version cannot model. `SqlQueue` has no byte form and lists none. |
+
+The A15 test (`test_a_path_needing_percent_encoding_still_authenticates`) had
+been left pinning the wire form after A15 was settled on the decoded form. It
+now drives the shipped `Registry` client into the app with a `%20` path and
+pins that agreement.
+
 ## Removed: claim 1 (redirect downgraded HEAD to GET)
 
 Fixed, and it had been fixed for a while — `_KeepMethodOnRedirect`
@@ -92,9 +110,9 @@ conformance README in the same week.
 
 Small, cheap, and recorded here so they exist somewhere other than a chat log.
 
-- **A13** — `_iso()` calls `astimezone(timezone.utc)` on possibly-naive datetimes, which Python treats as *local* time. A naive `now=` argument is silently shifted by the UTC offset.
+- ~~**A13** — `_iso()` calls `astimezone(timezone.utc)` on possibly-naive datetimes, which Python treats as *local* time.~~ **Closed 2026-11-09.** A naive datetime is read as UTC, not host-local time, everywhere a stamp is serialised, through `agentco/timeutil.py`. `tests/test_naive_datetimes_are_utc.py` runs under two host timezones.
 - ~~**A14** — `auth.load_keys()` re-reads the key file from disk on every request when the app is constructed without explicit keys.~~ **Closed 2026-09-21.** Cached on the file's `(mtime_ns, size)`, so it is a `stat` per request rather than a read and a parse. Keyed on the file rather than on a clock deliberately: a TTL would make revocation eventual, and "how long until the key I just revoked stops working" would have no answer an operator could state. It is immediate, and `tests/test_revocation.py` asserts that on the next request with no restart.
-- **A16** — `resolve_file` on a FIFO blocks forever with no timeout, and `path.exists()` is true for a directory, so `file:/some/dir` raises an uncaught `IsADirectoryError`.
+- ~~**A16** — `resolve_file` on a FIFO blocks forever with no timeout, and a directory raises `IsADirectoryError`.~~ **Closed 2026-11-09.** `resolve_file` stats the path and requires a regular file; a FIFO, directory or device is recorded as unresolved, the same as a missing file. Tests: `tests/test_v1_snapshot_admission.py`.
 
 ## Not defects, stated because they read like them
 
@@ -184,27 +202,27 @@ human is not on it, that person is still refused on a judged gate
 Spec §9 reads "it waits for a person", so whether a declared human may answer a
 judged gate without also being listed as a verifier is undecided.
 
-## Finding 5: snapshot admission is bypassed by a redirect
+## Finding 5: snapshot admission was bypassed by a redirect
 
-**Status: OPEN and KNOWN. HIGH. No test yet.** Recorded from internal review so a
-reporter finding it independently can see it is not news.
+**Status: closed 2026-11-09. Was HIGH.**
 
-`admission_reason` (`agentco/snapshots.py`) runs once, against the URI a
-participant supplied, and resolves the hostname there to decide whether it is
-internal. `resolve_https` then issues its HEAD request through
-`_KeepMethodOnRedirect`, which preserves the method across a 3xx (that part is
-Finding "claim 1", already fixed) but re-runs no admission check on the redirect
-*target* — and the resolution done at admission is never bound to the
-connection `urllib` eventually makes.
+`admission_reason` ran once, against the URI a participant supplied, and
+`resolve_https` followed redirects and connected without re-checking. A public
+URL could 302 to `127.0.0.1` or another refused address and get the internal
+HEAD request made, repeatedly, because `check_all` re-resolves on a cadence.
 
-So a participant registers a public URL — passes admission cleanly — that 302s
-to `127.0.0.1:<port>` or any other address `admission_reason` exists to refuse,
-and gets back the internal HEAD request and its header oracle in response. This
-is not one request: `check_all` re-resolves every live snapshot on a cadence for
-the TTL (90 days by default), so one accepted registration keeps firing the
-redirect on every scheduled re-check.
+Two fixes, both in `agentco/snapshots.py`. (1) `_KeepMethodOnRedirect` re-runs
+`admission_reason` on every redirect target before following it; a refused hop
+is recorded as unresolved with the reason, and the internal request is never
+made. (2) The connection is pinned: the host is resolved once, refused if any
+address is internal, and the socket is opened on the vetted literal address, so
+DNS rebinding between check and connect cannot move the request. TLS still
+verifies against the hostname. Operator-allowlisted hosts
+(`ASOP_SNAPSHOT_HTTP_HOSTS`) skip the address check at both points.
 
-**Fix direction, not yet done:** re-run `admission_reason` against each redirect
-target inside the handler rather than once at admission, and pin the resolved
-address used for the connection rather than letting the redirect target be
-re-resolved independently of what was checked.
+Consequences an operator should know: environment proxies (`HTTP_PROXY`,
+`HTTPS_PROXY`) are ignored for snapshot HEADs, because a proxy would be vetted
+in place of the destination; and a redirect from an admitted host to a private
+host that is not allowlisted is now unresolved. The pinned HTTPS path is tested
+over plain HTTP only. Tests: `tests/test_v1_snapshot_admission.py`.
+

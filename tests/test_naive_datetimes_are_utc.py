@@ -11,8 +11,8 @@ naive is UTC.
 The test sets `TZ` itself, so it fails on a UTC CI runner too — it does not
 depend on where it is run.
 
-`agentco/leases.py` has the same `_iso`; it is owned by another lane and is not
-covered here.
+Covered: work, envelope, divergence, digests, snapshots, pulse, leases, and the
+inline sites in metrics. All route through `agentco/timeutil.py`.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ NAIVE = datetime(2026, 1, 15, 12, 0, 0)
 AWARE_UTC = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
 EXPECTED = "2026-01-15T12:00:00+00:00"
 
-MODULES = ["work", "envelope", "divergence", "digests", "snapshots", "pulse"]
+MODULES = ["work", "envelope", "divergence", "digests", "snapshots", "pulse", "leases"]
 
 
 @pytest.fixture(params=["America/Sao_Paulo", "Asia/Tokyo"])
