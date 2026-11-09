@@ -98,6 +98,18 @@ The client library (`Registry._call`, and so the MCP remote backend and the fede
 the query already, and so do `agentco/conformance.py`'s loopback client and `tools/loadtest.py`;
 a test runs both against a hub that sets the variable.
 
+## Scope conflicts carry `holderAttested`
+
+A conflict record (`conflicts[]` on the `POST /scope-claims` answer, the same records the session
+hook reads through `leases.conflicts_for`) is
+`{withHolder, holderAttested, theirIntent, overlaps: [{mine, theirs}]}`. `holderAttested` is
+`true` when the *other* lease named its `holder` in the payload and that name is not the actor who
+filed it, so the conflict rests on an unverified claim; the session block then reads
+`vs kofi (attested, unverified)`. The conflict still fires: the flag is information for the reader,
+not a filter. Additive: a client that ignores unknown keys is unaffected. On a `ScopeConflict`
+event the key is spread from the same record, so there `holderAttested` qualifies `withHolder`
+(the claimant's own flag is on its `ScopeClaimed` event).
+
 ## Ownership epochs
 
 `owner.epoch` on `GET /runs/{id}`, the `epoch` a transfer returns, the one a `not_the_owner`

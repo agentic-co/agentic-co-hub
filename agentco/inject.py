@@ -356,8 +356,9 @@ def render_session_block(
     ]
     if conflicts:
         for c in conflicts:
+            attested = " (attested, unverified)" if c.get("holderAttested") else ""
             lines.append(
-                f"  - {c['repo']}: vs {c['withHolder']} ({c['theirIntent']}), you: {c['myIntent']}"
+                f"  - {c['repo']}: vs {c['withHolder']}{attested} ({c['theirIntent']}), you: {c['myIntent']}"
             )
     else:
         lines.append("  (none)")

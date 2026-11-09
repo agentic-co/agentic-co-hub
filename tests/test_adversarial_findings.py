@@ -665,11 +665,6 @@ def test_an_https_pointer_is_never_resolved_by_a_body_transferring_get():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the conflict record carries withHolder but not holderAttested, so a "
-    "conflict raised by an unverified holder claim is indistinguishable from a real one",
-)
 def test_a_conflict_from_an_unverified_holder_claim_is_distinguishable(client):
     """A client can make a third party appear to be holding scope they never claimed.
 

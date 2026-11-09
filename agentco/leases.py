@@ -152,7 +152,10 @@ def claim(
         conflicts = find_conflicts(
             scope,
             claimed_holder,
-            [(l["holder"], Scope(l["repo"], tuple(l["prefixes"])), l["intent"]) for l in existing],
+            [
+                (l["holder"], Scope(l["repo"], tuple(l["prefixes"])), l["intent"], l["holderAttested"])
+                for l in existing
+            ],
         )
         conn.execute(
             "INSERT INTO leases(uid, holder, holder_attested, repo, prefixes, intent, "
@@ -325,7 +328,12 @@ def conflicts_for(conn: sqlite3.Connection, actor: str, now: Optional[datetime] 
         if not mine:
             continue
         others = [
-            (lease["holder"], Scope(lease["repo"], tuple(lease["prefixes"])), lease["intent"])
+            (
+                lease["holder"],
+                Scope(lease["repo"], tuple(lease["prefixes"])),
+                lease["intent"],
+                lease["holderAttested"],
+            )
             for lease in live
             if lease["holder"] != actor
         ]
