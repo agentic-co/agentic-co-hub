@@ -47,13 +47,13 @@ def client(tmp_path):
     return TestClient(app)
 
 
-def signed(method: str, path: str, actor: str, body: dict | None = None) -> dict:
+def signed(method: str, path: str, actor: str, body: dict | None = None, query: str = "") -> dict:
     raw = json.dumps(body).encode() if body is not None else b""
     ts = str(int(time.time()))
     return {
         "X-AgentCo-Actor": actor,
         "X-AgentCo-Timestamp": ts,
-        "X-AgentCo-Signature": auth.sign(KEYS[actor], method, path, ts, raw),
+        "X-AgentCo-Signature": auth.sign(KEYS[actor], method, path, ts, raw, query=query.lstrip("?") or None),
         "Content-Type": "application/json",
     }
 
@@ -63,7 +63,7 @@ def post(client, path, actor, body):
 
 
 def get(client, path, actor, query=""):
-    return client.get(f"{path}{query}", headers=signed("GET", path, actor, None))
+    return client.get(f"{path}{query}", headers=signed("GET", path, actor, None, query))
 
 
 def create_item(client, actor="dana", **fields):

@@ -396,11 +396,13 @@ the string. **Declaring the verifiers turns it into a rail**: with
 `AGENTCO_VERIFIERS=dana,reviewer-box` set on the registry (or on the node, in
 local MCP mode), `verify` counts only for those actors — on every claim of a
 routed vehicle and on every verdict, on every transport, because the binding
-lives in the queue. An undeclared node that declares the word is told, by name,
-that the operator bound the capability to somebody else. Undeclared stays
-self-asserted on purpose — a registry where nobody may verify resolves every
-judged gate on the clock, which is worse — and `agentco verifiers` reports
-which of the two you are running. The authority rule for a judged gate that
+lives in the queue. An undeclared node that declares the word is refused
+`unauthenticated` (403) on the verdict, and told by name on a claim that the
+operator bound the capability to somebody else. **The verdict side fails
+closed** (ASOP §5.3, §9): with nothing declared, no route may answer a judged
+or human gate — only a declared human (`ASOP_HUMANS`) may — and the gate waits
+for a person or its park clock. Claiming a routed vehicle stays self-asserted
+while undeclared, and `agentco verifiers` reports which posture you are running. The authority rule for a judged gate that
 holds either way is the separation: the submitter may not be the actor that
 reported the work done, and that is derived from the signature, so it cannot be
 self-asserted. That claim rests on a report

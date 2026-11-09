@@ -425,8 +425,9 @@ def create_app(
     if verifiers is not None:
         # The `verify` capability is bound to these identities on claim and
         # verdict (agentco/policy.py `bind_capabilities`); unset, the queue read
-        # AGENTCO_VERIFIERS itself, and empty means self-asserted, said aloud by
-        # `agentco verifiers`.
+        # ASOP_VERIFIERS itself. Empty resolves nobody on the verdict (only
+        # declared humans may answer) and binds nothing on the claim, said aloud
+        # by `agentco verifiers`.
         queue.verifiers = frozenset(verifiers)
     if protected_tags is not None:
         library.protected_tags = policy.DEFAULT_PROTECTED_TAGS | frozenset(

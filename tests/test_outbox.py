@@ -393,7 +393,7 @@ class LoopbackRegistry(Registry):
             headers={
                 "X-AgentCo-Actor": self.actor,
                 "X-AgentCo-Timestamp": ts,
-                "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw),
+                "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw, query=query.lstrip("?") or None),
                 "Content-Type": "application/json",
                 # Mirrors `Registry._call`. Without it this stand-in could not
                 # exercise the transport marker at all, and the L1-conversion
@@ -500,12 +500,19 @@ def test_a_gate_can_be_answered_through_the_zero_config_floor(tmp_path):
 
     The verifier's drainer signs as a DIFFERENT machine, and that is the
     deployment rather than a detail of the fixture — see the test below.
+
+    Since Finding 4 the floor is not quite zero-config on the REGISTRY side:
+    the operator declares the reviewer machine in ASOP_VERIFIERS (here, the
+    `verifiers=` argument). An undeclared registry authenticates nobody, so a
+    verdict from an undeclared machine is refused `unauthenticated`. The
+    reviewer's harness still configures nothing.
     """
     app = create_app(
         db_path=str(tmp_path / "registry.sqlite3"),
         work_store=str(tmp_path / "work.jsonl"),
         sop_store=str(tmp_path / "sops.jsonl"),
         keys=KEYS,
+        verifiers=["reviewer-box"],
     )
     client = TestClient(app)
     executor = LoopbackRegistry("bigmac", client)
@@ -568,6 +575,9 @@ def test_a_judged_gate_cannot_be_closed_from_the_machine_that_executed_it(tmp_pa
         work_store=str(tmp_path / "work.jsonl"),
         sop_store=str(tmp_path / "sops.jsonl"),
         keys=KEYS,
+        # Declared, so the refusal below is the SEPARATION rule and not the
+        # registry (Finding 4): bigmac resolves, and still may not grade itself.
+        verifiers=["bigmac"],
     )
     client = TestClient(app)
     executor = LoopbackRegistry("bigmac", client)

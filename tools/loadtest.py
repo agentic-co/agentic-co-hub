@@ -67,8 +67,8 @@ class Actor(threading.Thread):
         raw = json.dumps(body).encode() if body is not None else b""
         ts = str(int(time.time()))
         # The path and the query are signed separately, as `Registry._call` signs
-        # them: a hub with ASOP_REQUIRE_SIGNED_QUERY=1 refuses a signature that
-        # leaves the query (the cursor) out.
+        # them: since 1.0 a hub refuses a signature that leaves the query (the
+        # cursor) out unless the operator opted out with ASOP_REQUIRE_SIGNED_QUERY=0.
         sig_path, _, query = path.partition("?")
         req = urllib.request.Request(
             self.url + path, data=raw if body is not None else None, method=method,

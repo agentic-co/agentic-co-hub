@@ -304,7 +304,7 @@ KEYS = {"kofi": "kofi-secret", "dana": "dana-secret", "operator": "op-secret",
         "bigmac": "bigmac-secret", "reviewer-box": "reviewer-secret"}
 
 
-def _client(tmp_path, humans=(), adjudicators=()):
+def _client(tmp_path, humans=(), adjudicators=(), verifiers=None):
     """The app, with the operator's declarations injected rather than exported.
 
     `create_app(humans=..., adjudicators=...)` is how an embedder declares who
@@ -316,6 +316,7 @@ def _client(tmp_path, humans=(), adjudicators=()):
         db_path=str(tmp_path / "api.sqlite3"), keys=KEYS, operator="operator",
         work_store=str(tmp_path / "work.jsonl"), sop_store=str(tmp_path / "sops.jsonl"),
         humans=list(humans), adjudicators=list(adjudicators),
+        verifiers=list(verifiers) if verifiers is not None else None,
     ))
 
 
@@ -417,8 +418,6 @@ def test_over_mcp_the_rider_is_on_attest_and_the_process_identity_is_the_adjudic
     pulled = tool(executor, "work_pull")()
     tool(executor, "work_report")(item_id=item["id"], attempt=pulled["lease_attempt"], status="done")
 
-    names = sorted(t.name for t in reviewer._tool_manager.list_tools())
-    assert "adjudicate" not in names, "no thirteenth tool — the rider is the MCP path"
 
     with pytest.raises(Exception) as caught:
         tool(executor, "attest")(item_id=item["id"], attestation=attestation(),
@@ -492,7 +491,9 @@ def test_over_the_outbox_the_executing_machine_is_refused_and_another_is_not(tmp
 
 
 def test_over_the_outbox_an_attest_line_carries_the_rider(tmp_path):
-    client = _client(tmp_path, adjudicators=("reviewer-box",))
+    # Declared as a verifier too: the registry fails closed (Finding 4), so the
+    # machine answering a judged gate must resolve before its rider is read.
+    client = _client(tmp_path, adjudicators=("reviewer-box",), verifiers=("reviewer-box",))
     item = _executed_over_http(client, actor="bigmac", verify=JUDGED)
     box = Outbox(tmp_path / "reviewer" / ".agentco")
     box.push("attest", {

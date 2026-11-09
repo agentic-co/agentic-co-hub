@@ -24,12 +24,12 @@ because they are easy to get wrong:
 
 | # | Defect | Why it is still open |
 |---|---|---|
-| **6a** | A scope conflict raised by an unverified `holder` claim is indistinguishable from a verified one. `holder` is payload-supplied; the lease records `holderAttested`, but the conflict record third parties read does not carry it. | Needs a decision on whether the flag propagates or attested leases stop raising third-party conflicts. Both are honest fixes; the test accepts either. |
+| ~~**6a**~~ | ~~A scope conflict raised by an unverified `holder` claim is indistinguishable from a verified one.~~ **Fixed 2026-11-09 (ADR 0011, decision 3: propagate).** The conflict record (`scope.find_conflicts`, so `POST /scope-claims`, `leases.conflicts_for` and the session hook) now carries `holderAttested` for the other lease, and the session block marks it `(attested, unverified)`. The conflict still fires; the flag is information for the reader. Additive on the wire. | |
 | **claim 3** | Seven scope-evasion routes: repo-name case, prefix case, zero-width characters, BOM, Unicode NFC/NFD, trailing dot, and `Scope()` bypassing validation. | Each makes two claims that overlap in reality fail to intersect. The repo-name one is worst — it hides a lease from the whole registry, and GitHub and ADO both treat `Acme/X` and `acme/x` as one repository. |
 | ~~**claim 5**~~ | ~~Four paths returned HTTP 500 with "This is a registry bug" instead of a refusal, and the generic handler echoed raw exception text.~~ **Fixed 2026-11-07** with R5: one coercion layer (`agentco/payload.py`); an unreachable snapshot URI is recorded unresolved; the generic handler logs the exception and returns a `correlationId`, never its text. | |
-| ~~**6b**~~ | ~~The HMAC covers the path but not the query string, so one captured signed `GET /events` replays as any feed query for the replay window.~~ **Fixed 2026-09-22**, with the transition still open by default. The signed string now carries a fifth line: the CANONICAL query — parsed, sorted, consistently escaped — which keeps the property the omission protected (a proxy reordering parameters must not invalidate a signature) while binding the values. Both ends had to change, so a legacy signature is still accepted until an operator sets `ASOP_REQUIRE_SIGNED_QUERY`; until they do, 6b remains open for whoever still signs the old string. `tests/test_replay_window.py` proves the replay, the reordering, and the switch. |
+| ~~**6b**~~ | ~~The HMAC covers the path but not the query string, so one captured signed `GET /events` replays as any feed query for the replay window.~~ **Fixed 2026-09-22; required by default since 2026-11-09 (ADR 0011, decision 4).** The signed string carries a fifth line, the canonical query. A legacy signature on a request with a query is now refused `401` with no configuration. `ASOP_REQUIRE_SIGNED_QUERY` remains for one release as an opt-out: only an explicit `0`, `false`, `no` or `off` re-allows the legacy string, and any other value, a typo included, keeps it required. The variable goes with the legacy signature after 1.0. `tests/test_v1_wire_defaults.py` pins the default and the opt-out, `tests/test_replay_window.py` proves the replay, and `tests/test_signed_query_clients.py` proves every shipped client signs the query with the variable unset. | |
 | ~~**A15**~~ | ~~The server signs the percent-decoded path while a client signs the wire form.~~ **Fixed 2026-09-22.** Settled the other way from the old remediation text: BOTH ends sign the DECODED path, and the remediation now says so. The server cannot reliably recover the wire form — ASGI's `raw_path` is optional and proxies rewrite it — while decoding is deterministic on both sides. Two encodings of one path denote one resource and should produce one signature; what must not happen is the ends disagreeing. |
-| **MCP refusals** | The MCP encoding renders a `Refusal` as `ToolError(str(exc))`, so the machine `code` survives only as a string prefix. Over HTTP it is a field. | `errors.py` says clients branch on the code; over MCP they cannot without parsing prose. |
+| ~~**MCP refusals**~~ | ~~The MCP encoding renders a `Refusal` as `ToolError(str(exc))`, so the machine `code` survives only as a string prefix.~~ **Fixed 2026-11-09 (ADR 0004 option C).** A refusal over MCP is an error result whose `structuredContent` is the same `{state, code, message, remediation}` body HTTP returns, next to the unchanged `code: message — remediation` text. In process, the raised `RefusedToolError` carries `.code` and `.data`. Clients should branch on `structuredContent.code`; the text prefix stays for clients that parse it today. | |
 | ~~**F1**~~ | ~~JSONL `MemoryStore._record` wrote the item, then its audit row, with no shared transaction; a failure between them left an unaudited item and, after a retried revise, a permanent hole in the audit chain.~~ **Fixed 2026-10-31.** The audit row is written FIRST. The worst case left is an audit row for a version that never landed, and `_audits` reads past it (only versions the item reached, the last row per version). Both directions are tested in `tests/test_fault_injection.py`. |
 | ~~**F2**~~ | ~~`Outbox.settle` removed the settled lines before appending their receipts, so a failure between them lost both.~~ **Fixed 2026-10-31.** Receipts first, then the lines go. The worst case left is a receipt for a line still in the outbox, which the next drain republishes and the hub dedupes on the line id — for every verb since R4, with the residues listed there. |
 | ~~**F3**~~ | ~~After a process died mid-line, the next `Outbox.push` was glued onto the torn fragment and both were quarantined as one line.~~ **Fixed 2026-10-31.** Every append goes through `agentco/appendlog.py`, which starts a fresh line when the file does not end in one: the fragment stays its own quarantined line and the next record lands whole. |
@@ -47,7 +47,7 @@ ones were proven live against Postgres 16 before their fixes.
 
 | # | Defect | Fix |
 |---|---|---|
-| ~~**R4**~~ | ~~Outbox republish after a crash duplicated `claim_scope`, `snapshot`, `adjudicate`, `sop_revise`, `sop_activate`: only `attest` and `work_report` carried an idempotency key.~~ | All five take `idempotencyKey` on HTTP and the `Registry` client, and the drainer passes the line id. Keys live in `idempotency_keys` (migration 0018), scoped to the actor, newest 500 per verb; claim and snapshot record the key in the same transaction as the write. **Two residues, open:** the MCP tools do not carry the key (the schema byte budget is at 12,496 of 12,500 and raising it is ADR 0004's open decision), and on the JSONL SOP store `sop_revise`/`sop_activate` record the key just after the write, so a crash between the two can still repeat it. |
+| ~~**R4**~~ | ~~Outbox republish after a crash duplicated `claim_scope`, `snapshot`, `adjudicate`, `sop_revise`, `sop_activate`: only `attest` and `work_report` carried an idempotency key.~~ | All five take `idempotencyKey` on HTTP and the `Registry` client, and the drainer passes the line id. Keys live in `idempotency_keys` (migration 0018), scoped to the actor, newest 500 per verb; claim and snapshot record the key in the same transaction as the write. **MCP residue closed 2026-11-09** (ADR 0004 option C): `claim_scope`, `snapshot`, `sop_revise`, `sop_activate`, `attest` and the new `adjudicate` tool take `idempotency_key` over MCP, recorded the way HTTP records it, so a key replays the same answer whichever door the first call used. The MCP SDK silently drops arguments a tool does not declare, so a key sent to a hub older than this gives no protection and no error. **One residue, open:** on the JSONL SOP store `sop_revise`/`sop_activate` record the key just after the write, so a crash between the two can still repeat it. |
 | ~~**R5**~~ | ~~Wrong-typed payload fields reached `TypeError`/`AttributeError`/`OverflowError` and came back as a 500 echoing the exception.~~ | One coercion layer, `agentco/payload.py`, at the HTTP boundary, with core checks in `leases`/`scope` so MCP refuses the same inputs. 400 naming the field. |
 | ~~**R6**~~ | ~~Claim TTL unbounded: `<= 0` returned an already-expired lease, `10**9` pinned an item until 2058.~~ | `Queue.claim` refuses `<= 0` and clamps to `lease_max_age`, as `renew` already did. |
 | ~~**R7**~~ | ~~`report_result` honoured an expired lease that `renew` refused.~~ | Resolved toward keeping work: the attempt fence is the authority and expiry only makes an item eligible for reclaim. `renew` now accepts a lapsed lease whose attempt is still current. A reclaim bumps the attempt, so the old holder is refused from then on. |
@@ -149,47 +149,40 @@ someone who trusts neither party.
 **So do not describe cross-org attestation as supported.** The gap is the claim,
 not the code: the code is honest about being an in-estate coordination plane.
 
-## Finding 4: the plane fails open on an undeclared verifier registry
+## Finding 4: the plane failed open on an undeclared verifier registry
 
-**Status: open, measured, and the standing argument for it does not hold.**
+**Status: closed 2026-11-09 (ADR 0011, decision 2: fail closed in v1).**
 
-ASOP §5.3 and §9 both say an unset registry authenticates nobody. This plane
-fails open: `policy.verifiers_from_env` treats an empty declaration as
-UNDECLARED, `Queue.attest` never resolves `submitted_by` against the registry
-at all, and authority rests on the transport (who is calling) plus capability
-binding at claim. The runtime now fails closed, so the two disagree.
+`Queue.attest` now resolves a `judged` or `human` attestation's `submitted_by`
+against the operator's declaration before accepting it (ASOP §5.3, §9): a route
+in `ASOP_VERIFIERS` or a person in `ASOP_HUMANS` (`policy.may_verify`). Anyone
+else is refused `unauthenticated`, HTTP 403. It is 403 and not 401 because the
+transport did authenticate the caller, and a 401 sends a harness off to mint a
+key. An unset registry authenticates nobody. Deterministic gates are unchanged.
 
-**The argument for failing open was checked and does not survive.** It reads:
-a registry nobody is in "resolves every judged gate on the clock, which is work
-approved on a timer". That conflates two independent mechanisms. The clock path
-is `sweep_park_clocks` -> `resolve_by_default`, which never calls `attest`.
-Refusing an unauthenticated attester cannot make the timer fire more often. The
-timer hazard is real, and it is separately handled: `resolve_by_default` never
-grants evidence, leaves `attestation` untouched, writes a "no check was run"
-record, and `verifier_status` reports it in aggregate — which is what
-`test_a_queue_approving_itself_on_a_timer_says_so_loudly` pins.
+The old argument for failing open ("a registry nobody is in resolves every
+judged gate on the clock") confused two separate mechanisms: the clock path
+(`sweep_park_clocks` -> `resolve_by_default`) never calls `attest`, so the
+change cannot make a timer fire more often. Filing a judged or human gate with
+`on_timeout: pass` on an undeclared hub is still allowed and still reported by
+`verifier_status`; the design remains detect-and-report there, not prevent.
+Claiming work stays self-asserted while nothing is declared. Signed human
+answers (ADR 0008) are unaffected, because enrolment already requires a
+declared human.
 
-So failing closed is safe here. It is still a CONTRACT CHANGE rather than a
-patch, which is why it has not simply been done.
+Measured at the change: 92 tests failed as-is; with a verifier list declared in
+the shared fixtures, 17 distinct tests in 6 files remained. Each was resolved
+deliberately, and the fix commit lists them.
 
-**Measured cost**, from actually making the change and reverting it:
+**Operators upgrading must set `ASOP_VERIFIERS` (and `ASOP_HUMANS`), or every
+judged and human gate waits for its clock.** See the upgrade section of
+[`docker.md`](docker.md).
 
-* authenticating `submitted_by` at `attest` fails 102 tests as-is;
-* declaring a verifier set in the shared `queue`/`jsonl_queue` fixtures brings
-  that to 23 distinct tests across 6 files;
-* the remainder are not one shape — `test_verifier_binding` (6) is mostly
-  fixture collision, since those tests assert on an UNDECLARED registry and
-  must build their own queue; `test_adjudication` (6), `test_asop_v3` (5),
-  `test_outbox` (2) and `test_conformance` (2) are genuine expectation changes
-  reaching all three transports and the conformance harness itself.
-
-**One thing NOT to do, learned by doing it.** Refusing to FILE a judged or human
-gate with `on_timeout: pass` while no registry is declared looks like the tidy
-companion fix. It is not: it deletes a configuration this plane supports
-deliberately and tests on purpose (`test_a_clock_only_queue_never_reads_as_
-configured`, `test_a_queue_approving_itself_on_a_timer_says_so_loudly`). The
-design here is detect-and-report-in-aggregate, not prevent. Changing that is a
-separate product decision and should be argued on its own terms.
+**Open question, not a defect:** when `ASOP_VERIFIERS` is set and a declared
+human is not on it, that person is still refused on a judged gate
+(`attestation_invalid`, from the capability check). This predates the change.
+Spec §9 reads "it waits for a person", so whether a declared human may answer a
+judged gate without also being listed as a verifier is undecided.
 
 ## Finding 5: snapshot admission is bypassed by a redirect
 

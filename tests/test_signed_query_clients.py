@@ -1,5 +1,6 @@
 """Every client this repo ships signs the query, so a hub with
-`ASOP_REQUIRE_SIGNED_QUERY=1` (ADR 0008 §6) refuses none of them.
+the signed-query default (ASOP_REQUIRE_SIGNED_QUERY unset, ADR 0008 §6, required
+since 1.0) refuses none of them.
 
 `Registry._call` always did; the conformance loopback client and the load-test
 actor signed the path alone, and were documented as unusable against such a hub.
@@ -24,7 +25,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture(autouse=True)
 def _signed_queries_required(monkeypatch):
-    monkeypatch.setenv("ASOP_REQUIRE_SIGNED_QUERY", "1")
+    # UNSET, not "1": the default is the contract. A client that only works
+    # when the operator remembers to set a variable is not a client that signs.
+    monkeypatch.delenv("ASOP_REQUIRE_SIGNED_QUERY", raising=False)
 
 
 def make_app(tmp_path):

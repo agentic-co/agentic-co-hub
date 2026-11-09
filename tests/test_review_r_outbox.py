@@ -61,7 +61,7 @@ class Loopback(Registry):
         ts = str(int(time.time()))
         response = self.client.request(method, f"{path}{query}", content=raw or None, headers={
             "X-AgentCo-Actor": self.actor, "X-AgentCo-Timestamp": ts,
-            "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw),
+            "X-AgentCo-Signature": auth.sign(self.secret, method, path, ts, raw, query=query.lstrip("?") or None),
             "Content-Type": "application/json", "X-AgentCo-Via": "outbox",
         })
         if response.status_code >= 400:
