@@ -32,13 +32,14 @@ from typing import Optional
 from agentco import events, idempotency
 from agentco.errors import Refusal
 from agentco.scope import Scope, find_conflicts, reject_control_characters
+from agentco.timeutil import iso_utc
 
 DEFAULT_TTL_S = 8 * 3600  # one working day; a lease nobody renews should lapse
 MAX_TTL_S = 14 * 24 * 3600
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return iso_utc(dt)
 
 
 def _parse(value: str) -> datetime:
