@@ -806,9 +806,9 @@ def create_server(
             # thing here that does refuse, and it fails closed — so a harness
             # must be able to see what it has declared without pulling anything.
             "capabilities": resolve_capabilities(),
-            # Whether the `verify` capability above means anything: bound to the
-            # operator's declared verifiers, or self-asserted.
-            "verifiers": sorted(policy.verifiers_from_env()) or "undeclared (verify is self-asserted)",
+            # Who may answer a judged or human gate: the operator's declared
+            # verifier routes. Undeclared resolves nobody (ASOP §5.3, §9).
+            "verifiers": sorted(policy.verifiers_from_env()) or "undeclared (no route may answer a judged or human gate; only declared humans can)",
             **backend.describe(),
             **({"auth": backend.auth_check()} if isinstance(backend, _RemoteBackend) else {}),
             "scope": {"minSegments": scope.MIN_SEGMENTS, "intents": list(scope.INTENTS)},

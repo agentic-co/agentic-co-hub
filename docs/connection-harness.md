@@ -155,7 +155,9 @@ Mostly assembly — capability routing already exists and is tested.
   fence refusal; and a human gate whose verifier is the item's assignee is
   refused at the write boundary, since only the clock could ever answer it.
   A judged gate's `verifier` stays an offer, not a binding verdict — binding who
-  may verify at all is `AGENTCO_VERIFIERS`.
+  may verify at all is `ASOP_VERIFIERS` (legacy `AGENTCO_VERIFIERS`), which fails
+  closed: a judged or human verdict lands only from a declared verifier or a
+  declared human (`ASOP_HUMANS`), and an unset registry authenticates nobody.
 
 ---
 

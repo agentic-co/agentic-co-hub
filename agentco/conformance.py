@@ -254,6 +254,10 @@ SCENARIOS: dict[str, dict] = {
         # makes nobody one, which is the `adjudicator-binding` scenario below.
         "humans": ["carol"],
         "adjudicators": ["bob"],
+        # The verifier registry fails closed (ASOP §5.3, §9): `bob` must be a
+        # declared verifier for his verdict to land, and `alice` is declared too
+        # so her self-attestation is refused by SEPARATION, not by the registry.
+        "verifiers": ["alice", "bob"],
         "steps": [
             step("operator", "work_create", save="g1", title="migrate the schema", verify=JUDGED),
             step("alice", "work_pull", save="pull1", capabilities=[]),

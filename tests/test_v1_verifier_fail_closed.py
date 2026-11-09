@@ -68,7 +68,6 @@ def bare(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(strict=True, reason="Finding 4: an undeclared registry authenticates everybody")
 def test_an_undeclared_verifier_registry_authenticates_nobody_on_a_judged_gate(bare):
     item_id = parked(bare, JUDGED)
     with pytest.raises(Refusal) as caught:
@@ -77,7 +76,6 @@ def test_an_undeclared_verifier_registry_authenticates_nobody_on_a_judged_gate(b
     assert bare.get(item_id).status is WorkStatus.AWAITING_VERIFY, "nothing landed"
 
 
-@pytest.mark.xfail(strict=True, reason="Finding 4: a human gate trusts the gate's own `verifier` string")
 def test_an_undeclared_registry_authenticates_nobody_on_a_human_gate(bare):
     """The named person is not a credential: the gate's `verifier` field is written
     by whoever FILED the item, not declared by the operator."""
@@ -88,7 +86,6 @@ def test_an_undeclared_registry_authenticates_nobody_on_a_human_gate(bare):
     assert bare.get(item_id).status is WorkStatus.AWAITING_VERIFY
 
 
-@pytest.mark.xfail(strict=True, reason="Finding 4: a registry miss is reported as attestation_invalid")
 def test_an_attestation_from_outside_the_declared_verifier_set_is_unauthenticated(tmp_path):
     queue = Queue(tmp_path / "work.jsonl", verifiers=["reviewer-box"], humans=[])
     item_id = parked(queue, JUDGED)
@@ -102,7 +99,6 @@ def test_an_attestation_from_outside_the_declared_verifier_set_is_unauthenticate
     assert queue.get(item_id).status is WorkStatus.AWAITING_VERIFY
 
 
-@pytest.mark.xfail(strict=True, reason="Finding 4: the human gate's named verifier is never resolved")
 def test_a_human_gate_naming_an_undeclared_person_is_refused_even_when_others_are_declared(tmp_path):
     queue = Queue(tmp_path / "work.jsonl", verifiers=["reviewer-box"], humans=["eli"])
     item_id = parked(queue, HUMAN)
@@ -164,7 +160,6 @@ def http(client, method, path, actor, body=None):
     return client.request(method, path, content=raw or None, headers=headers)
 
 
-@pytest.mark.xfail(strict=True, reason="Finding 4: HTTP attest accepts any authenticated actor")
 def test_http_an_unregistered_attester_gets_403_unauthenticated(tmp_path, monkeypatch):
     for name in ("ASOP_VERIFIERS", "AGENTCO_VERIFIERS", "ASOP_HUMANS", "AGENTCO_HUMANS"):
         monkeypatch.delenv(name, raising=False)
