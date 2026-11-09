@@ -68,6 +68,7 @@ from agentco import gates, policy
 from agentco.errors import UNAUTHENTICATED, Refusal
 from agentco.filelock import lock_exclusive, unlock
 from agentco.keys import derive_natural_key, natural_key_of
+from agentco.timeutil import iso_utc
 
 DEFAULT_LEASE_TTL_S = 3600
 
@@ -286,7 +287,7 @@ def _now() -> datetime:
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return iso_utc(dt)
 
 
 def _parse(value: Optional[str]) -> Optional[datetime]:

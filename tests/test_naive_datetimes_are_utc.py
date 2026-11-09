@@ -24,14 +24,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-pytestmark = [
-    pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset is unavailable"),
-    pytest.mark.xfail(
-        strict=True,
-        reason="_iso calls astimezone(timezone.utc) on a naive datetime, which Python "
-        "reads as host-local time, so a naive now= is shifted by the UTC offset",
-    ),
-]
+pytestmark = pytest.mark.skipif(not hasattr(time, "tzset"), reason="time.tzset is unavailable")
 
 NAIVE = datetime(2026, 1, 15, 12, 0, 0)
 AWARE_UTC = datetime(2026, 1, 15, 12, 0, 0, tzinfo=timezone.utc)

@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 from agentco import events
 from agentco.errors import Refusal
+from agentco.timeutil import iso_utc
 
 #: Comma-separated actor names this hub accepts a digest FROM. Legacy name
 #: kept for the same reason `ASOP_VERIFIERS`/`AGENTCO_VERIFIERS` are paired
@@ -63,7 +64,7 @@ def federators_from_env(value: Optional[str] = None) -> frozenset[str]:
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return iso_utc(dt)
 
 
 def receive(
