@@ -685,25 +685,27 @@ def create_server(
     def work_pull(ttl_seconds: int = DEFAULT_LEASE_TTL_S) -> Optional[dict]:
         """Claim the next ready work item this identity can run, with a fenced lease.
 
-        Claims as THIS NODE — never as a name the model supplies. An earlier
-        version took `agent` as a tool argument, and the lease holder is what a
-        judged gate's separation check compares the verifier against, so a model
-        could pull as "ghost-worker", report, and then attest its own work from
-        the same node and pass. Identity is configuration (`AGENTCO_ACTOR`), and
-        so are capabilities (`AGENTCO_CAPABILITIES`): a model is in no position
-        to declare, per call, who the machine it runs on is or what it is set up
-        to do.
+        Claims as THIS NODE — never as a name the model supplies. Identity is
+        configuration (`AGENTCO_ACTOR`), and so are capabilities
+        (`AGENTCO_CAPABILITIES`).
 
         `None` means nothing is claimable right now — an empty queue and a
-        lost race to another claimant look identical from here, and both are
-        the ordinary shape of a poller finding nothing to do this cycle, not
-        an error. An item this worker can never satisfy (its `requires` are
-        not in `capabilities`) is skipped rather than raised: `ready()`
-        deliberately does not pre-filter by capability, because the
-        enforcement belongs inside `claim()` under the same lock as the CAS —
-        so a poller is expected to move past it to the next candidate exactly
-        the way this loop does, rather than stopping on the first miss.
+        lost race look identical, and both are the ordinary shape of a poller
+        finding nothing to do this cycle, not an error. Items whose `requires`
+        this node lacks are skipped.
         """
+        # Why identity is not an argument: an earlier version took `agent`, and
+        # the lease holder is what a judged gate's separation check compares the
+        # verifier against, so a model could pull as "ghost-worker", report, and
+        # then attest its own work from the same node and pass. A model is in no
+        # position to declare, per call, who its machine is or what it can run.
+        #
+        # Why a capability miss is skipped rather than raised: `ready()`
+        # deliberately does not pre-filter by capability, because enforcement
+        # belongs inside `claim()` under the same lock as the CAS — so a poller
+        # moves past it to the next candidate, exactly as this loop does.
+        # (Moved out of the docstring for ADR 0004's byte budget: every byte of
+        # a docstring is paid by every MCP session.)
         try:
             return backend.work_pull(backend.actor, resolve_capabilities(), ttl_seconds)
         except (Refusal, WorkError, RegistryError) as exc:
@@ -892,6 +894,32 @@ def create_server(
         if updated is None:
             raise _refuse(unknown_item(item_id, "attest against"))
         return updated
+
+    @mcp.tool(name="adjudicate")
+    def adjudicate(item_id: str, verdict: str, evidence: str, idempotency_key: Optional[str] = None) -> dict:
+        """Tag an executed item's divergence: `good` (the procedure was wrong) or `bad` (a shortcut).
+
+        You may not be the executor. Immutable once written.
+        """
+        try:
+            updated = backend.adjudicate(item_id, verdict, evidence, idempotency_key=idempotency_key)
+        except (WorkError, ValueError, Refusal, RegistryError) as exc:
+            raise _refuse(exc) from exc
+        if updated is None:
+            raise _refuse(unknown_item(item_id, "adjudicate"))
+        return updated
+
+    @mcp.tool(name="sop_run")
+    def sop_run(sop_id: str, inputs: dict, bindings: dict, version: Optional[int] = None,
+                metadata: Optional[dict] = None) -> dict:
+        """File a run of a procedure's active (or `version`) version: one bead per step.
+
+        Supply every input and bind every role to an agent. Each step carries its own gate.
+        """
+        try:
+            return backend.sop_run(sop_id, inputs, bindings, version=version, metadata=metadata)
+        except (SopError, WorkError, NaturalKeyError, ValueError, Refusal, RegistryError) as exc:
+            raise _refuse(exc) from exc
 
     @mcp.tool(name="whoami")
     def whoami() -> dict:

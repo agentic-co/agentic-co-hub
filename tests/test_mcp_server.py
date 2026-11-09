@@ -94,6 +94,10 @@ def test_the_implemented_tools_are_the_ones_the_design_names(mcp):
         # primary surface, behind the revision policy. Twelve of twelve.
         "sop_revise",
         "sop_activate",
+        # ADR 0004 option C (accepted): the two ASOP v3 verbs an executing
+        # harness performs itself. Fourteen of fourteen.
+        "sop_run",
+        "adjudicate",
     }
     names = {t.name for t in mcp._tool_manager.list_tools()}
     assert names == expected

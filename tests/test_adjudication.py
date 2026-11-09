@@ -417,8 +417,6 @@ def test_over_mcp_the_rider_is_on_attest_and_the_process_identity_is_the_adjudic
     pulled = tool(executor, "work_pull")()
     tool(executor, "work_report")(item_id=item["id"], attempt=pulled["lease_attempt"], status="done")
 
-    names = sorted(t.name for t in reviewer._tool_manager.list_tools())
-    assert "adjudicate" not in names, "no thirteenth tool — the rider is the MCP path"
 
     with pytest.raises(Exception) as caught:
         tool(executor, "attest")(item_id=item["id"], attestation=attestation(),

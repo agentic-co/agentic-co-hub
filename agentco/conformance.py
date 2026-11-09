@@ -90,10 +90,10 @@ VERBS = (
 )
 
 #: What each transport carries, as the ladder documents it. HTTP carries every
-#: verb; MCP the twelve-tool roster (adjudication rides on `attest`; authoring
-#: and RUNNING procedures are HTTP-only by design — and v3's seven new verbs
-#: are why the ceiling is now a decision rather than a fact, see
-#: `docs/decisions/`); the outbox the push set. A verb a transport does not carry is performed through the core in that
+#: verb; MCP the fourteen-tool roster (ADR 0004 option C: `sop_run` and
+#: `adjudicate` are the two v3 verbs a harness performs in its own loop;
+#: authoring, retiring, reading runs and promoting stay HTTP-only by
+#: decision); the outbox the push set. A verb a transport does not carry is performed through the core in that
 #: transport's run — the question is not "can the outbox create work" (it
 #: cannot, by decision) but "does what it does carry mean the same thing".
 CARRIES: dict[str, frozenset[str]] = {
@@ -101,17 +101,27 @@ CARRIES: dict[str, frozenset[str]] = {
     "http": frozenset(VERBS),
     "mcp": frozenset({
         "claim_scope", "release_scope", "snapshot",
-        "work_create", "work_pull", "work_report", "attest",
-        "sop_revise", "sop_activate",
+        "work_create", "work_pull", "work_report", "attest", "adjudicate",
+        "sop_revise", "sop_activate", "sop_run",
     }),
     # The same tools, proxied to the registry over HTTP: a fourth relay with
     # its own field mapping (`_RemoteBackend`), conformed like the other three.
     "mcp-remote": frozenset({
         "claim_scope", "release_scope", "snapshot",
-        "work_create", "work_pull", "work_report", "attest",
-        "sop_revise", "sop_activate",
+        "work_create", "work_pull", "work_report", "attest", "adjudicate",
+        "sop_revise", "sop_activate", "sop_run",
     }),
     "outbox": frozenset(PUSH_VERBS),
+}
+
+#: Arguments a transport's schema cannot express at all, per verb. A step that
+#: sends one is performed through the core (its outcome then reads `via:
+#: core`), exactly as a verb the transport does not carry. The one entry:
+#: MCP's `sop_run` has no gate parameter — a filer cannot author a step's gate
+#: there by construction (ASOP v3 §2.2), where HTTP refuses it by name.
+UNEXPRESSIBLE: dict[str, dict[str, frozenset[str]]] = {
+    "mcp": {"sop_run": frozenset({"verify"})},
+    "mcp-remote": {"sop_run": frozenset({"verify"})},
 }
 
 KEYS = {
@@ -896,6 +906,13 @@ def _mcp(world: World, s: dict, remote: bool = False) -> dict:
             if verb == "sop_activate":
                 tool("sop_activate")(sop_id=a["sop"], version=int(a["version"]))
                 return _ok()
+            if verb == "adjudicate":
+                tool("adjudicate")(item_id=a["item"], verdict=a["verdict"], evidence=a["evidence"])
+                return _ok()
+            if verb == "sop_run":
+                out = tool("sop_run")(sop_id=a["sop"], inputs=a.get("inputs") or {},
+                                      bindings=a.get("bindings") or {}, metadata=a.get("metadata"))
+                return _ok(**_run_saved(world, s, out))
         except Exception as exc:  # noqa: BLE001 - classified below
             # The field when there is one (`RefusedToolError.code`); the
             # rendered prefix otherwise, for anything raised before `_refuse`.
@@ -1219,7 +1236,9 @@ def run_scenario(name: str, transport: str, root: Optional[Path] = None) -> dict
             outcomes = []
             with _environment(**world.env()):
                 for s in scenario["steps"]:
-                    via = transport if s["verb"] in carries else "core"
+                    unexpressible = UNEXPRESSIBLE.get(transport, {}).get(s["verb"], frozenset())
+                    via = (transport if s["verb"] in carries and not (unexpressible & set(s["args"]))
+                           else "core")
                     try:
                         outcome = DRIVERS[via](world, s)
                     except UnresolvedReference as exc:

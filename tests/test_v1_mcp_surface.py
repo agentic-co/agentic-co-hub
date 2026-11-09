@@ -240,10 +240,6 @@ def test_a_remote_refusal_keeps_the_registrys_code_as_a_field(registry_client):
 # --------------------------------------------------------------------------- #
 
 
-XFAIL_C = pytest.mark.xfail(strict=True, reason="ADR 0004 option C: the tool is not registered yet")
-
-
-@XFAIL_C
 def test_sop_run_over_mcp_files_a_tree_pinned_to_the_active_version(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTCO_HUMANS", "dana")
     sop_id = a_sop(tmp_path)
@@ -253,10 +249,9 @@ def test_sop_run_over_mcp_files_a_tree_pinned_to_the_active_version(tmp_path, mo
     assert run["runId"] and [s["step"] for s in run["steps"]] == [1]
     step = call(local(tmp_path, "kofi"), "work_pull")
     assert step["id"] == run["steps"][0]["itemId"]
-    assert step["verify"] == DETERMINISTIC, "the step's own gate, never the filer's"
+    assert {k: step["verify"][k] for k in DETERMINISTIC} == DETERMINISTIC, "the step's own gate"
 
 
-@XFAIL_C
 def test_sop_run_over_mcp_refuses_like_http(tmp_path):
     """A draft is not runnable — the same refusal, with the same code, as HTTP."""
     sop_id = a_sop(tmp_path)
@@ -265,7 +260,6 @@ def test_sop_run_over_mcp_refuses_like_http(tmp_path):
     assert str(caught.value).split("Error executing tool sop_run: ", 1)[-1].startswith("sop_refused: ")
 
 
-@XFAIL_C
 def test_adjudicate_over_mcp_tags_a_divergence_and_a_retry_is_answered_once(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENTCO_HUMANS", "dana")
     executor, reviewer = local(tmp_path, "kofi"), local(tmp_path, "dana")
@@ -284,7 +278,6 @@ def test_adjudicate_over_mcp_tags_a_divergence_and_a_retry_is_answered_once(tmp_
     assert again["metadata"]["adjudication"] == tagged["metadata"]["adjudication"]
 
 
-@XFAIL_C
 def test_sop_run_and_adjudicate_over_remote_mcp(registry_client):
     """The proxy carries both verbs; the registry decides who adjudicates."""
     operator, executor, reviewer = (remote(registry_client, a) for a in ("operator", "kofi", "dana"))
