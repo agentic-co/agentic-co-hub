@@ -31,7 +31,7 @@ from typing import Optional
 
 from agentco import events, idempotency
 from agentco.errors import Refusal
-from agentco.scope import Scope, find_conflicts, reject_control_characters
+from agentco.scope import Scope, find_conflicts, reject_control_characters, repo_key
 
 DEFAULT_TTL_S = 8 * 3600  # one working day; a lease nobody renews should lapse
 MAX_TTL_S = 14 * 24 * 3600
@@ -59,11 +59,16 @@ def live_leases(
     documented failure mode for this exact feature.
     """
     at = now or datetime.now(timezone.utc)
-    rows = conn.execute(
-        "SELECT * FROM leases WHERE repo = ? AND released_at IS NULL", (repo,)
-    ).fetchall()
+    # Matched on `repo_key`, in Python: rows written before normalisation hold the
+    # repo exactly as the caller typed it, and SQL `lower()` neither folds Unicode
+    # the way `casefold` does nor behaves the same on SQLite and Postgres. Open
+    # leases are bounded by MAX_TTL_S, so scanning them is cheap.
+    wanted = repo_key(repo)
+    rows = conn.execute("SELECT * FROM leases WHERE released_at IS NULL").fetchall()
     out = []
     for r in rows:
+        if repo_key(r["repo"]) != wanted:
+            continue
         if _parse(r["expires_at"]) <= at:
             continue
         out.append(
@@ -143,7 +148,7 @@ def claim(
     key = idempotency.clean(idempotency_key)
     uid = f"lease_{uuid.uuid4().hex[:16]}"
     expires = at + timedelta(seconds=ttl_seconds)
-    with idempotency.write_tx(conn, lock=f"claim:{scope.repo}"):
+    with idempotency.write_tx(conn, lock=f"claim:{repo_key(scope.repo)}"):
         if key is not None:
             prior = idempotency.recorded(conn, actor, "claim_scope", key)
             if prior is not None:
@@ -153,7 +158,7 @@ def claim(
             scope,
             claimed_holder,
             [
-                (l["holder"], Scope(l["repo"], tuple(l["prefixes"])), l["intent"], l["holderAttested"])
+                (l["holder"], Scope.from_stored(l["repo"], l["prefixes"]), l["intent"], l["holderAttested"])
                 for l in existing
             ],
         )
@@ -317,10 +322,12 @@ def conflicts_for(conn: sqlite3.Connection, actor: str, now: Optional[datetime] 
     definition.
     """
     at = now or datetime.now(timezone.utc)
-    repos = [
-        row["repo"]
-        for row in conn.execute("SELECT DISTINCT repo FROM leases WHERE released_at IS NULL").fetchall()
-    ]
+    # One entry per repository, not per spelling: `Acme/X` and `acme/x` are one repo,
+    # and `live_leases` already returns both spellings' leases for either.
+    by_key: dict[str, str] = {}
+    for row in conn.execute("SELECT DISTINCT repo FROM leases WHERE released_at IS NULL").fetchall():
+        by_key.setdefault(repo_key(row["repo"]), row["repo"])
+    repos = list(by_key.values())
     out: list[dict] = []
     for repo in repos:
         live = live_leases(conn, repo, at)
@@ -330,7 +337,7 @@ def conflicts_for(conn: sqlite3.Connection, actor: str, now: Optional[datetime] 
         others = [
             (
                 lease["holder"],
-                Scope(lease["repo"], tuple(lease["prefixes"])),
+                Scope.from_stored(lease["repo"], lease["prefixes"]),
                 lease["intent"],
                 lease["holderAttested"],
             )
@@ -338,7 +345,7 @@ def conflicts_for(conn: sqlite3.Connection, actor: str, now: Optional[datetime] 
             if lease["holder"] != actor
         ]
         for lease in mine:
-            candidate = Scope(lease["repo"], tuple(lease["prefixes"]))
+            candidate = Scope.from_stored(lease["repo"], lease["prefixes"])
             for conflict in find_conflicts(candidate, actor, others):
                 out.append({"repo": repo, "myLeaseUid": lease["uid"], "myIntent": lease["intent"], **conflict})
     return out

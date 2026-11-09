@@ -1031,11 +1031,6 @@ def assert_unrelated_scopes_stay_disjoint() -> None:
     ), "different repos now collide"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="scopes_intersect compares repo with a plain !=, so one changed letter "
-    "makes a lease invisible to every other claim in the registry",
-)
 def test_two_spellings_of_one_repo_name_do_not_hide_a_lease():
     """One capital letter in the repo name hides a lease from the ENTIRE registry.
 
@@ -1068,11 +1063,6 @@ def test_two_spellings_of_one_repo_name_do_not_hide_a_lease():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="normalize_prefix does not fold case, so two spellings of one directory "
-    "on a case-insensitive filesystem produce two non-intersecting claims",
-)
 def test_two_spellings_of_one_directory_do_not_hide_a_claim():
     """`src/Budget` and `src/budget` are the same directory and do not intersect.
 
@@ -1106,11 +1096,6 @@ def test_two_spellings_of_one_directory_do_not_hide_a_claim():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="str.strip() removes NBSP but not U+200B or U+FEFF, so a zero-width "
-    "character survives normalisation and creates a visually identical disjoint claim",
-)
 def test_an_invisible_character_cannot_make_a_claim_disjoint():
     """A zero-width space makes a claim that LOOKS identical intersect nothing.
 
@@ -1150,11 +1135,6 @@ def test_an_invisible_character_cannot_make_a_claim_disjoint():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="normalize_prefix does not apply a Unicode normalisation form, so NFC and "
-    "NFD spellings of one path are two distinct segment tuples",
-)
 def test_the_same_path_intersects_regardless_of_unicode_normalisation_form():
     """The same directory name from two machines does not intersect itself.
 
@@ -1188,11 +1168,6 @@ def test_the_same_path_intersects_regardless_of_unicode_normalisation_form():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a trailing dot survives normalize_prefix, but Windows strips it, so the "
-    "two spellings address one directory and produce two disjoint claims",
-)
 def test_a_trailing_dot_does_not_make_a_claim_disjoint():
     """`src/budget.` and `src/budget` are one directory on Windows and do not intersect.
 
@@ -1228,11 +1203,6 @@ def test_a_trailing_dot_does_not_make_a_claim_disjoint():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="only Scope.parse validates; the dataclass constructor accepts anything, "
-    "and the docstring claims it is validated on construction",
-)
 def test_constructing_a_scope_directly_validates_it():
     """`Scope`'s docstring claims validation it does not perform.
 
