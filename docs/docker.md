@@ -157,3 +157,20 @@ There is no schema migration path yet: `db.SCHEMA_VERSION` is written into the
 `meta` table on creation and never checked on open, so an older image opening a
 newer file will not tell you. Until that exists, upgrading means keeping the
 backup above.
+
+**Upgrading past the verifier fail-closed change (known-issues Finding 4).** A
+judged or human gate's verdict is now accepted only from an identity the
+operator declared, and an unset registry authenticates nobody. Before
+upgrading, set on the hub:
+
+```bash
+ASOP_VERIFIERS=reviewer-box,ci-judge   # verifier ROUTES (machines/agents), comma-separated, exact spelling
+ASOP_HUMANS=dana,eli                   # people; a declared human may answer judged and human gates
+```
+
+`AGENTCO_VERIFIERS` / `AGENTCO_HUMANS` are still read when the `ASOP_*` name is
+absent. An attester in neither set is refused `unauthenticated` with HTTP 403
+on `POST /work/{id}/attest` (and on MCP `attest`, the outbox and `POST
+/answers`). Nothing else changes: deterministic gates are unaffected, and a gate
+filed with `on_timeout: pass` still resolves on its park clock, which
+`agentco verifiers` keeps reporting.

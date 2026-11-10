@@ -21,8 +21,9 @@ Content-Type:        application/json
 - `path` is the decoded path without the query string. When the request has a
   query, its canonical form is appended as a fifth line: parameters sorted and
   percent-encoded (`GET /events?since=x&limit=1` signs `/events`, then
-  `limit=1&since=x`). Registries still accept the four-line form until the
-  operator sets `ASOP_REQUIRE_SIGNED_QUERY=1`; sign the query anyway.
+  `limit=1&since=x`). Since 1.0 a registry refuses the four-line form on a request
+  that has a query (`401`); only an operator's explicit
+  `ASOP_REQUIRE_SIGNED_QUERY=0` re-allows it, for one release. Sign the query.
 - An empty body hashes as the sha256 of zero bytes. Send no body on `GET`.
 - The actor is whatever the signature authenticates. A payload that names an
   `actor` is refused (`400`); a harness that wants to say which tool it is uses
@@ -138,8 +139,12 @@ A deterministic gate wants the attestation on the report itself; judged and
 human gates refuse one from the executor, and require the attester's finding in
 the attestation: `"verdict": {"passed": true, "reason": "…"}` (`reason` nonblank;
 `asop-spec` 0.4+). A `passed: false` verdict fails the gate even at exit 0.
-Once the operator declares `AGENTCO_VERIFIERS`, `verify` counts only for those
-actors.
+The attester must also be declared by the operator: a route in `ASOP_VERIFIERS`
+or a person in `ASOP_HUMANS` (comma-separated, exact spelling). Anyone else is
+refused `unauthenticated` with HTTP 403 — the key is fine, do not mint another;
+the operator has not declared you. With `ASOP_VERIFIERS` unset no route may
+answer a judged or human gate at all. Once declared, `verify` also counts only
+for those actors when claiming a routed vehicle.
 
 ## Procedures: what a bead tells you about the ASOP it came from
 

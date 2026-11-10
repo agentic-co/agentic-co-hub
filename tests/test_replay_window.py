@@ -9,11 +9,11 @@ Signing a CANONICAL query closes it without giving up the property the omission
 was protecting: a proxy that reorders or re-encodes parameters still must not
 invalidate a signature.
 
-The transition is deliberate and is tested as such. Both ends have to change
-together, so the legacy string is accepted until an operator sets
-ASOP_REQUIRE_SIGNED_QUERY — and while it is accepted, 6b is open for whoever is
-still signing the old way. That is stated rather than implied, and the test
-below shows exactly what the switch changes.
+Since 1.0 the signed query is REQUIRED by default. ASOP_REQUIRE_SIGNED_QUERY is
+kept for one release as the opt-out: an explicit falsy value re-allows the legacy
+string, and while it is allowed 6b is open for whoever is still signing the old
+way. The tests below that demonstrate the legacy replay set the opt-out
+explicitly; tests/test_v1_wire_defaults.py pins the default and the opt-out.
 """
 
 from __future__ import annotations
@@ -60,18 +60,19 @@ def test_reordering_the_same_parameters_still_works(client):
     assert client.get("/events?limit=50&kind=WorkFiled", headers=signed).status_code == 200
 
 
-def test_a_legacy_signature_is_accepted_during_the_transition(client):
-    """Both ends change together, and a registry that stopped serving every
-    existing client on upgrade is a registry nobody upgrades."""
+def test_a_legacy_signature_is_accepted_only_under_the_explicit_opt_out(client, monkeypatch):
+    """The one-release opt-out: an operator whose clients have not moved yet
+    sets ASOP_REQUIRE_SIGNED_QUERY=0, and that is the ONLY way back in."""
+    monkeypatch.setenv(auth.REQUIRE_SIGNED_QUERY_ENV_VAR, "0")
     ts = str(int(time.time()))
     legacy = {"X-AgentCo-Actor": "dana", "X-AgentCo-Timestamp": ts,
               "X-AgentCo-Signature": auth.sign(KEYS["dana"], "GET", "/events", ts, b"")}
     assert client.get("/events?limit=50", headers=legacy).status_code == 200
 
 
-def test_the_switch_closes_it(client, monkeypatch):
-    """And this is 6b actually shut: once every client has moved, the operator
-    sets the variable and the old string stops being enough."""
+def test_requiring_it_explicitly_still_closes_it(client, monkeypatch):
+    """`=1` predates the default and must keep meaning what it meant: the old
+    string stops being enough."""
     monkeypatch.setenv(auth.REQUIRE_SIGNED_QUERY_ENV_VAR, "1")
     ts = str(int(time.time()))
     legacy = {"X-AgentCo-Actor": "dana", "X-AgentCo-Timestamp": ts,

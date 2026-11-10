@@ -171,7 +171,7 @@ def test_http_renew_and_its_refusals(tmp_path):
 
 
 def test_the_mcp_remote_backend_renews_over_the_wire(tmp_path):
-    """No MCP tool (the surface is at its twelve-tool ceiling, ADR 0004); the
+    """No MCP tool (the surface is at its fourteen-tool ceiling, ADR 0004); the
     remote backend method is there for when one is decided."""
     from agentco.mcp_server import _RemoteBackend
 

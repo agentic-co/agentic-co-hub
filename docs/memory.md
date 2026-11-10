@@ -5,6 +5,10 @@ The design is [ADR 0006](decisions/0006-hub-memory-design.md). This page states 
 
 ## The switch: `AGENTCO_MEMORY`, off by default
 
+> **Experimental in version 1** ([ADR 0011](decisions/0011-v1-definition.md), decision 5). Shared
+> memory ships off by default, and the 1.0 wire promise does not cover `/memory`: its routes, fields
+> and parameters may change in a minor release.
+
 Shared memory is **off** unless an operator sets `AGENTCO_MEMORY=on` (owner decision 2026-10-18):
 its slices land on main before the whole of ADR 0006 does, and a hub must not start holding and
 serving owner-labeled items because it was upgraded. Any value other than `on`/`off` (also `true`,

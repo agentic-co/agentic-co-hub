@@ -657,7 +657,7 @@ def _attester(work_path: str, item_id: str, who: str, exit_status: int, result_p
         Path(result_path).write_text(json.dumps(result))
 
 
-def test_only_one_of_many_concurrent_verifiers_can_close_a_gate(tmp_path):
+def test_only_one_of_many_concurrent_verifiers_can_close_a_gate(tmp_path, monkeypatch):
     """Six verifiers, one open gate, and the item may only be closed once.
 
     `attest` is a read-modify-write like every other mutation here, so it has
@@ -665,6 +665,10 @@ def test_only_one_of_many_concurrent_verifiers_can_close_a_gate(tmp_path):
     claim: two verdicts on one unit of work, with the second silently replacing
     the first's evidence on a unit already recorded as done.
     """
+    # Every racer a declared verifier (ASOP §5.3: the registry fails closed),
+    # through the environment because each attester is a spawned process that
+    # builds its own Queue. Losers must lose the RACE, not the registry.
+    monkeypatch.setenv("ASOP_VERIFIERS", ",".join(f"reviewer-{i}" for i in range(6)))
     ctx = mp.get_context("spawn")
     work_path = tmp_path / "work.jsonl"
     queue = Queue(str(work_path))

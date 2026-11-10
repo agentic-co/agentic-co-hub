@@ -95,13 +95,13 @@ def client(tmp_path):
     return TestClient(app)
 
 
-def signed(method: str, path: str, actor: str, body: dict | None = None) -> dict:
+def signed(method: str, path: str, actor: str, body: dict | None = None, query: str = "") -> dict:
     raw = json.dumps(body).encode() if body is not None else b""
     ts = str(int(time.time()))
     return {
         "X-AgentCo-Actor": actor,
         "X-AgentCo-Timestamp": ts,
-        "X-AgentCo-Signature": auth.sign(KEYS[actor], method, path, ts, raw),
+        "X-AgentCo-Signature": auth.sign(KEYS[actor], method, path, ts, raw, query=query.lstrip("?") or None),
         "Content-Type": "application/json",
     }
 
@@ -665,11 +665,6 @@ def test_an_https_pointer_is_never_resolved_by_a_body_transferring_get():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the conflict record carries withHolder but not holderAttested, so a "
-    "conflict raised by an unverified holder claim is indistinguishable from a real one",
-)
 def test_a_conflict_from_an_unverified_holder_claim_is_distinguishable(client):
     """A client can make a third party appear to be holding scope they never claimed.
 
@@ -1524,14 +1519,15 @@ def test_a_non_numeric_limit_is_refused_not_reported_as_a_registry_bug(client):
     Why the existing test misses it: `test_a_malformed_cursor_is_refused_not_silently_reset`
     covers the parameter that IS validated. No test passes a non-numeric limit.
     """
-    response = client.get("/events?limit=abc", headers=signed("GET", "/events", "dana", None))
+    response = client.get("/events?limit=abc", headers=signed("GET", "/events", "dana", None, "?limit=abc"))
     assert_is_a_refusal_not_a_server_error(response, "a non-numeric limit")
 
     # The parameters that already work must keep working.
-    ok = client.get("/events?limit=5", headers=signed("GET", "/events", "dana", None))
+    ok = client.get("/events?limit=5", headers=signed("GET", "/events", "dana", None, "?limit=5"))
     assert ok.status_code == 200
     bad_cursor = client.get(
-        "/events?since=not-a-cursor", headers=signed("GET", "/events", "dana", None)
+        "/events?since=not-a-cursor",
+        headers=signed("GET", "/events", "dana", None, "?since=not-a-cursor"),
     )
     assert bad_cursor.json()["code"] == "bad_cursor"
 
@@ -1648,11 +1644,6 @@ def test_an_unexpected_error_is_identifiable_without_leaking_internals(client, m
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_refuse() stringifies the Refusal into ToolError, so the code survives only "
-    "as a prefix inside prose and a client must parse it back out",
-)
 def test_a_refusal_over_mcp_carries_its_code_as_a_field(tmp_path):
     """The MCP encoding drops the machine half of every refusal.
 
@@ -1982,11 +1973,6 @@ def test_a_path_needing_percent_encoding_still_authenticates(client):
     assert tampered.status_code == 401, "a signature must still be bound to its path"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the signing string covers method, path, timestamp and a body digest, but "
-    "not the query string, so one signed GET is valid for every query",
-)
 def test_the_signature_covers_the_query_string(client):
     """One captured `GET /events` replays as any feed query for the full window.
 

@@ -1283,6 +1283,13 @@ def test_a_vehicle_cannot_be_closed_by_reporting_it(queue):
     routing then saw a closed vehicle for the current attempt and filed no other,
     and the clock passed the gate. A vehicle is closed by the verdict landing on
     its item, never by a report on itself."""
+    # The claim side undeclared on purpose: these are about what a self-asserted
+    # `verify` node can do with a vehicle it legitimately holds. The shared
+    # fixture declares verifiers (the registry fails closed at attest), and a
+    # declared set would refuse the executor the claim before the property
+    # under test is reached — `test_the_executors_own_node_cannot_sit_on_the_vehicle`
+    # covers that half.
+    queue.verifiers = frozenset()
     item = park(queue, gate=gate(on_timeout="pass"))
     verifiers.route_open_gates(queue)
     [vehicle] = vehicles(queue)
@@ -1366,6 +1373,13 @@ def test_a_vehicle_cannot_be_closed_by_reporting_it_failed_either(queue):
     """Hole A. The first guard tested DONE alone, and a FAILED report closed the
     vehicle just as well — routing then owed nothing further and the clock
     passed the gate. A vehicle reports nothing about the work either way."""
+    # The claim side undeclared on purpose: these are about what a self-asserted
+    # `verify` node can do with a vehicle it legitimately holds. The shared
+    # fixture declares verifiers (the registry fails closed at attest), and a
+    # declared set would refuse the executor the claim before the property
+    # under test is reached — `test_the_executors_own_node_cannot_sit_on_the_vehicle`
+    # covers that half.
+    queue.verifiers = frozenset()
     item = park(queue, gate=gate(on_timeout="pass"))
     verifiers.route_open_gates(queue)
     [vehicle] = vehicles(queue)
@@ -1390,6 +1404,10 @@ def test_a_re_verify_vehicle_cannot_be_closed_by_reporting_it(queue):
     assert queue.get(item.id).status is WorkStatus.VERIFY_FAILED
     verifiers.route_open_gates(queue)
     [fresh] = [v for v in vehicles(queue) if v.status not in (WorkStatus.DONE, WorkStatus.FAILED)]
+    # The verdict above came from a declared verifier; the claim below is the
+    # executor's self-asserted `verify`, so the claim side is undeclared from
+    # here (a declared set would refuse the claim before the property is reached).
+    queue.verifiers = frozenset()
     claimed = queue.claim(fresh.id, "executor", capabilities=["verify"])
     with pytest.raises(Refusal):
         queue.report_result(fresh.id, claimed.lease_attempt, WorkStatus.DONE, submitted_by="executor")

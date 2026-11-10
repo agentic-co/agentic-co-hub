@@ -26,7 +26,7 @@ from asop.errors import Refusal
 
 __all__ = [
     "AliasedRefusal", "HUMAN_REQUIRED", "MANIFEST_UNKNOWN", "RENAMED", "Refusal", "TRANSFER_REFUSED",
-    "Unauthenticated", "human_required", "manifest_unknown", "scope_too_broad", "transfer_refused",
+    "UNAUTHENTICATED", "Unauthenticated", "human_required", "manifest_unknown", "scope_too_broad", "transfer_refused",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -95,6 +95,15 @@ def manifest_unknown(message: str, remediation: str, http_status: int = 404) -> 
     """The manifest a request names is not recorded. Formerly `manifest_member_unknown`."""
     return AliasedRefusal(MANIFEST_UNKNOWN, message, remediation, http_status,
                           aliases=("manifest_member_unknown",))
+
+
+#: ASOP §10 `unauthenticated`. Two cases share the code and NOT the status:
+#: the transport could not authenticate the caller (`Unauthenticated`, 401),
+#: and the transport did but the operator's declared registry does not resolve
+#: them for the role they claim (a plain `Refusal`, 403 — `Queue.attest`).
+#: The second must never be a 401: a harness that reads 401 concludes its key
+#: is wrong and mints another (`mcp_server.access_steps`).
+UNAUTHENTICATED = "unauthenticated"
 
 
 class Unauthenticated(Refusal):

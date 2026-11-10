@@ -17,9 +17,10 @@
 #   chain-sqlite / chain-pg
 #           the automated live chain proof, one per durable backend
 #
-# Every hub sets ASOP_REQUIRE_SIGNED_QUERY=1 (ADR 0008 §6): a signature that
-# does not cover the query string is refused, so the topology runs with known
-# issue 6b shut.
+# Every hub sets ASOP_REQUIRE_SIGNED_QUERY=1 (ADR 0008 §6). Since 1.0 a signature
+# that does not cover the query string is refused by default, so the explicit
+# setting is redundant and stays only to keep the rig's intent visible; the
+# variable is an opt-out (=0) for one release and is then removed.
 #
 # Host ports are ephemeral on loopback ("127.0.0.1::8787"); the rig asks
 # compose which port each hub got. Addresses on the rig network are fixed, in a

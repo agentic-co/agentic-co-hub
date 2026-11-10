@@ -895,8 +895,8 @@ def cmd_conform(args) -> int:
 
     Runs the conformance scenarios (agentco/conformance.py) for the transports a
     level relies on and names every place a transport departs from the core.
-    L2 also holds the MCP surface to its published budget — twelve tools,
-    12,500 schema bytes — because a roster that grew past what every calling
+    L2 also holds the MCP surface to its published budget — fourteen tools,
+    14,000 schema bytes — because a roster that grew past what every calling
     harness pays for on every turn is a conformance failure too, just a quieter
     one. Nothing here touches a live registry: every variable the plane reads
     to find a store or a registry (AGENTCO_DB, AGENTCO_REGISTRY_URL, ...) is
@@ -991,7 +991,7 @@ def _mcp_budget() -> dict:
         for t in sorted(tools, key=lambda t: t.name):
             payload = {"name": t.name, "description": t.description, "parameters": t.parameters}
             total += len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    return {"tools": len(tools), "toolCeiling": 12, "schemaBytes": total, "byteBudget": 12_500}
+    return {"tools": len(tools), "toolCeiling": 14, "schemaBytes": total, "byteBudget": 14_000}
 
 
 def cmd_writeback(args) -> int:
