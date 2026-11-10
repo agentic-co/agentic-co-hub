@@ -135,9 +135,9 @@ uniqueness rule on the ingest path, so no source can invent its own idempotency 
   and re-file;
 - the pulse reports every held lease's age, time left and renewals against the cap (`housekeeping.leases`).
 
-There is no MCP `work_renew` tool: the MCP surface is at its twelve-tool ceiling and a thirteenth tool
-needs [ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md)'s decision. The remote MCP backend already
-carries the call for when it is.
+There is no MCP `work_renew` tool: the MCP surface is at its fourteen-tool ceiling
+([ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md), option C) and a fifteenth tool is a new
+decision. The remote MCP backend already carries the call for when it is.
 
 ### Hub network *(planned)*
 
@@ -353,13 +353,14 @@ structural proposal on the sequence, because the same divergence recurring at
 the same boundary is evidence for a split or a reorder rather than another
 line of prose.
 
-Who may adjudicate is **declared**, like who may verify — `AGENTCO_ADJUDICATORS`
-alongside `AGENTCO_VERIFIERS`. The two defaults point opposite ways on purpose.
-An undeclared verifier set fails open, because the alternative is every judged
-gate resolving on its clock, which is work approved by a timer. An undeclared
-adjudicator set fails **closed** — only declared humans adjudicate — because
-what degrades when an agent grades the loop that revises the procedures it
-follows is not throughput but the evidence base, and nobody notices.
+Who may adjudicate is **declared**, like who may verify — `ASOP_ADJUDICATORS`
+alongside `ASOP_VERIFIERS` (the `AGENTCO_*` names are read as fallbacks). Both
+fail **closed** (ASOP §5.3, §9): an undeclared verifier set lets no route answer
+a judged or human gate — only a declared human may — and an undeclared
+adjudicator set lets only declared humans adjudicate. The verifier set used to
+fail open on the argument that refusing attesters makes judged gates resolve on
+their clock; it does not, because the clock path never attests. The timer
+hazard is reported by `agentco verifiers`, not prevented.
 
 **`promote(run_id)`** is the front door: a completed run tree becomes a draft
 ASOP, beads to steps, executors to roles, `blocked_by` to `after`. It is
@@ -421,10 +422,10 @@ always taken from the token, never from the payload.**
 That is narrower than it sounds and the difference matters. The *actor* — who made the
 call — cannot be forged. The `holder` field of a scope claim is a separate, payload-supplied
 value, so a caller can file a lease naming a colleague. The lease records that as
-`holderAttested`, but **the conflict record other people actually read does not currently
-carry that flag**, so a conflict raised by an unverified claim is presently
-indistinguishable from a real one. That is a known open defect with a failing test against
-it, not a property of the design.
+`holderAttested`, and **the conflict record other people read carries that flag too**
+(`docs/wire.md`, "Scope conflicts carry `holderAttested`"), so a conflict raised by an
+unverified claim is distinguishable from a verified one. The conflict still fires; the
+flag lets the reader weigh it.
 
 ## Connectors
 

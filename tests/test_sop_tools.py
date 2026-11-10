@@ -3,7 +3,7 @@
 The shared-learning WRITE path on the primary surface (MCP) and the zero-config
 floor (outbox), behind the revision policy on both. What these tests defend:
 
-  * the tools exist, and the roster is now twelve of twelve inside the byte
+  * the tools exist, and the roster is now fourteen of fourteen inside the byte
     budget (the roster/budget tests in test_mcp_server.py hold the numbers);
   * the policy reaches them — an agent on MCP cannot touch a protected step,
     and the kind is the OPERATOR's declaration (`AGENTCO_HUMANS`), never the
@@ -90,7 +90,7 @@ def a_body(*, step_over=None, **over):
 def test_the_two_tools_exist_and_the_roster_is_full(tmp_path):
     names = sorted(t.name for t in local(tmp_path, "bot")._tool_manager.list_tools())
     assert "sop_revise" in names and "sop_activate" in names
-    assert len(names) == 12
+    assert len(names) == 14
 
 
 def test_a_lesson_travels_over_mcp_as_a_draft_and_activates_deliberately(tmp_path, monkeypatch):

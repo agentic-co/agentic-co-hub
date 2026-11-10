@@ -221,11 +221,11 @@ def scopes_intersect(a: Scope, b: Scope) -> tuple[tuple[str, str], ...]:
 def find_conflicts(
     candidate: Scope,
     holder: str,
-    live: Iterable[tuple[str, Scope, str]],
+    live: Iterable[tuple[str, Scope, str, bool]],
 ) -> list[dict]:
     """Conflicts between `candidate` and each live lease, per the scope-model decision (docs/decisions/0001).
 
-    `live` yields `(holder, scope, intent)` for leases that have not expired
+    `live` yields `(holder, scope, intent, holder_attested)` for leases that have not expired
     or been released. A conflict fires ONLY between two DIFFERENT holders —
     renewing or widening your own lease is not a conflict, and treating it as
     one is the fastest way to train people to ignore the field.
@@ -234,9 +234,14 @@ def find_conflicts(
     `candidate` because `Scope` is `(repo, prefixes)` only; intent belongs to
     the lease, not to the scope, and keeping them separate is what lets a
     holder hold one scope under two intents over time.
+
+    Each record carries `holderAttested`: True when the OTHER lease's holder was
+    named in a payload and differs from the actor who filed it, so a reader can
+    weigh a conflict raised by an unverified claim (docs/wire.md). It is
+    additive: the conflict still fires.
     """
     conflicts: list[dict] = []
-    for other_holder, other_scope, other_intent in live:
+    for other_holder, other_scope, other_intent, other_attested in live:
         if other_holder == holder:
             continue
         pairs = scopes_intersect(candidate, other_scope)
@@ -247,6 +252,7 @@ def find_conflicts(
                 "withHolder": other_holder,
                 "overlaps": [{"mine": mine, "theirs": theirs} for mine, theirs in pairs],
                 "theirIntent": other_intent,
+                "holderAttested": bool(other_attested),
             }
         )
     return conflicts

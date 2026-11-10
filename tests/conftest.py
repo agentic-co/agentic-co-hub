@@ -111,10 +111,25 @@ def _pg_dsn(request):
         boot.execute(f'DROP SCHEMA "{schema}" CASCADE')
 
 
+#: The verifier routes the shared `queue` / `jsonl_queue` fixtures declare.
+#:
+#: The verifier registry fails CLOSED (ASOP §5.3, §9; known-issues Finding 4):
+#: a judged or human verdict lands only from a declared verifier or a declared
+#: human, and an undeclared registry authenticates nobody. These are the names
+#: the suite's tests attest AS. None of them is an executor in a test that
+#: relies on the declaration — an executor attesting its own judged gate is
+#: still refused by the separation check, which is what those tests assert.
+#: A test about an UNDECLARED registry builds its own queue.
+FIXTURE_VERIFIERS = (
+    "reviewer", "reviewer-1", "reviewer-2", "reviewer-b", "some-other-reviewer", "some-third-party",
+    "another-verify-node", "dana", "dave", "eve", "bob", "carol", "worker-a",
+)
+
+
 @pytest.fixture()
 def queue(backend, tmp_path, request):
     if backend == "jsonl":
-        return Queue(tmp_path / "work.jsonl")
+        return Queue(tmp_path / "work.jsonl", verifiers=FIXTURE_VERIFIERS)
     if backend == "postgres":
         # `getfixturevalue`, not a plain fixture argument: a test using ONLY
         # `queue` (never `library`) must not pay for a schema when the
@@ -124,8 +139,8 @@ def queue(backend, tmp_path, request):
         # `library`, below) returns the identical DSN rather than a second
         # schema. That is the same "one string, both stores" shape the
         # SQLite parameter already has.
-        return SqlQueue(request.getfixturevalue("_pg_dsn"))
-    return SqlQueue(tmp_path / "agentco.sqlite3")
+        return SqlQueue(request.getfixturevalue("_pg_dsn"), verifiers=FIXTURE_VERIFIERS)
+    return SqlQueue(tmp_path / "agentco.sqlite3", verifiers=FIXTURE_VERIFIERS)
 
 
 @pytest.fixture()
@@ -140,4 +155,4 @@ def library(backend, tmp_path, request):
 @pytest.fixture()
 def jsonl_queue(tmp_path):
     """The default backend only — for tests about the file format itself."""
-    return Queue(tmp_path / "work.jsonl")
+    return Queue(tmp_path / "work.jsonl", verifiers=FIXTURE_VERIFIERS)

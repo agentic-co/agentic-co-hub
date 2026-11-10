@@ -672,9 +672,11 @@ def verifier_status(queue: Queue, *, now: Optional[datetime] = None) -> dict:
         )
 
     return {
-        # Whether `verify` is a rail or a word. Declared: bound to these actors on
-        # every claim and verdict. Undeclared: self-asserted, which the rest of
-        # this report has to be read in the light of.
+        # Whether `verify` is a rail or a word ON THE CLAIM. Declared: bound to
+        # these actors on every claim and verdict. Undeclared: claiming a vehicle
+        # is self-asserted, and no route may answer a judged or human gate at all
+        # (only a declared human may) — which the rest of this report has to be
+        # read in the light of.
         "verifiersDeclared": sorted(queue.verifiers) or None,
         "capabilityBinding": "declared" if queue.verifiers else "self-asserted",
         "metric": "VERIFIER-PRESENCE",

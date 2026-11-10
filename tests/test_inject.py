@@ -337,6 +337,14 @@ def test_the_session_block_is_the_one_that_carries_personal_state():
     assert "kofi" in block
 
 
+def test_the_session_block_marks_a_conflict_from_an_unverified_holder_claim():
+    base = {"repo": "r", "withHolder": "dana", "theirIntent": "implement", "myIntent": "implement"}
+    plain = render_session_block({"moved": [], "tracked": 0}, [{**base, "holderAttested": False}], actor="op")
+    marked = render_session_block({"moved": [], "tracked": 0}, [{**base, "holderAttested": True}], actor="op")
+    assert "vs dana (implement)" in plain and "attested" not in plain
+    assert "vs dana (attested, unverified) (implement)" in marked
+
+
 def test_truncation_is_by_bytes_and_always_announced():
     """An omitted item nobody is told about reads as 'nothing else happened'."""
     live = [
