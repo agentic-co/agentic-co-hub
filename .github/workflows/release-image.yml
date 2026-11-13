@@ -1,0 +1,91 @@
+name: Release image
+
+# Publishes the container image to GitHub Container Registry when a release tag
+# is pushed, and at no other time. ADR 0011 gate 5 asks for "a published
+# container image"; before this file nothing in the repository pushed one, and
+# the `image` job in ci.yml only builds and tests it.
+#
+# The trigger is the whole safety story, so it is stated once:
+#
+#   * `tags: v*.*.*` and NO `branches:` and NO `pull_request:`. A branch push or
+#     a pull request cannot reach this workflow, which is what keeps a fork's
+#     pull request away from `packages: write`.
+#   * The credential is the run's own GITHUB_TOKEN, granted `packages: write` on
+#     this one job. No repository secret is read.
+#
+# What it cannot do until a tag exists: be exercised. A workflow that only runs
+# on a tag has no dry run on a branch, by construction. docs/releasing.md says
+# what to check on the day and what to do if the job fails.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# Least privilege, as in ci.yml. The publish job raises `packages` for itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: The tag names the version the package says it is
+        # An image tagged 1.0.0 that contains 0.1.0 is the one release mistake
+        # that cannot be undone quietly, because a registry tag is something
+        # people pull by name. Refuse before building anything.
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          declared=$(python3 - <<'PY'
+          import re
+          text = open("pyproject.toml").read()
+          print(re.search(r'(?m)^version\s*=\s*"([^"]+)"', text).group(1))
+          PY
+          )
+          [ "v${declared}" = "${TAG}" ] || { echo "FAIL: tag ${TAG} but pyproject.toml says ${declared}"; exit 1; }
+          echo "tag ${TAG} matches pyproject.toml version ${declared}"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The version, and `latest` for a stable tag only: a tag with a
+          # hyphen (v1.0.0-rc1) is a pre-release and must not move `latest`.
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: What was published
+        run: docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF_NAME#v}"
