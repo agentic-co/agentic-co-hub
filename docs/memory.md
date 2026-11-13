@@ -53,7 +53,7 @@ This hub's id is `AGENTCO_HUB_ID` (default `local`).
 
 | Route | Who |
 |---|---|
-| `POST /memory` `{label, layer, title, body, provenance, kind?, tags?, applies_to?}` | any actor cleared for the label |
+| `POST /memory` `{label, layer, title, body, provenance, kind?, tags?, applies_to?, idempotencyKey?}` | any actor cleared for the label |
 | `GET /memory?layer=&kind=&retired=1` | returns only what the caller is cleared for |
 | `GET /memory/{id}`, `GET /memory/{id}/history` | same; an item you are not cleared for answers exactly like one that does not exist (`memory_unknown`, 404) |
 | `POST /memory/{id}/revise` `{fields…, expected_version?}` | cleared actor; authoritative items only (`replica_read_only` otherwise) |
@@ -190,7 +190,22 @@ its clearance (`{"kofi": {"secret": "...", "clearance": {"acme": "internal"}, "s
   turning spaces on changes no reader's view until an actor is given a space.
 - **Replicas** from another hub land at the root, because another hub's paths mean nothing here.
 
+## Built: the outbox verb `memory_create`
+
+A harness with no AgentCo configuration can push a memory item by appending a `memory_create`
+line to its outbox ([`outbox.md`](outbox.md#memory_create)). The payload is the `POST /memory`
+body, the drainer's signature is the author, and the hub applies the same label, clearance and
+`memory_disabled` rules it applies over HTTP. `POST /memory` takes an optional `idempotencyKey`
+(the outbox sends its line id), so a replayed line writes one item.
+
+This writes an item **directly, at a label the signing credential is cleared for**. The review
+pipeline of ADR 0006 section 3 (blind validator, aggregate check, batch approval) is still not
+built, so nothing holds an item for review: whoever holds a credential cleared for a label can
+put an item at it, through the outbox exactly as through HTTP.
+
 ## Not built yet
+
+The review pipeline of ADR 0006 section 3 (blind validator, aggregate check, batch approval);
 
 Admission by surprise (a capture-time novelty check);
 the residuals pipeline (M4); MCP tools, CLI, capture and the lesson → ASOP hand-off (M5); the

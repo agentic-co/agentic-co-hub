@@ -84,6 +84,14 @@ about each one; the short form is here.
 
 ### Added
 
+- **`memory_create` joins the outbox push set.** A harness with no configuration can append a line
+  whose payload is the `POST /memory` body and have the drainer write the item under its own
+  credential. `provenance` is required on the line; an identity or an unknown key in the payload is
+  refused before anything is sent; the hub still decides labels, clearance and `memory_disabled`
+  (a settled refusal, not a retry). `POST /memory` now takes an optional `idempotencyKey`, which the
+  outbox sets to the line id, so a replayed line writes one item. The item is written directly: the
+  ADR 0006 section 3 review pipeline is not built. The verb is outside the conformance scenarios.
+
 - **ASOP v3 records and `asop-spec` 0.4 to 0.6.1.** A procedure is a versioned sequence of steps with
   a gate on each step; chaining fields (`outcomes`, `outputs`, `handoffs`, `on_escalate`, `requires`,
   `entry_gates`, `rework`) are stored, and a record that uses a field the installed contract cannot

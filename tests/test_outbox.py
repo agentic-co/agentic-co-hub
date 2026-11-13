@@ -88,6 +88,9 @@ def test_the_push_set_carries_reports_and_not_filings():
         # under the drainer's credential — and the revision policy.
         "sop_revise",
         "sop_activate",
+        # A memory item, written under the drainer's credential, label and
+        # clearance. Adds to shared knowledge; puts nothing in anyone's queue.
+        "memory_create",
     }
 
 

@@ -209,7 +209,7 @@ def test_the_receipt_names_the_item_and_its_version(box):
     box.push(VERB, memory_payload())
     receipt = drain(box, registry_publisher(FakeRegistry()))["receipts"][0]
     assert receipt["state"] == "published"
-    assert receipt["result"] == {"item_id": "mem-9", "version": 1}
+    assert receipt["result"] == {"state": "accepted", "item_id": "mem-9", "version": 1}, "ids, not the body"
 
 
 # --------------------------------------------------------------------------- #
@@ -318,3 +318,19 @@ def test_a_hub_refusal_of_the_body_comes_back_as_a_refusal_not_a_retry(hub, box)
     box.push(VERB, memory_payload(layer="episodic"))
     result = drain(box, registry_publisher(Loopback("kofi", hub)))
     assert (result["refused"], result["retryable"]) == (1, 0)
+
+
+# --------------------------------------------------------------------------- #
+# the conformance carve-out is pinned
+# --------------------------------------------------------------------------- #
+
+
+def test_the_conformance_carve_out_is_exactly_memory_create():
+    """The scenarios do not exercise this verb (shared memory is not in the
+    conformance core). That is a decision about one verb; this fails if it
+    becomes a habit, or if the verb is ever put under the scenarios and the
+    carve-out is left behind."""
+    from agentco.conformance import CARRIES, OUTSIDE_CONFORMANCE
+
+    assert OUTSIDE_CONFORMANCE == {VERB}
+    assert set(CARRIES["outbox"]) == set(PUSH_VERBS) - {VERB}
