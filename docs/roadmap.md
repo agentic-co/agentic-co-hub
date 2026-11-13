@@ -225,6 +225,39 @@ Two registries, both following the same shape:
   the reaper's in-lock liveness re-check and `assigned_agent` enforcement are
   single-process tested only (see below).
 
+### Version 1.1 — planned, not built
+
+Owner decision (2026-11-13): version 1.0 is scoped and frozen, and nothing is added to it. These
+items are planned for 1.1, after the v1.0.0 tag, in dependency order. None changes a version 1 gate.
+
+1. **A memory write verb in the push outbox.** *Today:* `PUSH_VERBS` in `agentco/outbox.py` has no
+   memory verb, so memory is written over HTTP only (`POST /memory`, off unless `AGENTCO_MEMORY=on`,
+   with a hard `provenance`). The verb is in progress on a branch and held until after the tag.
+   *Waits on:* the tag. Until item 2 exists it writes an item directly, at a label the signing
+   credential is cleared for.
+2. **The memory review step** (ADR 0006 §3 residuals path, slice M4: owner categories, never-leave
+   list, mechanical checker, blind validator, per-owner aggregate check, batch approval), built as
+   **one intake on the hub** that both entry paths go through: the HTTP route and the outbox verb.
+   The drainer publishes through the same signed HTTP client (`registry_publisher` in
+   `agentco/outbox.py`, `Registry` in `agentco/publish.py`), so one review point covers both and
+   neither can bypass it. *Today:* nothing holds a proposed item for review. *Waits on:* item 1;
+   planned immediately after it. The agent-runtime side, a mechanical pre-check before a line is
+   written, is [ADR 0015](decisions/0015-harness-knowledge-write-back.md) §3 and lives in the
+   sibling repo.
+3. **A provenance pointer on `sop_revise`** (ADR 0015, "What the hub lacks today", item 3). *Today:*
+   the route is strict and refuses a `provenance` key (`SOP_BODY_KEYS` in `agentco/app.py`), and a
+   stored version records `author` and `author_kind` only. It becomes a new accepted and stored
+   field. *Waits on:* a migration (the `asops` table in `agentco/migrations.py`), and the record
+   shape belongs to the spec.
+4. **A shared line-id derivation for outbox writers** ([ADR 0013](decisions/0013-harness-pull-work-push-events.md)
+   §3). *Today:* `Outbox.push` accepts a caller-supplied `line_id` and otherwise generates a random
+   one. It keeps accepting one; the helper gives writers a single derivation from content plus
+   attempt. *Waits on:* nothing.
+
+**Considered for 1.1, not committed:** a stale-version refusal on `sop_revise`. Today it always
+writes latest + 1 and takes no `expected_version`, so two revisers produce two drafts, not a
+conflict (ADR 0013, "What the hub lacks today").
+
 ### Hub network — planned, not built
 
 Accepted as a design in [`decisions/0007-hub-network-graph-and-channels.md`](decisions/0007-hub-network-graph-and-channels.md),
@@ -364,7 +397,8 @@ built slices; the residuals path, the hand-off and the spot-check are not built)
   probation.
 - The residuals path: owner categories, never-leave list, mechanical checker,
   blind validator, per-owner aggregate check, batch approval, reversible
-  category graduation.
+  category graduation. Planned for 1.1 as one intake on the hub, see
+  [Version 1.1](#version-11--planned-not-built).
 - The lesson-to-ASOP-revision hand-off through the existing improvement loop.
 - A primary-source spot-check of the research behind the design, before any
   parameter is claimed.
@@ -386,8 +420,8 @@ spec; cross-repo),
 [`0015`](decisions/0015-harness-knowledge-write-back.md) (lessons leave only as procedure revisions
 and, later, clean-room memory residuals), and
 [`0016`](decisions/0016-pinned-procedure-library.md) (procedure versions pinned by digest). Each
-record has a "what the hub lacks today" section; the outbox has no memory verb, and the residuals
-pipeline is not built.
+record has a "what the hub lacks today" section; the work that closes those gaps is planned in
+[Version 1.1](#version-11--planned-not-built).
 
 ### Borrowed candidates (from the 2026-08-31 OpenViking review)
 
