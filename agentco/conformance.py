@@ -89,7 +89,9 @@ VERBS = (
     "sop_propose", "sop_outcomes", "run_get", "promote",
 )
 
-#: Push verbs the scenarios do not exercise, by decision (see `CARRIES`).
+#: Push verbs the scenarios do not exercise, by decision (see `CARRIES`). Reason:
+#: shared memory is outside the 1.0 wire promise (ADR 0011) and is a store the
+#: conformance core does not have.
 OUTSIDE_CONFORMANCE: frozenset[str] = frozenset({"memory_create"})
 
 #: What each transport carries, as the ladder documents it. HTTP carries every

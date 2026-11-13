@@ -75,6 +75,13 @@ fsync the directory after creating a file; the outbox quarantine keeps the
 last 200 rows, not all of them; `settle` discards torn tails without
 quarantining them.
 
+- **`memory_create` idempotency window (planned for 1.1).** **Accepted residue.** The
+  `idempotencyKey` on `POST /memory` is recorded right after the item is written, not in the same
+  transaction, because the memory store may be a different store from the registry that holds the
+  key. A crash between the two, or two concurrent sends of one key, can write the item twice. This
+  is the same behaviour as `sop_revise` and `sop_activate` (see `agentco/idempotency.py`, `once`).
+  The outbox's line id is the key, so the exposure is a drainer that dies in that window.
+
 ## Fixed: the last strict-xfail tests (2026-11-09)
 
 Three defects that lived only as tests in `tests/test_adversarial_findings.py`,
