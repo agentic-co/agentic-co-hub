@@ -25,7 +25,7 @@ open run may continue on its original version after an upgrade.
 **(b).**
 
 1. **Every procedure version carries a content digest** computed with the spec's normative
-   canonical JSON (the same function 0008 uses for the answer envelope). A run's plan records the
+   canonical JSON (`asop.manifest.canonical_json`, spec §3.10, the function 0008 uses for the answer envelope). A run's plan records the
    digest, not only the version number.
 2. **Mismatch is refused.** A harness whose local copy of a pinned version has a different digest
    refuses to execute it, with a refusal code, and re-fetches from the authoritative store.
@@ -34,6 +34,13 @@ open run may continue on its original version after an upgrade.
    migrates an open run.
 4. **The digest is additive.** A store that does not send one behaves as it does today; adoption
    into the spec follows the 0008 path.
+
+## What the hub lacks today
+
+The hub's procedure record has no digest: it carries `version`, `status`, `superseded_by`,
+`author` and `author_kind` and the content fields (`asop.sop.ASOP`), and nothing in `agentco/sop.py`
+computes one over a version. A run is filed against a version number. Decision 1 is new work on the
+record and on the run's plan, after the spec change.
 
 ## Alternatives
 

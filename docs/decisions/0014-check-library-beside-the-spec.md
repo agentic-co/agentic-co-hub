@@ -40,6 +40,13 @@ rules version and being able to tell which runs used the old one.
    `local.<name>`). They are valid only on the runtime that registers them, and the hub labels them
    non-portable.
 
+## What the hub lacks today
+
+A gate's `check` is a free string (`agentco/gates.py`, `REQUIRED_GATE_FIELDS`). The hub judges an
+attestation by its `exit_status` and `cases_run` against the gate, and keeps no registry of check
+names, no rules version, and no field on the attestation that records either. Decisions 2 and 3 are
+new hub work, after the spec change.
+
 ## Alternatives
 
 - **(a) Keep checks in each runtime.** Portability is then accidental, and a fixed check is

@@ -16,8 +16,9 @@ ordinary beads. Two stores then hold the "same" item, and nothing says which one
   release) while the hub still shows the item leased, parked or failed.
 - A lost report or an expired lease leaves the local bead DONE and the hub item open. The next
   `pull` can hand the same work to another worker, and both completions look legitimate.
-- The harness's sync path today reports DONE/FAILED only; AWAITING_VERIFY and VERIFY_FAILED never
-  reach the hub, so a parked gate is invisible to the plane.
+- The harness's sync path today reports DONE/FAILED only and does not read back the gate states
+  the hub derives (AWAITING_VERIFY, VERIFY_FAILED), so a parked or refused gate is invisible to
+  the harness's own record of the item.
 
 An internal prototype runner that this design borrows from avoids the problem by holding no
 work items at all: the server owns the queue, and the runner keeps a ledger of what it did.
@@ -34,7 +35,10 @@ authoritative copy.
    references, gate evidence and delivery receipts. A journal entry is not a bead: it cannot fire
    completion hooks, release blockers or reach a terminal state locally.
 3. **Report every lifecycle edge, not only the end.** Execution-finished and gate-passed are
-   separate reports, and AWAITING_VERIFY and VERIFY_FAILED are reported like DONE and FAILED.
+   separate statements: the harness reports the attempt's outcome (`work_report`, DONE or FAILED,
+   with its attestation) and gate evidence (`attest`) as separate lines. AWAITING_VERIFY and
+   VERIFY_FAILED are not reported by a worker; the hub derives them from the report and the gate.
+   The harness records them in its journal when it reads the item back.
 4. **Authority does not move mid-run.** A hub outage does not make hub-owned work local. Evidence
    is kept, delivery is retried, and an uncertain external side effect is reconciled before any
    retry. Moving a run between authorities is a later, explicit feature.
@@ -53,7 +57,16 @@ authoritative copy.
 - The harness grows a journal type separate from `Task`. Existing completion hooks keep firing
   for standalone beads only.
 - `doctor` gains a check: no hub-owned item may exist as a terminal local bead.
-- The hub needs nothing new; it already fences by attempt.
+- The hub already fences a report by attempt (`POST /work/{id}/report` requires `attempt`, and
+  `Queue.report_result` refuses a stale one). It also derives AWAITING_VERIFY and VERIFY_FAILED
+  itself: `parse_terminal_status` (`agentco/work.py`) accepts only `done` and `failed` from a
+  worker, and any other status is refused `not_terminal`.
+
+## What the hub lacks today
+
+Nothing blocks this record. The journal's gate states come from reading the item back, not from a
+new report verb. If the owner wants a worker to push a "gate evidence delivered" edge that is
+distinct from `attest`, that is a new verb, not something the hub has.
 
 ## Revisit condition
 

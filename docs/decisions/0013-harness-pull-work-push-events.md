@@ -12,10 +12,10 @@ attests over HTTP, and anything else it learns (a lesson, a proposal, a status c
 standalone bead the owner wants visible) has no path to the plane. When the hub is down, a report
 is retried in-process and lost if the process dies.
 
-The hub already has the right floor for this. The L1 outbox (`docs/outbox.md`,
+The hub already has most of this floor. The L1 outbox (`docs/outbox.md`,
 `agentco/outbox.py`) is one JSON line per call (`line_id`, `at`, `verb`, `payload`,
 `agent_label`), drained and signed by a local process holding the machine credential, with
-`line_id` as the idempotency key. An internal prototype runner uses the same shape
+`line_id` as the idempotency key for the verbs that publish through the registry. An internal prototype runner uses the same shape
 (content-keyed, idempotent, version-conflict aware) and survives hub outages because the queue is
 on disk.
 
@@ -25,11 +25,15 @@ on disk.
 
 1. **Work stays pull.** `pull`, `renew`, fenced leases and attempt ids are unchanged (0002 L2).
 2. **Every outbound statement goes through the outbox:** reports, attestations, lifecycle edges
-   ([`0012`](0012-harness-authority-and-journal.md) §3), memory submissions and procedure proposals
-   ([`0015`](0015-harness-knowledge-write-back.md)). The harness writes the line; the drainer
-   signs and publishes it. The signature decides the actor, never the body (0002).
-3. **Idempotent by construction.** `line_id` is derived from content plus attempt (not random),
-   so a replay after a crash is a no-op on the hub.
+   ([`0012`](0012-harness-authority-and-journal.md) §3), procedure revisions and, once the hub has
+   a verb for them, memory submissions ([`0015`](0015-harness-knowledge-write-back.md)). The
+   harness writes the line; the drainer signs and publishes it. The signature decides the actor,
+   never the body (0002).
+3. **Idempotent by construction.** The writer supplies a `line_id` derived from content plus
+   attempt (not random), so a replay after a crash is a no-op on the hub. This is a rule on the
+   writer. `Outbox.push` (`agentco/outbox.py`) takes an optional `line_id` and, when none is given,
+   generates a random `ob_<uuid>` one, so a writer that calls `push()` without one gets a fresh
+   key on every call and no replay protection.
 4. **Version conflicts are explicit.** A push that targets a stale version is refused with a
    conflict code, and the drainer re-reads before retrying. It never overwrites.
 5. **Sanitize before the line is written,** not at drain time
@@ -37,6 +41,19 @@ on disk.
    also a durable record on disk, and content that must not leave should never be written to it.
 6. **Publishing stays opt-in per verb class.** Work reports are on by default once a hub is
    configured; memory and proposal verbs are off until the owner enables them.
+
+## What the hub lacks today
+
+- **No memory verb.** `PUSH_VERBS` holds `claim_scope`, `release_scope`, `snapshot`,
+  `work_report`, `attest`, `adjudicate`, `sop_revise` and `sop_activate`; `PENDING_VERBS` is empty.
+  A memory line is refused `verb must be one of [...]`. Until a verb is added to `PUSH_VERBS` and
+  mapped in the publisher (`agentco/outbox.py`, the verb dispatch near `sop_revise`), memory
+  cannot ride the outbox.
+- **No derived default `line_id`.** A helper that derives one from content and attempt is a change
+  to `Outbox.push` or a harness-side function. It does not exist in the hub today.
+- **No conflict code on revise.** `sop_revise` creates the next version of the latest one and has
+  no `expected_version`, so decision 4 has no hub-side stale-version refusal to rely on for
+  procedures. Memory revise does take `expected_version` (`docs/memory.md`).
 
 ## Alternatives
 

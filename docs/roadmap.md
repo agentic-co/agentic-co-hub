@@ -371,6 +371,20 @@ with promotion to the parent space; model-driven memory work run by a memory ste
 work for. Spaces are built (see the table); the rest is not, and its first step is a census of
 `common_mistakes`, which can stop it before any code.
 
+**Hub and harness boundary — proposed, not built.** Five records, status PROPOSED (2026-11-13), none
+of which changes a gate above:
+[`0012`](decisions/0012-harness-authority-and-journal.md) (the hub owns hub-pulled work; the harness
+keeps an execution journal, not a second bead),
+[`0013`](decisions/0013-harness-pull-work-push-events.md) (work is pulled, everything else is pushed
+through the outbox),
+[`0014`](decisions/0014-check-library-beside-the-spec.md) (a versioned check library beside the
+spec; cross-repo),
+[`0015`](decisions/0015-harness-knowledge-write-back.md) (lessons leave only as procedure revisions
+and, later, clean-room memory residuals), and
+[`0016`](decisions/0016-pinned-procedure-library.md) (procedure versions pinned by digest). Each
+record has a "what the hub lacks today" section; the outbox has no memory verb, and the residuals
+pipeline is not built.
+
 ### Borrowed candidates (from the 2026-08-31 OpenViking review)
 
 Three patterns from [OpenViking](https://github.com/volcengine/OpenViking) worth weighing
