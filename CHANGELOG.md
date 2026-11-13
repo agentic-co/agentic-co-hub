@@ -23,7 +23,8 @@ about each one; the short form is here.
 - **The verifier registry fails closed.** A `judged` or `human` attestation is accepted only from a
   route declared in `ASOP_VERIFIERS` or a person declared in `ASOP_HUMANS` (the pre-split
   `AGENTCO_VERIFIERS` and `AGENTCO_HUMANS` are still read as a fallback). With neither declared,
-  `attest` refuses every such submission with `403 unauthenticated`. A hub that never declared a
+  `attest` refuses every such submission with `403 unauthenticated`
+  (`tests/test_v1_verifier_fail_closed.py`, including the HTTP route). A hub that never declared a
   registry and relied on it being open must declare one. Deterministic gates are unchanged, and
   filing a gate that only a clock resolves still works. (ADR 0011 decision 2, Finding 4.)
 - **Signed query strings are required by default.** The request signature covers the canonical
@@ -66,11 +67,11 @@ about each one; the short form is here.
 - **Repositories compare case-insensitively.** Scope conflicts compare a repository (and each prefix
   segment) NFC-normalised and case-folded, with trailing dots and spaces dropped per segment, so
   `Acme/App` and `acme/app` now conflict. Responses still echo each party's own spelling.
-- **Two new refusals on scope claims:** `control_character` for an invisible character (zero-width,
+- **Two new refusals on scope claims, both HTTP 422:** `control_character` for an invisible character (zero-width,
   byte-order mark, bidi mark, soft hyphen and the like) and `bad_path_segment` for a segment made
   only of dots or spaces. They are refused, never stripped.
 - **The MCP surface is fourteen tools, within a 14,000-byte schema budget.** `adjudicate` and
-  `sop_run` were added, and `whoami` and `read_events` are on the roster. A harness that pins the tool
+  `sop_run` were added to the roster. A harness that pins the tool
   list sees two more tools. A refusal over MCP now carries `structuredContent` with the same
   `{state, code, message, remediation}` body HTTP returns, next to the unchanged text.
 - **Claim lifetimes are bounded.** `claim` refuses a TTL of zero or less and clamps a longer one to
@@ -111,7 +112,6 @@ about each one; the short form is here.
 - **Shared memory, experimental.** Owner-labeled items with one authoritative hub each, the wall on
   every read path, a usefulness and decay engine, and team spaces inside one hub (ADR 0006, ADR 0009;
   #30, #31, #32, #73). Off by default; see the breaking-changes block.
-- **`whoami`** (an MCP tool) tests a key and tells a refused harness how to get access (#16).
 - **Strict and lenient request bodies, field provenance, and a weekly `asop-spec` watch** that opens
   one issue when a newer release adds fields the hub neither forwards nor stores (#41).
 - **Postgres as a storage backend** next to SQLite and the JSONL default (`AGENTCO_DB=postgresql://...`,
@@ -128,6 +128,7 @@ about each one; the short form is here.
 ### Changed
 
 - **`asop-spec` floor raised to 0.4.0**, pin `>=0.4.0,<1` (#15).
+- **The MCP `whoami` tool tests the key** and tells a refused harness how to get access (#16).
 - **MCP `claim_scope`, `snapshot`, `sop_revise`, `sop_activate` and `attest` accept
   `idempotency_key`.** A hub older than this release drops an argument it does not declare and gives no
   protection and no error.

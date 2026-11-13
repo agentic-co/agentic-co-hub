@@ -22,14 +22,15 @@ The hub depends on the contract package `asop-spec`. **Supported: `>=0.4.0,<1`.*
 |---|---|---|
 | Declared dependency range | `>=0.4.0,<1` | `pyproject.toml`, `dependencies` |
 | Locked for development and the image | 0.6.1 | `uv.lock` |
-| Tested on every change | 0.4.0, 0.5.0, 0.6.0, 0.6.1 | `.github/workflows/ci.yml`, job `contract` |
+| Tested on every change | 0.4.0, 0.4.1, 0.5.0, 0.6.0, 0.6.1 | `.github/workflows/ci.yml`, job `contract` |
 
-The tested set is the floor, the release that once broke the hub (0.5.0), and the two newest. Two
-gaps between "declared" and "tested" are known and stated rather than hidden: 0.4.1 is on PyPI and
-inside the range but is not in the matrix, and the `<1` ceiling also admits 0.7 and later, which do
-not exist yet. The weekly `asop-spec watch` workflow opens an issue when a newer release appears, and
-raising the tested set is part of adopting it. Treat a release outside the tested set as unsupported
-until that matrix says otherwise.
+The tested set is the floor, its patch release 0.4.1 (the version the execution runtime pins), the
+release that once broke the hub (0.5.0), and the two newest. Every released version in the range has
+been tested. **The declared range `<1` admits versions newer than the newest one tested:** any 0.6.2,
+0.7 or later that is published is installable under the pin before this hub has been run against it,
+and the hub makes no claim about it until the `contract` matrix includes it. The weekly `asop-spec
+watch` workflow opens an issue when a newer release appears, and raising the tested set is part of
+adopting it. Treat a release outside the tested set as unsupported.
 
 ## What is migrated: every schema migration
 
@@ -118,7 +119,7 @@ Do these in order.
    |---|---|
    | `ASOP_REQUIRE_SIGNED_QUERY=0` | Only as a stopgap for a client that has not been updated to sign the query. Removed after 1.0. Any other value keeps the query required. |
    | `ASOP_SNAPSHOT_HTTP_HOSTS` | If your artifact server is on a private network: the hosts exempt from the internal-address check. |
-   | `ASOP_SNAPSHOT_SCHEMES`, `ASOP_SNAPSHOT_FILE_ROOTS` | If participants snapshot `file:` or `git:` pointers: which schemes, and under which roots. Both are off unless declared. |
+   | `ASOP_SNAPSHOT_SCHEMES`, `ASOP_SNAPSHOT_FILE_ROOTS` | If participants snapshot `file:` or `git:` pointers. `ASOP_SNAPSHOT_SCHEMES` defaults to `https,http`; `ASOP_SNAPSHOT_FILE_ROOTS` defaults to no roots. A `file:` or `git:` pointer is recorded but not followed until its scheme is in the first and the directories it may read are in the second. |
    | `AGENTCO_MEMORY=on` | Only to use experimental shared memory. Off by default; any value other than `on` or `off` refuses to start. |
    | `AGENTCO_HUB_ID` | Before enabling signed answers: the name of this hub. |
    | `ASOP_ADMINISTRATORS` | To allow run-ownership transfers. |
@@ -142,7 +143,7 @@ Do these in order.
   dropped silently.
 - **Expect more conflicts.** `Acme/App` and `acme/app` are one repository, and a path segment is
   compared case-folded. A claim with an invisible character, or a segment of only dots or spaces, is
-  refused (`control_character`, `bad_path_segment`).
+  refused (`control_character`, `bad_path_segment`, both HTTP 422).
 - **Reading the queue is scoped.** A non-operator caller sees the items in reach of its party.
 - **Epochs start at 0.** A client that sent `epoch: 1` for a never-transferred run must send 0 or omit
   it.
