@@ -2,7 +2,8 @@ name: Network rig
 
 # The multi-hub rig (tests/network/): five hubs from the real image and a
 # Postgres on one Docker network: federation, partition and rejoin, the memory
-# switch, run-ownership transfer and the live chain proof. It takes minutes, so
+# switch, run-ownership transfer, the live chain proof and a signed answer from
+# a person's partition outside that network (gate 2). It takes minutes, so
 # it is NOT part of CI's main suite (tests/network/conftest.py makes the
 # directory collect nothing unless AGENTCO_RIG=1). It runs:
 #
@@ -61,8 +62,9 @@ jobs:
           enable-cache: true
       - run: uv python install 3.12
       # The host side only signs requests and drives docker; `mcp` is for the
-      # proof's remote-relay checks (D6, D8). The hubs run the image's own install.
-      - run: uv run --extra dev --extra server --extra mcp --python 3.12 pytest tests/network -v
+      # proof's remote-relay checks (D6, D8), `envelope` for the person's signing
+      # key in the signed-answer proof. The hubs run the image's own install.
+      - run: uv run --extra dev --extra server --extra mcp --extra envelope --python 3.12 pytest tests/network -v
       - name: Chain proof evidence
         if: always()
         run: |

@@ -1,0 +1,864 @@
+#!/usr/bin/env python3
+"""hubctl: run several separate AgentCo hubs on one or more machines, walled from each other.
+
+One instance = one directory under a root (default ``~/.agentco/hubs``, expanded at run time):
+
+    <root>/<name>/            0700
+        hub.env               0600  every setting this hub reads, and nothing from any other hub
+        keys.json             0600  this hub's actor -> secret table (AGENTCO_REGISTRY_KEYS)
+        data/                 0700  database, work/SOP/memory stores, outbox node dir, writeback files
+        logs/hub.log                this hub's log
+        service/                    the last service definition printed by `service`
+
+Nothing is shared between instances: own port, own database, own keys, own declarations (humans,
+verifiers), own data and log directories. ``check-isolation`` proves it, and fails loudly when it
+stops being true. See docs/runbooks/run-several-hubs.md.
+
+Dependencies: Python >= 3.11 and this repository's own package (``agentco``), nothing else.
+Subcommands: init, add-actor, service, status, check-isolation, backup, run.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import secrets
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Optional
+
+# Importable when run from a checkout without the package installed into this interpreter.
+_REPO = Path(__file__).resolve().parents[2]
+if (_REPO / "agentco").is_dir() and str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+DEFAULT_ROOT = "~/.agentco/hubs"
+ROOT_ENV = "HUBCTL_ROOT"
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+ACTOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+OPERATOR = "operator"
+
+# Settings hubctl itself owns (the hub ignores them). Everything else in hub.env is read by the hub.
+CTL_PREFIX = "HUBCTL_"
+# hub.env keys whose value is a filesystem path private to the instance.
+PATH_KEYS = ("AGENTCO_REGISTRY_KEYS", "AGENTCO_WORK_STORE", "AGENTCO_SOP_STORE", "AGENTCO_MEMORY_STORE",
+             "AGENTCO_NODE_DIR", "AGENTCO_WRITEBACK_CURSOR", "AGENTCO_WRITEBACK_DEADLETTER",
+             "HUBCTL_DATA_DIR", "HUBCTL_LOG_DIR")
+
+
+class Fail(Exception):
+    """A refusal the operator should read; printed without a traceback, exit 1."""
+
+
+# --------------------------------------------------------------------------- filesystem helpers
+
+def resolve_root(arg: Optional[str]) -> Path:
+    return Path(os.path.expanduser(arg or os.environ.get(ROOT_ENV) or DEFAULT_ROOT)).absolute()
+
+
+def private_dir(path: Path, parents: bool = False) -> None:
+    path.mkdir(mode=0o700, parents=parents, exist_ok=True)
+    path.chmod(0o700)
+
+
+def write_private(path: Path, text: str, *, exclusive: bool = False) -> None:
+    """Write `text` to `path` with mode 0600 from the first byte, atomically."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if exclusive and path.exists():
+            raise Fail(f"{path} already exists")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def parse_env(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out[key.strip()] = value
+    return out
+
+
+def render_env(settings: dict[str, str], header: str) -> str:
+    lines = [f"# {header}", "# One hub's settings. Never copy this file to another hub; never commit it."]
+    lines += [f"{k}={v}" for k, v in settings.items()]
+    return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------- instances
+
+class Instance:
+    def __init__(self, root: Path, name: str):
+        self.root, self.name = root, name
+        self.dir = root / name
+        self.env_path = self.dir / "hub.env"
+        self.keys_path = self.dir / "keys.json"
+        self.data_dir = self.dir / "data"
+        self.log_dir = self.dir / "logs"
+
+    def exists(self) -> bool:
+        return self.env_path.is_file()
+
+    def env(self) -> dict[str, str]:
+        return parse_env(self.env_path)
+
+    def keys(self) -> dict:
+        try:
+            data = json.loads(self.keys_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @property
+    def port(self) -> int:
+        return int(self.env().get("HUBCTL_PORT", "0"))
+
+    @property
+    def bind(self) -> str:
+        return self.env().get("HUBCTL_BIND", "127.0.0.1")
+
+    @property
+    def backend(self) -> str:
+        return self.env().get("HUBCTL_BACKEND", "sqlite")
+
+    @property
+    def probe_host(self) -> str:
+        return "127.0.0.1" if self.bind in ("0.0.0.0", "::", "") else self.bind
+
+    @property
+    def url(self) -> str:
+        host = self.probe_host
+        return f"http://[{host}]:{self.port}" if ":" in host else f"http://{host}:{self.port}"
+
+    def db_target(self) -> str:
+        return self.env().get("AGENTCO_DB", "")
+
+    def operator_credential(self) -> Optional[tuple[str, str]]:
+        actor = self.env().get("AGENTCO_REGISTRY_OPERATOR", OPERATOR)
+        return (actor, secret_of(self.keys().get(actor))) if secret_of(self.keys().get(actor)) else None
+
+
+def secret_of(entry: object) -> str:
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict) and isinstance(entry.get("secret"), str):
+        return entry["secret"]
+    return ""
+
+
+def list_instances(root: Path) -> list[Instance]:
+    if not root.is_dir():
+        return []
+    found = [Instance(root, p.name) for p in sorted(root.iterdir()) if p.is_dir() and (p / "hub.env").is_file()]
+    return found
+
+
+def need_instance(root: Path, name: str) -> Instance:
+    if not NAME_RE.match(name):
+        raise Fail(f"{name!r} is not a valid hub name (lowercase letters, digits and '-', at most 40)")
+    inst = Instance(root, name)
+    if not inst.exists():
+        raise Fail(f"no hub named {name!r} under {root}; `hubctl init {name} --port <port>` creates one")
+    return inst
+
+
+# --------------------------------------------------------------------------- key generation (the repo's own)
+
+def mint_credential(actor: str) -> tuple[str, dict]:
+    """`agentco keygen <actor>`: the repo's own generator. Returns (secret, key-file entry)."""
+    done = subprocess.run([sys.executable, "-m", "agentco", "keygen", actor], capture_output=True, text=True,
+                          cwd=_REPO, env=_agentco_env(), timeout=60)
+    if done.returncode != 0:
+        raise Fail(f"`agentco keygen` failed: {done.stderr.strip()[-300:]}")
+    entry = json.loads(done.stdout)[actor]
+    return secret_of(entry), entry
+
+
+def _agentco_env() -> dict[str, str]:
+    """The ambient environment minus anything that configures a hub: key generation reads none of it."""
+    return {k: v for k, v in os.environ.items() if not k.startswith(("AGENTCO_", "ASOP_"))}
+
+
+# --------------------------------------------------------------------------- init
+
+def split_csv(value: str) -> list[str]:
+    return [p.strip() for p in value.split(",") if p.strip()]
+
+
+def parse_pg(dsn: str) -> tuple[str, int, str, str]:
+    """(host, port, database, password) of a postgresql:// DSN."""
+    u = urllib.parse.urlparse(dsn)
+    return (u.hostname or "", u.port or 5432, (u.path or "/").lstrip("/"), urllib.parse.unquote(u.password or ""))
+
+
+def cmd_init(args) -> int:
+    root = resolve_root(args.root)
+    name = args.name
+    if not NAME_RE.match(name):
+        raise Fail(f"{name!r} is not a valid hub name (lowercase letters, digits and '-', at most 40)")
+    if name == "local":
+        raise Fail("'local' is the default label every hub shares; envelopes cannot be enabled under it")
+    if not 1 <= args.port <= 65535:
+        raise Fail(f"port {args.port} is out of range")
+    if args.bind not in LOOPBACK and not args.expose_network:
+        raise Fail(f"--bind {args.bind} would expose this hub on the network, and a hub holds a company's work. "
+                   "Pass --expose-network as well to say you mean it (and put TLS in front of it).")
+    dsn = None
+    if args.backend == "postgres":
+        dsn = args.pg_dsn or os.environ.get("HUBCTL_PG_DSN")
+        if not dsn or not dsn.lower().startswith(("postgresql://", "postgres://")):
+            raise Fail("--backend postgres needs --pg-dsn postgresql://... (or $HUBCTL_PG_DSN): one database per hub")
+    elif args.pg_dsn:
+        raise Fail("--pg-dsn only applies to --backend postgres")
+
+    others = list_instances(root)
+    for other in others:
+        if other.name == name:
+            raise Fail(f"a hub named {name!r} already exists under {root}")
+        if other.port == args.port:
+            raise Fail(f"port {args.port} is already taken by hub {other.name!r}")
+        if dsn and other.backend == "postgres" and parse_pg(other.db_target())[:3] == parse_pg(dsn)[:3]:
+            raise Fail(f"that Postgres database is already used by hub {other.name!r}; give each hub its own database")
+    if Instance(root, name).dir.exists():
+        raise Fail(f"{Instance(root, name).dir} already exists and is not a hub instance; refusing to reuse it")
+
+    inst = Instance(root, name)
+    private_dir(root, parents=True)
+    inst.dir.mkdir(mode=0o700)
+    inst.dir.chmod(0o700)
+    private_dir(inst.data_dir)
+    private_dir(inst.log_dir)
+
+    operator_secret, operator_entry = mint_credential(OPERATOR)
+    write_private(inst.keys_path, json.dumps({OPERATOR: operator_entry}, indent=2) + "\n")
+    del operator_secret  # lives only in keys.json
+
+    if dsn:
+        db = dsn
+    else:
+        db_path = inst.data_dir / "registry.sqlite3"
+        os.close(os.open(db_path, os.O_WRONLY | os.O_CREAT, 0o600))   # private from the first byte
+        db = str(db_path)
+    settings = {
+        "AGENTCO_HUB_ID": name,
+        "AGENTCO_DB": db,
+        "AGENTCO_REGISTRY_KEYS": str(inst.keys_path),
+        "AGENTCO_REGISTRY_OPERATOR": OPERATOR,
+        # Declared humans and verifiers. Empty means nobody can answer a gate: add-actor declares them.
+        "ASOP_HUMANS": "",
+        "ASOP_VERIFIERS": "",
+        # Store locations the hub would otherwise default to relative to its working directory or to ~.
+        "AGENTCO_WORK_STORE": str(inst.data_dir / "work.jsonl"),
+        "AGENTCO_SOP_STORE": str(inst.data_dir / "sops.jsonl"),
+        "AGENTCO_MEMORY_STORE": str(inst.data_dir / "memory.jsonl"),
+        "AGENTCO_NODE_DIR": str(inst.data_dir / "node"),
+        "AGENTCO_WRITEBACK_CURSOR": str(inst.data_dir / "writeback.cursor"),
+        "AGENTCO_WRITEBACK_DEADLETTER": str(inst.data_dir / "writeback.deadletter.jsonl"),
+        "ASOP_REQUIRE_SIGNED_QUERY": "1",
+        "PYTHONUNBUFFERED": "1",
+        "HUBCTL_PORT": str(args.port),
+        "HUBCTL_BIND": args.bind,
+        "HUBCTL_BACKEND": args.backend,
+        "HUBCTL_DATA_DIR": str(inst.data_dir),
+        "HUBCTL_LOG_DIR": str(inst.log_dir),
+    }
+    write_private(inst.env_path, render_env(settings, f"hub {name}"))
+    print(f"created hub {name!r} in {inst.dir}")
+    print(f"  address   {args.bind}:{args.port}  ({'network-exposed by request' if args.bind not in LOOPBACK else 'loopback only'})")
+    print(f"  backend   {args.backend}")
+    print(f"  operator  credential stored in {inst.keys_path} (never printed)")
+    print(f"next: hubctl add-actor {name} <actor> [--verifier] [--human]; hubctl service {name} --print")
+    return 0
+
+
+# --------------------------------------------------------------------------- add-actor
+
+def cmd_add_actor(args) -> int:
+    root = resolve_root(args.root)
+    inst = need_instance(root, args.name)
+    actor = args.actor
+    if not ACTOR_RE.match(actor):
+        raise Fail(f"{actor!r} is not a valid actor name (letters, digits, '.', '_', '-')")
+    keys = inst.keys()
+    if actor in keys:
+        raise Fail(f"{actor!r} already has a credential on hub {args.name!r}; refusing to replace it silently")
+    secret, entry = mint_credential(actor)
+    keys[actor] = entry
+    write_private(inst.keys_path, json.dumps(keys, indent=2) + "\n")
+
+    settings = inst.env()
+    changed = []
+    for flag, var in ((args.verifier, "ASOP_VERIFIERS"), (args.human, "ASOP_HUMANS")):
+        if flag:
+            members = split_csv(settings.get(var, ""))
+            if actor not in members:
+                members.append(actor)
+            settings[var] = ",".join(members)
+            changed.append(var)
+    if changed:
+        write_private(inst.env_path, render_env(settings, f"hub {args.name}"))
+    print(json.dumps({"hub": args.name, "actor": actor, "secret": secret}))
+    note = f"credential for {actor!r} on hub {args.name!r} printed once above; it is stored only in {inst.keys_path}"
+    if changed:
+        note += f"; declared in {', '.join(changed)}: restart the hub for declarations to take effect"
+    print(note, file=sys.stderr)
+    return 0
+
+
+# --------------------------------------------------------------------------- service
+
+def detect_platform() -> str:
+    return "launchd" if sys.platform == "darwin" else "systemd"
+
+
+def xml_escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def render_service(inst: Instance, platform: str) -> tuple[str, str]:
+    """(file name, text) of this instance's service definition."""
+    ctl = Path(__file__).resolve()
+    log = inst.log_dir / "hub.log"
+    if platform == "launchd":
+        label = f"com.agentco.hub.{inst.name}"
+        args = [sys.executable, str(ctl), "run", inst.name, "--root", str(inst.root)]
+        items = "\n".join(f"        <string>{xml_escape(a)}</string>" for a in args)
+        text = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+{items}
+    </array>
+    <key>WorkingDirectory</key>
+    <string>{xml_escape(str(inst.data_dir))}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>StandardOutPath</key>
+    <string>{xml_escape(str(log))}</string>
+    <key>StandardErrorPath</key>
+    <string>{xml_escape(str(log))}</string>
+</dict>
+</plist>
+"""
+        return f"{label}.plist", text
+    unit = f"agentco-hub-{inst.name}.service"
+    text = f"""[Unit]
+Description=AgentCo hub {inst.name}
+After=network.target
+
+[Service]
+Type=simple
+# Only this hub's settings: its own env file, its own working directory.
+EnvironmentFile={inst.env_path}
+WorkingDirectory={inst.data_dir}
+ExecStart={sys.executable} -m agentco serve --host {inst.bind} --port {inst.port}
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+StandardOutput=append:{log}
+StandardError=append:{log}
+
+[Install]
+WantedBy=default.target
+"""
+    return unit, text
+
+
+def default_unit_dir(platform: str) -> Path:
+    if platform == "launchd":
+        return Path(os.path.expanduser("~/Library/LaunchAgents"))
+    return Path(os.path.expanduser("~/.config/systemd/user"))
+
+
+def cmd_service(args) -> int:
+    root = resolve_root(args.root)
+    inst = need_instance(root, args.name)
+    platform = args.platform or detect_platform()
+    fname, text = render_service(inst, platform)
+    if args.action == "print":
+        sys.stdout.write(text)
+        return 0
+    unit_dir = Path(os.path.expanduser(args.unit_dir)) if args.unit_dir else default_unit_dir(platform)
+    target = unit_dir / fname
+    sandboxed = bool(args.unit_dir)          # an override never talks to launchctl / systemctl
+    if args.action == "install":
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        private_dir(inst.dir / "service")
+        write_private(inst.dir / "service" / fname, text)
+        print(f"wrote {target}")
+        if sandboxed:
+            print("override directory given: nothing was loaded into the service manager")
+        elif platform == "launchd":
+            uid = os.getuid()
+            subprocess.run(["launchctl", "bootout", f"gui/{uid}/{fname[:-6]}"], capture_output=True)
+            _run(["launchctl", "bootstrap", f"gui/{uid}", str(target)])
+        else:
+            _run(["systemctl", "--user", "daemon-reload"])
+            _run(["systemctl", "--user", "enable", "--now", fname])
+        return 0
+    # uninstall
+    if not sandboxed:
+        if platform == "launchd":
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{fname[:-6]}"], capture_output=True)
+        else:
+            subprocess.run(["systemctl", "--user", "disable", "--now", fname], capture_output=True)
+    if target.exists():
+        target.unlink()
+        print(f"removed {target}")
+    else:
+        print(f"{target} was not installed")
+    return 0
+
+
+def _run(cmd: list[str]) -> None:
+    done = subprocess.run(cmd, capture_output=True, text=True)
+    if done.returncode != 0:
+        raise Fail(f"{' '.join(cmd)} failed: {done.stderr.strip()[-300:]}")
+
+
+# --------------------------------------------------------------------------- run (what the service executes)
+
+def cmd_run(args) -> int:
+    """Start this hub in the foreground with ONLY its own env file (plus PATH and locale)."""
+    inst = need_instance(resolve_root(args.root), args.name)
+    settings = inst.env()
+    env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "TMPDIR") if k in os.environ}
+    env.update({k: v for k, v in settings.items() if not k.startswith(CTL_PREFIX)})
+    os.umask(0o077)
+    private_dir(inst.log_dir)
+    log_fd = os.open(inst.log_dir / "hub.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.dup2(log_fd, 1)
+    os.dup2(log_fd, 2)
+    os.chdir(inst.data_dir)
+    cmd = [sys.executable, "-m", "agentco", "serve", "--host", inst.bind, "--port", str(inst.port)]
+    # The package must stay importable from a checkout without leaking this operator's environment.
+    if (_REPO / "agentco").is_dir():
+        env["PYTHONPATH"] = str(_REPO)
+    os.execve(sys.executable, cmd, env)
+    return 0  # unreachable
+
+
+# --------------------------------------------------------------------------- probing
+
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def signed_get(url: str, path: str, actor: str, secret: str, timeout: float = 4.0) -> tuple[Optional[int], dict]:
+    """GET `path` signed as `actor`. (status, body); status None means nothing answered."""
+    from agentco.publish import _sign
+
+    stamp = str(int(time.time()))
+    req = urllib.request.Request(url + path, method="GET", headers={
+        "X-AgentCo-Actor": actor, "X-AgentCo-Timestamp": stamp,
+        "X-AgentCo-Signature": _sign(secret, "GET", path, stamp, b"", query="")})
+    try:
+        with _NO_PROXY.open(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            return exc.code, json.loads(exc.read().decode() or "{}")
+        except (ValueError, OSError):
+            return exc.code, {}
+    except (urllib.error.URLError, OSError, ValueError):
+        return None, {}
+
+
+def read_hub_uid(inst: Instance) -> Optional[str]:
+    """The generated hub id from the database file, read-only; None when unknown (Postgres, or never started)."""
+    if inst.backend != "sqlite":
+        return None
+    db = inst.db_target()
+    if not db or not os.path.isfile(db) or os.path.getsize(db) == 0:
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+        try:
+            row = conn.execute("SELECT value FROM meta WHERE key = 'hub_uid'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def instance_status(inst: Instance, conform: Optional[dict]) -> dict:
+    cred = inst.operator_credential()
+    row = {"name": inst.name, "port": inst.port, "bind": inst.bind, "backend": inst.backend,
+           "up": False, "hubId": read_hub_uid(inst), "label": inst.env().get("AGENTCO_HUB_ID"), "health": ""}
+    if cred is None:
+        row["health"] = "no operator credential in keys.json"
+        return row
+    status, body = signed_get(inst.url, "/hub", *cred)
+    if status is None:
+        row["health"] = "down: nothing is listening"
+    elif status == 200:
+        row.update(up=True, hubId=body.get("hubId", row["hubId"]), label=body.get("label", row["label"]))
+        row["health"] = "ok: signed GET /hub accepted with this hub's operator credential"
+    else:
+        row["health"] = (f"WRONG HUB or stale keys: port answers but refused this hub's operator credential "
+                         f"(HTTP {status})")
+    row["conformance"] = conform
+    return row
+
+
+def run_conformance(level: str) -> dict:
+    """`agentco conform --level L1`: instance-independent (it runs on temporary stores), needs the dev extra."""
+    done = subprocess.run([sys.executable, "-m", "agentco", "conform", "--level", level, "--json"],
+                          capture_output=True, text=True, cwd=_REPO, env=_agentco_env(), timeout=300)
+    try:
+        report = json.loads(done.stdout)
+        return {"level": level, "conforms": bool(report.get("conforms")), "missing": report.get("missing", [])}
+    except ValueError:
+        return {"level": level, "conforms": False, "missing": [f"could not run: {(done.stderr or done.stdout).strip()[-200:]}"]}
+
+
+def cmd_status(args) -> int:
+    root = resolve_root(args.root)
+    insts = [need_instance(root, args.name)] if args.name else list_instances(root)
+    if not insts:
+        print(f"no hubs under {root}")
+        return 0
+    conform = run_conformance(args.conform) if args.conform else None
+    rows = [instance_status(i, conform) for i in insts]
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        for r in rows:
+            print(f"{r['name']}: {'UP' if r['up'] else 'down'}  port={r['port']} bind={r['bind']} backend={r['backend']} "
+                  f"hub-id={r['hubId'] or 'not generated yet'} label={r['label']}")
+            print(f"    health: {r['health']}")
+            if conform is not None:
+                verdict = "conformant" if conform["conforms"] else "NOT CONFORMANT: " + "; ".join(conform["missing"])
+                print(f"    conformance {conform['level']}: {verdict}")
+    return 0 if all(r["up"] for r in rows) else 1
+
+
+# --------------------------------------------------------------------------- check-isolation
+
+def mode_problem(path: Path, want_dir: bool) -> Optional[str]:
+    try:
+        mode = stat.S_IMODE(path.lstat().st_mode)
+    except OSError:
+        return None
+    if mode & 0o077:
+        return f"{path} has mode {mode:04o}; it must grant nothing to group or others ({'0700' if want_dir else '0600'})"
+    return None
+
+
+def collect_violations(root: Path, probe: bool = True) -> tuple[list[str], list[str]]:
+    """(violations, notes) for every instance under `root`."""
+    bad: list[str] = []
+    notes: list[str] = []
+    insts = list_instances(root)
+    if not insts:
+        return [f"no hubs found under {root}"], notes
+
+    # modes: the root, each instance directory, and every file and directory inside
+    for path in [root] + [i.dir for i in insts]:
+        if (p := mode_problem(path, True)):
+            bad.append(f"mode: {p}")
+    for inst in insts:
+        for sub in sorted(inst.dir.rglob("*")):
+            if sub.is_symlink():
+                bad.append(f"symlink: {sub} inside hub {inst.name!r} points at {os.readlink(sub)}; links can cross the wall")
+                continue
+            if (p := mode_problem(sub, sub.is_dir())):
+                bad.append(f"mode: {p}")
+
+    envs = {i.name: i.env() for i in insts}
+
+    # ports
+    seen: dict[int, str] = {}
+    for inst in insts:
+        port = inst.port
+        if port in seen:
+            bad.append(f"port: hubs {seen[port]!r} and {inst.name!r} both use port {port}")
+        seen.setdefault(port, inst.name)
+        if inst.bind not in LOOPBACK:
+            notes.append(f"hub {inst.name!r} binds {inst.bind}: network-exposed; keep TLS and a firewall in front of it")
+
+    # labels
+    labels: dict[str, str] = {}
+    for inst in insts:
+        label = envs[inst.name].get("AGENTCO_HUB_ID", "")
+        if label in ("", "local"):
+            bad.append(f"label: hub {inst.name!r} has configured name {label!r}, the default every hub shares")
+        elif label in labels:
+            bad.append(f"label: hubs {labels[label]!r} and {inst.name!r} share the configured hub name {label!r}")
+        labels.setdefault(label, inst.name)
+
+    # databases
+    sqlite_files: dict[tuple[int, int], str] = {}
+    sqlite_paths: dict[str, str] = {}
+    pg_dbs: dict[tuple, str] = {}
+    for inst in insts:
+        target = inst.db_target()
+        if inst.backend == "postgres" or target.lower().startswith(("postgresql://", "postgres://")):
+            host, port, dbname, _ = parse_pg(target)
+            key = (host.lower(), port, dbname)
+            if key in pg_dbs:
+                bad.append(f"database: hubs {pg_dbs[key]!r} and {inst.name!r} share Postgres database "
+                           f"{dbname!r} on {host}:{port}; the hub has no per-schema isolation, so use one database each")
+            pg_dbs.setdefault(key, inst.name)
+            continue
+        if not target:
+            bad.append(f"database: hub {inst.name!r} has no AGENTCO_DB; it would fall back to ./registry.sqlite3")
+            continue
+        real = os.path.realpath(target)
+        if real in sqlite_paths:
+            bad.append(f"database: hubs {sqlite_paths[real]!r} and {inst.name!r} share the database file {real}")
+        elif os.path.exists(real):
+            st = os.stat(real)
+            ident = (st.st_dev, st.st_ino)
+            if ident in sqlite_files:
+                bad.append(f"database: hubs {sqlite_files[ident]!r} and {inst.name!r} share one database file (same inode)")
+            sqlite_files.setdefault(ident, inst.name)
+        sqlite_paths.setdefault(real, inst.name)
+
+    # paths: each must lie inside its own instance directory, and no two instances may share one
+    owner_of: dict[str, str] = {}
+    for inst in insts:
+        values = {k: envs[inst.name].get(k, "") for k in PATH_KEYS}
+        if inst.backend == "sqlite":
+            values["AGENTCO_DB"] = inst.db_target()
+        for key, value in values.items():
+            if not value:
+                if key in ("AGENTCO_REGISTRY_KEYS", "HUBCTL_DATA_DIR", "HUBCTL_LOG_DIR"):
+                    bad.append(f"path: hub {inst.name!r} does not set {key}")
+                continue
+            real = os.path.realpath(value)
+            inside = os.path.commonpath([real, os.path.realpath(inst.dir)]) == os.path.realpath(inst.dir)
+            if not inside:
+                bad.append(f"path: hub {inst.name!r} has {key}={value}, outside its own directory {inst.dir}")
+            if real in owner_of and owner_of[real] != inst.name:
+                bad.append(f"path: hubs {owner_of[real]!r} and {inst.name!r} share {real} ({key})")
+            owner_of.setdefault(real, inst.name)
+    for key in ("HUBCTL_DATA_DIR", "HUBCTL_LOG_DIR"):
+        for a in insts:
+            for b in insts:
+                ra = os.path.realpath(envs[a.name].get(key, "") or "/nonexistent-a")
+                rb = os.path.realpath(envs[b.name].get(key, "") or "/nonexistent-b")
+                if a.name < b.name and (ra == rb or ra.startswith(rb + os.sep) or rb.startswith(ra + os.sep)):
+                    kind = "data" if "DATA" in key else "log"
+                    bad.append(f"{kind} directory: hubs {a.name!r} and {b.name!r} share or nest {kind} directories "
+                               f"({ra} / {rb})")
+
+    # secrets: no value may appear on two hubs (credentials, Postgres passwords)
+    secret_owner: dict[str, str] = {}
+    for inst in insts:
+        values = [secret_of(v) for v in inst.keys().values()]
+        if inst.backend == "postgres":
+            values.append(parse_pg(inst.db_target())[3])
+        for value in filter(None, values):
+            if value in secret_owner and secret_owner[value] != inst.name:
+                bad.append(f"secret: hubs {secret_owner[value]!r} and {inst.name!r} share a key or secret value "
+                           f"(fingerprint {_fingerprint(value)}); rotate one of them")
+            secret_owner.setdefault(value, inst.name)
+
+    # generated hub ids: a database copied to make a second hub carries the first hub's id
+    uids: dict[str, str] = {}
+    for inst in insts:
+        uid = read_hub_uid(inst)
+        if uid:
+            if uid in uids:
+                bad.append(f"hub id: hubs {uids[uid]!r} and {inst.name!r} carry the same generated hub id {uid}; "
+                           "one is a copy of the other's database and must be recreated, not renamed")
+            uids.setdefault(uid, inst.name)
+
+    # credentials across running hubs
+    if probe:
+        running = []
+        for inst in insts:
+            cred = inst.operator_credential()
+            if cred and signed_get(inst.url, "/hub", *cred)[0] == 200:
+                running.append(inst)
+            else:
+                notes.append(f"hub {inst.name!r} is not running (or refused its own operator credential); "
+                             "cross-hub credential check skipped for it")
+        for a in running:
+            for b in running:
+                if a.name == b.name:
+                    continue
+                for actor, entry in a.keys().items():
+                    secret = secret_of(entry)
+                    if not secret:
+                        continue
+                    status, _ = signed_get(b.url, "/hub", actor, secret)
+                    if status == 200:
+                        bad.append(f"credential: {actor!r} from hub {a.name!r} was ACCEPTED by hub {b.name!r}")
+                    elif status not in (401, 403):
+                        bad.append(f"credential: hub {b.name!r} answered {status} (not a refusal) to {actor!r} from {a.name!r}")
+    return bad, notes
+
+
+def _fingerprint(secret: str) -> str:
+    import hashlib
+    return hashlib.sha256(secret.encode()).hexdigest()[:12]
+
+
+def cmd_check_isolation(args) -> int:
+    root = resolve_root(args.root)
+    bad, notes = collect_violations(root)
+    for n in notes:
+        print(f"note: {n}")
+    if bad:
+        for v in bad:
+            print(f"VIOLATION: {v}", file=sys.stderr)
+        print(f"isolation FAILED: {len(bad)} violation(s) under {root}", file=sys.stderr)
+        return 1
+    print(f"isolation ok: {len(list_instances(root))} hub(s) under {root} share no port, database, key, secret, "
+          "data or log directory; modes are private; no credential crosses hubs")
+    return 0
+
+
+# --------------------------------------------------------------------------- backup
+
+def cmd_backup(args) -> int:
+    root = resolve_root(args.root)
+    inst = need_instance(root, args.name)
+    dest = Path(os.path.expanduser(args.dest)).absolute()
+    for other in list_instances(root):
+        if os.path.commonpath([os.path.realpath(dest), os.path.realpath(other.dir)]) == os.path.realpath(other.dir):
+            raise Fail(f"{dest} is inside hub {other.name!r}'s directory; a backup there is not a backup and breaks the wall")
+    if dest.exists() and any(dest.iterdir()):
+        raise Fail(f"{dest} exists and is not empty")
+    private_dir(dest, parents=True)
+    target = inst.db_target()
+    if inst.backend == "sqlite":
+        if not os.path.isfile(target) or os.path.getsize(target) == 0:
+            raise Fail(f"hub {args.name!r} has no database yet (never started)")
+        out_db = dest / "registry.sqlite3"
+        os.close(os.open(out_db, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        src = sqlite3.connect(f"file:{target}?mode=ro", uri=True, timeout=30)
+        dst = sqlite3.connect(out_db)
+        try:
+            src.backup(dst)          # the online backup API: consistent while the hub is writing
+        finally:
+            dst.close()
+            src.close()
+        check = sqlite3.connect(out_db)
+        try:
+            ok = check.execute("PRAGMA integrity_check").fetchone()[0]
+        finally:
+            check.close()
+        if ok != "ok":
+            raise Fail(f"the backup failed its integrity check: {ok}")
+    else:
+        pg_dump = shutil.which("pg_dump")
+        if not pg_dump:
+            raise Fail("pg_dump is not on PATH; a Postgres hub is backed up with pg_dump")
+        host, port, dbname, password = parse_pg(target)
+        user = urllib.parse.urlparse(target).username or ""
+        env = {**_agentco_env(), "PGPASSWORD": password}      # never in argv
+        cmd = [pg_dump, "-Fc", "-h", host, "-p", str(port), "-d", dbname, "-f", str(dest / "registry.pgdump")]
+        if user:
+            cmd += ["-U", urllib.parse.unquote(user)]
+        done = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        if done.returncode != 0:
+            raise Fail(f"pg_dump failed: {done.stderr.strip()[-300:]}")
+    write_private(dest / "keys.json", inst.keys_path.read_text(encoding="utf-8"))
+    write_private(dest / "hub.env", inst.env_path.read_text(encoding="utf-8"))
+    print(f"backed up hub {args.name!r} to {dest} (database, keys.json, hub.env; mode 0700/0600)")
+    print("this holds the hub's credentials: store it as privately as the hub itself, and never alongside another hub's")
+    return 0
+
+
+# --------------------------------------------------------------------------- CLI
+
+def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root", help=f"instances root (default ${ROOT_ENV}, then {DEFAULT_ROOT})")
+    parser = argparse.ArgumentParser(prog="hubctl", description=(__doc__ or "").split("\n\n")[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("init", parents=[common], help="create an instance")
+    p.add_argument("name")
+    p.add_argument("--port", type=int, required=True)
+    p.add_argument("--backend", choices=("sqlite", "postgres"), default="sqlite")
+    p.add_argument("--pg-dsn", help="postgresql:// DSN of this hub's own database (postgres backend)")
+    p.add_argument("--bind", default="127.0.0.1", help="address to bind (default loopback)")
+    p.add_argument("--expose-network", action="store_true", help="required to bind a non-loopback address")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("add-actor", parents=[common], help="mint an actor credential for one hub")
+    p.add_argument("name")
+    p.add_argument("actor")
+    p.add_argument("--verifier", action="store_true", help="declare in ASOP_VERIFIERS")
+    p.add_argument("--human", action="store_true", help="declare in ASOP_HUMANS")
+    p.set_defaults(func=cmd_add_actor)
+
+    p = sub.add_parser("service", parents=[common], help="print, install or uninstall a per-instance service")
+    p.add_argument("name")
+    grp = p.add_mutually_exclusive_group()
+    grp.add_argument("--print", dest="action", action="store_const", const="print")
+    grp.add_argument("--install", dest="action", action="store_const", const="install")
+    grp.add_argument("--uninstall", dest="action", action="store_const", const="uninstall")
+    p.add_argument("--platform", choices=("launchd", "systemd"), help="default: detect")
+    p.add_argument("--unit-dir", help="write/remove the definition here instead of the user service directory "
+                                      "(and do not touch the service manager)")
+    p.set_defaults(func=cmd_service, action="print")
+
+    p = sub.add_parser("status", parents=[common], help="state of one or all instances")
+    p.add_argument("name", nargs="?")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--conform", metavar="LEVEL", nargs="?", const="L1",
+                   help="also run `agentco conform --level LEVEL` (needs the dev extra); default level L1")
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("check-isolation", parents=[common], help="verify the walls between all instances")
+    p.set_defaults(func=cmd_check_isolation)
+
+    p = sub.add_parser("backup", parents=[common], help="consistent copy of one hub's database and keys")
+    p.add_argument("name")
+    p.add_argument("dest")
+    p.set_defaults(func=cmd_backup)
+
+    p = sub.add_parser("run", parents=[common], help="run one hub in the foreground (what the service executes)")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_run)
+    return parser
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except Fail as exc:
+        print(f"hubctl: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

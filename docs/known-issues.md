@@ -91,6 +91,19 @@ been left pinning the wire form after A15 was settled on the decoded form. It
 now drives the shipped `Registry` client into the app with a `%20` path and
 pins that agreement.
 
+## Gate 2 (2026-11-13): what building the loop found
+
+Building the first end-to-end loop ([ADR 0011](decisions/0011-v1-definition.md) gate 2,
+`tests/test_gate2_loop.py`, `tests/network/test_rig_signed_answer.py`) found no defect in the
+company hub's answer path: every refusal case behaved as [`envelope.md`](envelope.md) says. It
+found one gap and two residues, recorded here.
+
+| # | Finding | Status |
+|---|---|---|
+| **G2-1** | The person's side did not exist as code. The hub half (`POST /answers`, key enrolment, the partition credential's routes) was built and tested in one process, but nothing pulled the vehicles, signed an envelope with a person's own key and carried it, so the loop had never run between two processes. | **Fixed 2026-11-13.** `agentco/partition.py` and `agentco partition keygen\|pin\|pending\|answer\|receipt\|sent`. It composes the routes and envelope the hub already defines; no new wire. |
+| **G2-2** | A transport credential cannot read `GET /runs/{id}` (ADR 0008 §8 B2 lists its routes exactly), so the partition cannot read a run step's ownership epoch before signing. It signs epoch 0, which is right for a run never transferred. | **Accepted residue.** After a transfer, the first answer is refused `not_the_owner` and the refusal states the current epoch; the person re-answers with `--epoch N`. Pinned by `test_an_envelope_for_the_wrong_attempt_epoch_or_item_is_refused_and_recorded`. Adding a run read to the credential's routes would widen B2, so it is the owner's call. |
+| **G2-3** | A refusal before the nonce row (`signature_invalid`, `key_unknown`, `key_revoked`, `envelope_wrong_hub`, `transport_party_mismatch`) leaves no nonce row and so no receipt; the only record is the hub's `calls` row (verb, carrier, status, code). | **Accepted residue**, consistent with `envelope.md` ("each check refuses before anything is written"). Pinned by `test_every_refusal_above_is_on_the_company_hubs_own_record`. Refusals after the nonce row (`stale`, `not_the_owner`, `unknown_item`, `not_terminal`) are also on the receipt. |
+
 ## Removed: claim 1 (redirect downgraded HEAD to GET)
 
 Fixed, and it had been fixed for a while — `_KeepMethodOnRedirect`

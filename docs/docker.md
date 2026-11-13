@@ -153,10 +153,10 @@ Take that with the container **stopped**. SQLite in WAL mode keeps recent
 commits in `-wal` until a checkpoint, and copying the three files while a writer
 is live can capture a torn set.
 
-There is no schema migration path yet: `db.SCHEMA_VERSION` is written into the
-`meta` table on creation and never checked on open, so an older image opening a
-newer file will not tell you. Until that exists, upgrading means keeping the
-backup above.
+Schema changes are numbered migrations applied automatically on start and recorded in
+`schema_migrations`; [`upgrading.md`](upgrading.md) lists every one, what it changes and how to
+roll back. A build does not refuse to open a file migrated by a newer one, so the backup above is
+the way back, not the older image.
 
 **Upgrading past the verifier fail-closed change (known-issues Finding 4).** A
 judged or human gate's verdict is now accepted only from an identity the

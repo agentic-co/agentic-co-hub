@@ -53,6 +53,9 @@ ACTORS = {
         "rt-agent": None,                   # speaks for the external store runtime-a
         "relay": None,                      # the partition transport: class transport, acts for dana (EXTRA)
         "scribe": None,                     # a plain routes allowlist: ROUTES["hub-a"]["scribe"] only
+        "courier": None,                    # executes the gated item in the signed-answer proof
+        "fran": None,                       # the person who answers it: a declared human with her own signing key
+        "relay-fran": None,                 # fran's partition transport: class transport, acts for fran (EXTRA)
     },
     "hub-b": {"worker-b": None},
     "hub-c": {"worker-c": None},
@@ -66,7 +69,8 @@ ROUTES = {"hub-a": {"scribe": ["attest", "events"]}}
 
 #: Extra object-form fields per actor. `relay` is a partition transport
 #: credential (ADR 0008 §8 B1/B2): it acts for `dana`, a declared human on hub-a.
-EXTRA = {"hub-a": {"relay": {"owner": "dana", "class": "transport"}}}
+EXTRA = {"hub-a": {"relay": {"owner": "dana", "class": "transport"},
+                   "relay-fran": {"owner": "fran", "class": "transport"}}}
 
 
 class Rig:

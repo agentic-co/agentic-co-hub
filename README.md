@@ -165,14 +165,17 @@ versus planned, and [`docs/known-issues.md`](docs/known-issues.md) for what is b
 
 - **Python** 3.11, 3.12 and 3.13 (CI matrix).
 - **`asop-spec`**, the contract package: the pin is `>=0.4.0,<1`, the lock is 0.6.1, and CI runs the
-  suite against 0.4.0, 0.5.0, 0.6.0 and 0.6.1 (`.github/workflows/ci.yml`, job `contract`).
+  suite against 0.4.0, 0.4.1, 0.5.0, 0.6.0 and 0.6.1 (`.github/workflows/ci.yml`, job `contract`).
+  The supported range is stated once, in
+  [`docs/upgrading.md`](docs/upgrading.md#supported-asop-spec-range).
 - **Storage**: JSONL under an advisory lock (the default), SQLite (`AGENTCO_DB=<path>`) and Postgres
   (`AGENTCO_DB=postgresql://...`, the optional `postgres` extra). One conformance suite runs on all
   three; the Postgres run needs a database and is its own CI job.
 - **Experimental, outside the 1.0 promise:** shared memory (off unless `AGENTCO_MEMORY=on`) and
   everything under `/memory`.
-- **Built at the hub, not yet proven end to end:** people's signed answers to human gates
-  ([`docs/envelope.md`](docs/envelope.md)). No real signer has driven them yet.
+- **Built, proven automatically, not yet run across two machines:** people's signed answers to human
+  gates ([`docs/envelope.md`](docs/envelope.md)), with the person's side as `agentco partition`. Version 1
+  gate 2 stays open until [the runbook](docs/runbooks/first-signed-answer-loop.md) has been run on two hosts.
 - **Not built:** federation beyond one upstream digest, OIDC, a UI for views. See the roadmap.
 
 The project's own adoption gate is written down and deliberately hard to game: **two
@@ -247,6 +250,8 @@ docker compose up -d --build registry
 See [`docs/docker.md`](docs/docker.md) for what the image mounts and why, how to declare
 `ASOP_HUMANS` and `ASOP_VERIFIERS` for the container, the cadence job, and why the MCP surface is
 deliberately not containerised.
+
+Running several separate hubs (one per client, plus a personal one), walled from each other: [`docs/runbooks/run-several-hubs.md`](docs/runbooks/run-several-hubs.md).
 
 ### Publish something
 
@@ -378,6 +383,7 @@ agentco metrics        # weekly publishers, latency, conflict precision
 agentco gate1          # exit 0 iff the adoption gate is met (1 until two people have published for four weeks)
 agentco pulse          # the plane checks itself and every actor wired to it; dry run
 agentco pulse --apply --every 15m   # the scheduled form: sweeps, records, exit = worst class
+agentco partition pending          # a person's side: pull the gates assigned to you (also keygen, pin, answer, receipt)
 ```
 
 `pulse` is the heartbeat, inverted: the plane runs no cycles, so instead of proving
