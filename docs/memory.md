@@ -53,7 +53,7 @@ This hub's id is `AGENTCO_HUB_ID` (default `local`).
 
 | Route | Who |
 |---|---|
-| `POST /memory` `{label, layer, title, body, provenance, kind?, tags?, applies_to?}` | any actor cleared for the label |
+| `POST /memory` `{label, layer, title, body, provenance, kind?, tags?, applies_to?, idempotencyKey?}` (`idempotencyKey` arrives in 1.1) | any actor cleared for the label |
 | `GET /memory?layer=&kind=&retired=1` | returns only what the caller is cleared for |
 | `GET /memory/{id}`, `GET /memory/{id}/history` | same; an item you are not cleared for answers exactly like one that does not exist (`memory_unknown`, 404) |
 | `POST /memory/{id}/revise` `{fields…, expected_version?}` | cleared actor; authoritative items only (`replica_read_only` otherwise) |
@@ -190,7 +190,29 @@ its clearance (`{"kofi": {"secret": "...", "clearance": {"acme": "internal"}, "s
   turning spaces on changes no reader's view until an actor is given a space.
 - **Replicas** from another hub land at the root, because another hub's paths mean nothing here.
 
+## Built: the outbox verb `memory_create` (arrives in 1.1)
+
+This verb is planned for hub 1.1 and is not part of 1.0.
+
+A harness with no AgentCo configuration can push a memory item by appending a `memory_create`
+line to its outbox ([`outbox.md`](outbox.md#memory_create)). The payload is the `POST /memory`
+body, the drainer's signature is the author, and the hub applies the same label, clearance and
+`memory_disabled` rules it applies over HTTP. The optional `idempotencyKey` on `POST /memory` (the outbox sends its line id, so a replayed line writes one item) also arrives in 1.1.
+
+This writes an item **directly, at a label the signing credential is cleared for**. The review
+pipeline of ADR 0006 section 3 (blind validator, aggregate check, batch approval) is still not
+built, so nothing holds an item for review: whoever holds a credential cleared for a label can
+put an item at it, through the outbox exactly as through HTTP.
+
+**One intake.** The planned review step for memory intake (ADR 0006 section 3, roadmap "Version 1.1") is one intake on the hub that covers both entry paths, the HTTP route and this verb, because the drainer publishes through the same signed route. The drainer publishes through the same signed `POST /memory` route, and the hub
+has no separate code path for the outbox verb: it writes memory only through what `POST /memory`
+goes through. The planned review step for memory intake (ADR 0006 section 3) therefore has two
+entry paths to cover, the HTTP route and the outbox verb, and covers both by sitting on that one
+intake. Nothing on the hub side may write memory for the outbox verb around it.
+
 ## Not built yet
+
+The review pipeline of ADR 0006 section 3 (blind validator, aggregate check, batch approval);
 
 Admission by surprise (a capture-time novelty check);
 the residuals pipeline (M4), planned for 1.1 as one intake that covers both the HTTP route and the

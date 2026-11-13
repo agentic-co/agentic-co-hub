@@ -37,8 +37,8 @@ silently dropped stops pushing and is right to.
 removed from the outbox only after they have a terminal receipt. A drainer that
 dies between publishing and truncating will publish those lines again on the
 next run, and every verb the hub could otherwise act on twice (`claim_scope`,
-`snapshot`, `work_report`, `attest`, `adjudicate`, `sop_revise`, `sop_activate`)
-carries the line id as its idempotency key, so the hub returns the recorded
+`snapshot`, `work_report`, `attest`, `adjudicate`, `sop_revise`, `sop_activate`,
+`memory_create`) carries the line id as its idempotency key, so the hub returns the recorded
 outcome and the retry is free (`release_scope` is idempotent by state). The alternative ordering — truncate first, then publish — loses the write
 outright on the same crash. A silently dropped claim is the failure the registry
 exists to prevent, and a duplicate one is visible and harmless.
@@ -47,7 +47,9 @@ exists to prevent, and a duplicate one is visible and harmless.
 was never about the verb: a push set naming something the drainer cannot deliver
 is a queue that fills with lines nobody can send, so a verb waits for its
 transport and is refused with "not yet" until then. `sop_revise` and
-`sop_activate` waited there too, and landed with Phase 4.
+`sop_activate` waited there too, and landed with Phase 4. `memory_create` is the
+one verb whose far end is optional: a hub without `AGENTCO_MEMORY=on` answers it
+`memory_disabled`, which settles the line as a refusal like any other.
 """
 
 from __future__ import annotations
@@ -102,6 +104,15 @@ PUSH_VERBS: tuple[str, ...] = (
     # nothing here activates unless a line says so and the policy agrees.
     "sop_revise",
     "sop_activate",
+    # A memory item learned on an unconfigured harness. It is the `memory_create`
+    # operation of `POST /memory`, verbatim, and carries no new trust: the hub
+    # applies the same label, clearance and `memory_disabled` rules it applies
+    # over HTTP, the drainer's signature is the author, and `provenance` is
+    # required here as there. It writes the item directly at a label the
+    # signing credential is cleared for; nothing holds it for review (the
+    # ADR 0006 section 3 pipeline is not built). Not filing: it adds to shared
+    # knowledge, it puts nothing in anybody's queue.
+    "memory_create",
 )
 
 # Reserved for the push set, blocked on their transport rather than on a
@@ -112,6 +123,19 @@ PUSH_VERBS: tuple[str, ...] = (
 PENDING_VERBS: tuple[str, ...] = ()
 
 LINE_FIELDS = ("line_id", "at", "verb", "payload", "agent_label")
+
+# The body of `POST /memory`, exactly (`ROUTE_BODIES` in `agentco/app.py`, minus
+# the idempotency key the drainer adds from the line id). Strict on purpose: the
+# drainer forwards named fields only, so a key outside this set would be dropped
+# on the way and the sender would believe it sent it. A test pins this set to
+# the route's own.
+MEMORY_CREATE_KEYS: tuple[str, ...] = (
+    "label", "layer", "space", "title", "body", "kind", "tags", "applies_to", "provenance",
+)
+
+# Who wrote an item is the signature, never the payload. `actor` is refused for
+# every verb; these are the other spellings an item record has for an author.
+MEMORY_IDENTITY_KEYS: tuple[str, ...] = ("author", "author_kind", "created_by", "updated_by")
 
 # Bounded on purpose. Receipts are read by a human through the tier-1 splice and
 # by nothing else; an unbounded log of them is a file that grows forever to be
@@ -222,6 +246,9 @@ def validate_line(record: Any) -> dict:
             ),
         )
 
+    if verb == "memory_create":
+        _validate_memory_create(payload)
+
     line_id = record.get("line_id")
     if not isinstance(line_id, str) or not line_id.strip():
         raise Refusal(
@@ -256,6 +283,38 @@ def validate_line(record: Any) -> dict:
         "payload": payload,
         "agent_label": label.strip() if isinstance(label, str) and label.strip() else None,
     }
+
+
+def _validate_memory_create(payload: dict) -> None:
+    """The checks that belong to the outbox. Everything else (labels, clearance,
+    layers, the shape of `provenance`) is the hub's to decide, and decides."""
+    named = sorted(set(MEMORY_IDENTITY_KEYS) & set(payload))
+    if named:
+        raise Refusal(
+            code=OUTBOX_REFUSED,
+            message=f"payload names who wrote the item: {named}",
+            remediation=(
+                "Remove it. The drainer signs with the machine credential and the "
+                "signature is the author; `agent_label` carries a self-reported name, "
+                "rendered as unverified."
+            ),
+        )
+    unknown = sorted(set(payload) - set(MEMORY_CREATE_KEYS))
+    if unknown:
+        raise Refusal(
+            code=OUTBOX_REFUSED,
+            message=f"memory_create payload has unknown key(s) {unknown}",
+            remediation=f"The payload is the body of `POST /memory`: {list(MEMORY_CREATE_KEYS)}.",
+        )
+    if not isinstance(payload.get("provenance"), dict):
+        raise Refusal(
+            code=OUTBOX_REFUSED,
+            message="memory_create requires `provenance`, an object {kind, ref}",
+            remediation=(
+                "Say where the item came from, e.g. {\"kind\": \"run\", \"ref\": \"run:<id>\"}. "
+                "An item with no recorded origin is not written."
+            ),
+        )
 
 
 def _why_unsendable(raw: bytes) -> str:
@@ -649,6 +708,12 @@ def registry_publisher(registry) -> Callable[[dict], dict]:
             return registry.sop_revise(payload["sopId"], idempotency_key=record["line_id"], **body)
         if verb == "sop_activate":
             return registry.sop_activate(payload["sopId"], payload["version"], idempotency_key=record["line_id"])
+        if verb == "memory_create":
+            return registry.memory_create(
+                agent_label=label,
+                idempotency_key=record["line_id"],
+                **{k: payload[k] for k in MEMORY_CREATE_KEYS if k in payload},
+            )
         if verb == "work_report":
             return registry.work_report(
                 payload["itemId"],
@@ -794,6 +859,12 @@ def _thin(result: Any) -> Any:
     # The same lift for a procedure: a `sop_revise` line whose receipt did not
     # say which version it drafted left the publisher unable to activate it —
     # found by the conformance suite the day the verb joined the push set.
+    # A memory item names itself `item_id`; the receipt carries it and the
+    # version so the writer can point at what it wrote.
+    if isinstance(item, dict) and "item_id" in item:
+        for field in ("item_id", "version"):
+            if item.get(field) is not None:
+                thinned.setdefault(field, item[field])
     sop = result.get("sop")
     if isinstance(sop, dict):
         for field in ("sop_id", "version", "status"):

@@ -37,7 +37,9 @@ def test_every_transport_carries_something_in_the_scenarios_that_concern_it():
             for outcome in run_scenario(name, transport)["outcomes"]:
                 if outcome["via"] == transport:
                     exercised[transport].add(outcome["step"].split(" ", 1)[1])
-    assert exercised["outbox"] == set(PUSH_VERBS), exercised["outbox"] ^ set(PUSH_VERBS)
+    # CARRIES is PUSH_VERBS less the pinned carve-out (see
+    # `test_the_conformance_carve_out_is_exactly_memory_create`).
+    assert exercised["outbox"] == set(CARRIES["outbox"]), exercised["outbox"] ^ set(CARRIES["outbox"])
     assert exercised["mcp"] == set(CARRIES["mcp"]), exercised["mcp"] ^ set(CARRIES["mcp"])
     assert exercised["mcp-remote"] == set(CARRIES["mcp-remote"])
     assert exercised["http"] == set(CARRIES["http"]), exercised["http"] ^ set(CARRIES["http"])
