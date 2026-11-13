@@ -736,11 +736,6 @@ def test_a_conflict_from_an_unverified_holder_claim_is_distinguishable(client):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the bad-signature branch appends the signing-string spec to its "
-    "remediation, so the two refusals differ in a field to_dict() ships to the client",
-)
 def test_an_unknown_actor_and_a_bad_signature_are_indistinguishable_refusals():
     """The two refusals differ in `remediation`, which makes the endpoint an identity oracle.
 
@@ -790,6 +785,30 @@ def test_an_unknown_actor_and_a_bad_signature_are_indistinguishable_refusals():
     assert unknown_actor == wrong_secret, (
         "the refusals are distinguishable, so actor existence is a one-request oracle"
     )
+
+
+def test_an_unknown_actor_costs_the_same_hmac_work_as_a_bad_signature(monkeypatch):
+    """The timing half of the oracle, asserted as work done rather than as a stopwatch.
+
+    A wall-clock comparison is flaky; counting `compare_digest` calls is not. An
+    unknown actor must reach the same comparison a known actor with a wrong
+    signature reaches, so the refusal costs the same on both paths.
+    """
+    calls = []
+    real = auth.hmac.compare_digest
+    monkeypatch.setattr(auth.hmac, "compare_digest", lambda a, b: calls.append(1) or real(a, b))
+    ts = str(int(time.time()))
+
+    def attempt(actor: str) -> int:
+        calls.clear()
+        with pytest.raises(Unauthenticated):
+            auth.authenticate(
+                {"x-agentco-actor": actor, "x-agentco-timestamp": ts, "x-agentco-signature": "00" * 32},
+                "POST", "/scope-claims", b"{}", keys=KEYS,
+            )
+        return len(calls)
+
+    assert attempt("nobody-is-registered-here") == attempt("dana") >= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -1031,11 +1050,6 @@ def assert_unrelated_scopes_stay_disjoint() -> None:
     ), "different repos now collide"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="scopes_intersect compares repo with a plain !=, so one changed letter "
-    "makes a lease invisible to every other claim in the registry",
-)
 def test_two_spellings_of_one_repo_name_do_not_hide_a_lease():
     """One capital letter in the repo name hides a lease from the ENTIRE registry.
 
@@ -1068,11 +1082,6 @@ def test_two_spellings_of_one_repo_name_do_not_hide_a_lease():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="normalize_prefix does not fold case, so two spellings of one directory "
-    "on a case-insensitive filesystem produce two non-intersecting claims",
-)
 def test_two_spellings_of_one_directory_do_not_hide_a_claim():
     """`src/Budget` and `src/budget` are the same directory and do not intersect.
 
@@ -1106,11 +1115,6 @@ def test_two_spellings_of_one_directory_do_not_hide_a_claim():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="str.strip() removes NBSP but not U+200B or U+FEFF, so a zero-width "
-    "character survives normalisation and creates a visually identical disjoint claim",
-)
 def test_an_invisible_character_cannot_make_a_claim_disjoint():
     """A zero-width space makes a claim that LOOKS identical intersect nothing.
 
@@ -1150,11 +1154,6 @@ def test_an_invisible_character_cannot_make_a_claim_disjoint():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="normalize_prefix does not apply a Unicode normalisation form, so NFC and "
-    "NFD spellings of one path are two distinct segment tuples",
-)
 def test_the_same_path_intersects_regardless_of_unicode_normalisation_form():
     """The same directory name from two machines does not intersect itself.
 
@@ -1188,11 +1187,6 @@ def test_the_same_path_intersects_regardless_of_unicode_normalisation_form():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a trailing dot survives normalize_prefix, but Windows strips it, so the "
-    "two spellings address one directory and produce two disjoint claims",
-)
 def test_a_trailing_dot_does_not_make_a_claim_disjoint():
     """`src/budget.` and `src/budget` are one directory on Windows and do not intersect.
 
@@ -1228,11 +1222,6 @@ def test_a_trailing_dot_does_not_make_a_claim_disjoint():
     assert_unrelated_scopes_stay_disjoint()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="only Scope.parse validates; the dataclass constructor accepts anything, "
-    "and the docstring claims it is validated on construction",
-)
 def test_constructing_a_scope_directly_validates_it():
     """`Scope`'s docstring claims validation it does not perform.
 
@@ -1787,12 +1776,9 @@ def test_both_signing_implementations_agree_on_every_edge():
     path (the signing string is newline-delimited, so an embedded newline is the
     one input that could make two components ambiguous).
 
-    RELATED, and deliberately not asserted here: A15. The server signs
-    `request.url.path`, which Starlette percent-DECODES, while the client signs
-    the path as written. Both implementations agree with each other on the
-    percent-encoded case below — they are the same three lines — so this test
-    cannot see that problem. It is a client/server disagreement, not a
-    copy/copy one, and it needs its own test rather than being smuggled in here.
+    RELATED: A15 (decoded-path agreement between the shipped client and the
+    server) is a client/server property, not a copy/copy one, and is pinned by
+    `test_a_path_needing_percent_encoding_still_authenticates`.
 
     Why the existing tests miss it: `test_the_three_endpoints_work_end_to_end`
     and every other HTTP test call `auth.sign` to build their headers. Nothing
@@ -1880,94 +1866,77 @@ def send_signed(client, method: str, send_path: str, signed_path: str, body: dic
     return client.post(send_path + query, content=raw, headers=headers)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the ASGI server percent-decodes into scope['path'] and app.py signs "
-    "request.url.path, while the client can only sign the path it put on the wire",
-)
-def test_a_path_needing_percent_encoding_still_authenticates(client):
-    """A correctly-encoded request gets a 401, and nothing in the error mentions paths.
+def test_a_path_needing_percent_encoding_still_authenticates(client, monkeypatch):
+    """Client and server sign the same string for a path that needs escaping (A15).
 
-    `app.py:94` signs `request.url.path`. That reads `scope["path"]`, which the
-    ASGI server has already percent-DECODED. The client signs the path it wrote
-    on the wire, which is the encoded form. Measured directly:
+    The decision (known issue A15, settled 2026-09-22): BOTH ends sign the
+    DECODED path, and the bad-signature remediation says so. The server cannot
+    reliably recover the wire form (ASGI's `raw_path` is optional and proxies
+    rewrite it); decoding is deterministic on both sides.
 
-        wire path sent          /scope-claims/lease%20abc/release
-        scope['raw_path']       b'/scope-claims/lease%20abc/release'
-        scope['path']           '/scope-claims/lease abc/release'   <- signed by the server
-        request.url.path        '/scope-claims/lease abc/release'
-
-    So the two sides sign different strings for the same request and the
-    signature cannot match. Confirmed end to end: that path returns 401
-    `unauthenticated`, while `/scope-claims/lease_plain/release` reaches the
-    handler and returns 404 `no_such_lease`.
-
-    The failure mode is the reason this is worth a test rather than a note. It
-    surfaces as an authentication error — "actor or signature rejected", with a
-    remediation about checking the shared secret — on a request whose actor and
-    secret are both perfectly correct. The one thing it never mentions is the
-    path. A colleague hitting this checks their key, re-copies it, checks it
-    again, and concludes the registry is broken; `errors.py` exists to prevent
-    exactly that experience, and here the remediation actively misdirects.
-
-    ON WHICH SIDE IS AUTHORITATIVE — this pins the WIRE form, and the codebase
-    already picked it. `auth.py:189`, in the remediation returned on a bad
-    signature, tells the caller the signed string uses "the path exactly as
-    sent, query string excluded". The server instructs clients to sign the wire
-    form and then verifies against the decoded one. That is not a preference to
-    be argued; it is the module contradicting itself in the same file, and the
-    error message a confused caller reads is the half that is right.
-
-    Two further reasons a disjunction is not available here. "Server signs the
-    decoded path" is already true today, so an assertion accepting it would pass
-    against the current broken code. And the asymmetry is real: a client can
-    only know what it sent, whereas the server can always recover it —
-    `scope['raw_path']` preserves the wire bytes and is right there, so the fix
-    needs no client change at all.
-
-    If the project chooses the decoded form anyway, then `auth.py:189` and
-    `publish.py` both have to change too, and this test changes with them — it
-    encodes "client and server agree", and the client is the shipped one.
-
-    A related shape not asserted here: `/scope-claims/lease%2Fabc/release`
-    returns a bare 404 with no `code` and no `remediation`, because `%2F`
-    decodes to `/`, the route no longer matches, and FastAPI's own 404 answers
-    instead of a `Refusal`. That is a router-level gap rather than a signing
-    one.
-
-    Why the existing tests miss it: `test_the_three_endpoints_work_end_to_end`
-    and every other HTTP test use paths that are byte-identical encoded and
-    decoded — `/scope-claims`, `/events`, `/snapshots` and a `lease_<hex>` uid.
-    Encoded and decoded forms only diverge for a path containing a character
-    that needs escaping, and no fixture in the suite has one.
+    So this drives the SHIPPED client (`publish.Registry`) into the real app for
+    `/scope-claims/lease%20abc/release`, and pins three things: the client's
+    signature is over the decoded path and not the wire form, the request
+    authenticates (a 404 `no_such_lease` from the handler, not a 401), and a
+    signature over a different path is still refused. If either end switched to
+    the other form this fails — the 401 is what that looks like to a caller.
     """
-    encoded_path = "/scope-claims/lease%20abc/release"
+    import io
+    import urllib.error
 
-    response = send_signed(
-        client, "POST", encoded_path, encoded_path, {"action": "released"}
-    )
+    wire_path = "/scope-claims/lease%20abc/release"
+    decoded_path = "/scope-claims/lease abc/release"
+    seen: dict = {}
 
-    assert response.status_code != 401, (
-        "a client that correctly percent-encodes its path cannot authenticate: "
-        f"{response.json()}"
-    )
+    class _Response:
+        def __init__(self, resp):
+            self.status = resp.status_code
+            self._content = resp.content
 
-    # Paths needing no encoding must keep working, and a genuinely tampered path
-    # must keep being rejected — the fix is not "stop signing the path".
-    plain = send_signed(
-        client,
-        "POST",
-        "/scope-claims/lease_plain/release",
-        "/scope-claims/lease_plain/release",
-        {"action": "released"},
-    )
-    assert plain.json()["code"] == "no_such_lease", "auth must still pass for a plain path"
+        def read(self):
+            return self._content
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def forward(request, timeout=None):
+        headers = {k.lower(): v for k, v in request.header_items()}
+        seen["signature"] = headers["x-agentco-signature"]
+        seen["timestamp"] = headers["x-agentco-timestamp"]
+        seen["body"] = request.data or b""
+        target = request.full_url
+        resp = client.request(
+            request.get_method(),
+            target[target.index("/scope-claims"):],
+            content=request.data,
+            headers=headers,
+        )
+        if resp.status_code >= 400:
+            raise urllib.error.HTTPError(target, resp.status_code, "error", None, io.BytesIO(resp.content))
+        return _Response(resp)
+
+    monkeypatch.setattr(publish.urllib.request, "urlopen", forward)
+    registry = publish.Registry("dana", KEYS["dana"], base_url="http://testserver")
+
+    with pytest.raises(publish.RegistryError) as exc:
+        registry._call("POST", wire_path, {"action": "released"})
+    assert exc.value.status != 401, f"a correctly encoded path cannot authenticate: {exc.value.payload}"
+    assert exc.value.payload["code"] == "no_such_lease", "auth passed; the handler answered"
+
+    # The client signed the DECODED form — and only that form.
+    body, ts = seen["body"], seen["timestamp"]
+    assert seen["signature"] == auth.sign(KEYS["dana"], "POST", decoded_path, ts, body)
+    assert seen["signature"] != auth.sign(KEYS["dana"], "POST", wire_path, ts, body)
+
+    # The server's own account of the rule says the same thing to a confused caller.
+    assert "DECODED" in auth._REJECTED_REMEDIATION
+
+    # A signature is still bound to its path.
     tampered = send_signed(
-        client,
-        "POST",
-        "/scope-claims/lease_bbb/release",
-        "/scope-claims/lease_aaa/release",
+        client, "POST", "/scope-claims/lease_bbb/release", "/scope-claims/lease_aaa/release",
         {"action": "released"},
     )
     assert tampered.status_code == 401, "a signature must still be bound to its path"
@@ -2265,11 +2234,6 @@ def test_a_row_this_version_cannot_model_never_escapes_as_a_raw_exception(
         fresh.claim("w-newer", "worker-a")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="done_ids comes from _read_all(), which drops unmodellable rows, so a "
-    "finished blocker this reader cannot model never counts as done",
-)
 def test_a_finished_blocker_releases_its_dependents_whatever_else_its_row_contains(queue):
     """Two of today's fixes compose into a defect neither has alone.
 
@@ -2308,11 +2272,17 @@ def test_a_finished_blocker_releases_its_dependents_whatever_else_its_row_contai
     rows = [json.loads(line) for line in queue.path.read_text(encoding="utf-8").splitlines()]
     for row in rows:
         if row["id"] == blocker.id:
-            # Still recorded as done; a field this reader cannot model was added.
-            row["lifecycle_state"] = "archived-by-a-newer-writer"
-            row["status"] = "archived"
+            # Still recorded as DONE, but a field this reader cannot model is
+            # gone (a newer writer renamed it). The status must stay "done":
+            # rewriting it to a value this version does not know would not be a
+            # finished blocker any more, and releasing on an unknown status
+            # would be fail-open.
+            del row["title"]
     queue.path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
 
+    assert dependent.id in [i.id for i in queue.ready()], (
+        "ready() hides a dependent whose blocker is finished"
+    )
     taken = queue.claim(dependent.id, "worker-b")
     assert taken is not None, "a dependent was stranded by a blocker that is finished"
 
@@ -2388,11 +2358,6 @@ def test_truncate_never_returns_more_than_the_budget_it_was_given():
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_read_all re-serialises an unmodellable row with json.dumps instead of "
-    "keeping the bytes that were read",
-)
 def test_a_quarantined_row_is_preserved_as_the_bytes_that_were_read(queue):
     """Two docstrings promise verbatim bytes; one code path re-encodes them.
 

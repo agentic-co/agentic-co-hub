@@ -405,6 +405,12 @@ class SqlQueue(_SqlBacked, Queue):
             rows = conn.execute(f"SELECT * FROM work_items ORDER BY {order_col}").fetchall()
         return [_row_to_dict(r) for r in rows], []
 
+    def _scan(self):
+        # No line of bytes exists to preserve here (see `__init__`): pair each
+        # row with None so `Queue._read_all` quarantines nothing for it.
+        rows, quarantined = self._read_raw()
+        return [(row, None) for row in rows], quarantined
+
     # -- creation --------------------------------------------------------
 
     def create(

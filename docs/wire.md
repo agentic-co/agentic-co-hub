@@ -124,6 +124,32 @@ not a filter. Additive: a client that ignores unknown keys is unaffected. On a `
 event the key is spread from the same record, so there `holderAttested` qualifies `withHolder`
 (the claimant's own flag is on its `ScopeClaimed` event).
 
+## Scope claims: what counts as the same place
+
+`POST /scope-claims` takes `repo` and `prefixes`. Two claims intersect when they name one repository
+and overlapping directories, judged as the forges and checkouts judge them, not byte for byte.
+
+- **Repo.** Compared NFC-normalised and case-folded: `Acme/Web-Platform` and `acme/web-platform` are
+  one repository (GitHub and Azure DevOps agree). Surrounding whitespace is trimmed.
+- **Prefixes.** Each path segment is compared NFC-normalised and case-folded, with trailing dots
+  and spaces dropped (Windows ignores them). `src/Budget`, `src/budget`, `src/budget.` and the NFD
+  spelling of `src/café` are one directory. A dot inside a name is kept: `src/v1.2` is not `src/v1`.
+  Case is folded even though git paths are case-sensitive: a false conflict on a case-sensitive
+  checkout costs a conversation, a missed one costs lost work. Overlap is still segment-wise, so
+  `src/budget` and `src/budgeting` stay disjoint.
+- **Refused, not repaired.** A `repo` or prefix containing an invisible character (zero-width
+  space/joiner, byte-order mark, bidi marks, soft hyphen, C1 controls, line/paragraph separators) is
+  refused with `control_character`; a prefix segment made only of dots or spaces is refused with
+  `bad_path_segment`. Nothing is silently stripped.
+- **Echo.** The response, the events and the conflict records carry the spelling the claimant sent
+  (after the existing slash and dot-segment cleanup); the folded form is only used to compare, to
+  find stored leases, and to pick the per-repo claim lock. A prefix list is de-duplicated by the
+  folded form, first spelling kept. Wire shapes are unchanged.
+- **Leases already stored** were written verbatim and are matched at read time by the same rule, so
+  no migration is needed. A stored prefix that today's rules would refuse is still read and still
+  compared; it just cannot be created again.
+- `Scope(...)` applies the same validation as `Scope.parse(...)`.
+
 ## Ownership epochs
 
 `owner.epoch` on `GET /runs/{id}`, the `epoch` a transfer returns, the one a `not_the_owner`

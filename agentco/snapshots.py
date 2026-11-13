@@ -42,7 +42,10 @@ import sqlite3
 import ipaddress
 import os
 import socket
+import ssl
+import stat
 import subprocess
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,6 +54,7 @@ from urllib.parse import urlparse
 
 from agentco import events, idempotency
 from agentco.errors import Refusal
+from agentco.timeutil import iso_utc
 
 DEFAULT_TTL_DAYS = 90
 
@@ -65,7 +69,7 @@ class ResolverError(Exception):
 
 
 def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat()
+    return iso_utc(dt)
 
 
 def resolve_git(uri: str) -> tuple[str, str]:
@@ -111,19 +115,102 @@ def resolve_file(uri: str) -> tuple[str, str]:
     held whole in memory and never reaches the database.
     """
     path = Path(urlparse(uri).path)
-    if not path.exists():
-        # ResolverError for the same reason as git above: an absent file is a
-        # fact about the world, not a malformed request.
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        mode = None
+    if mode is None:
+        # ResolverError for the same reason as the revision resolver above: an
+        # absent file is a fact about the world, not a malformed request.
         raise ResolverError(
             f"no file at {path}. A file that exists only on one machine has no "
             f"stable pointer for anyone else, which is a documented limit rather "
             f"than a bug — snapshot the committed or published artifact instead."
+        )
+    if not stat.S_ISREG(mode):
+        # A directory cannot be opened for reading, and a FIFO or device blocks
+        # in open() or read() with no timeout. Neither has a content hash.
+        raise ResolverError(
+            f"{path} is not a regular file, so it has no content to hash. "
+            f"Snapshot a file, or the committed artifact the directory holds."
         )
     digest = hashlib.sha256()
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(65536), b""):
             digest.update(chunk)
     return "sha256", digest.hexdigest()
+
+
+def _vetted_connection(host: str, port: int, timeout, source_address) -> socket.socket:
+    """Resolve `host` once, vet every address, and connect to a vetted one.
+
+    This is the half of Finding 5 that checking a URL cannot give: admission
+    resolves a name, the HTTP stack resolves it AGAIN to connect, and DNS can
+    answer differently between the two (rebinding). Here the lookup that is
+    vetted is the lookup that is connected to: the socket opens on the literal
+    address from this one `getaddrinfo` call, never on the name. A host the
+    operator allowlisted skips the address check, exactly as in
+    `admission_reason`.
+    """
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    if host not in _declared(HTTP_HOSTS_ENV_VAR, ()):
+        for info in infos:
+            if _address_is_internal(str(info[4][0])):
+                raise ResolverError(
+                    f"{host} resolved to a loopback, link-local, private or "
+                    f"reserved address at connect time. Recorded, not followed."
+                )
+    last: Optional[OSError] = None
+    for family, socktype, proto, _canon, sockaddr in infos:
+        sock = socket.socket(family, socktype, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:  # type: ignore[attr-defined]
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as exc:
+            last = exc
+            sock.close()
+    raise last or OSError(f"no address for {host}")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def connect(self) -> None:
+        self.sock = _vetted_connection(
+            self.host, self.port, self.timeout, getattr(self, "source_address", None)
+        )
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self) -> None:
+        raw = _vetted_connection(
+            self.host, self.port, self.timeout, getattr(self, "source_address", None)
+        )
+        try:
+            raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        # server_hostname stays the NAME so SNI and certificate verification
+        # are unchanged; only where the TCP connection lands is pinned.
+        self.sock = ssl.create_default_context().wrap_socket(
+            raw, server_hostname=self.host
+        )
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req)
 
 
 def resolve_https(uri: str) -> tuple[str, str]:
@@ -135,31 +222,41 @@ def resolve_https(uri: str) -> tuple[str, str]:
     no `Last-Modified` cannot be tracked, and says so rather than inventing a
     hash from content it should not have fetched.
     """
-    import urllib.request
-
     class _KeepMethodOnRedirect(urllib.request.HTTPRedirectHandler):
-        """Preserve HEAD across a 3xx. urllib does not, before Python 3.13.
+        """Preserve HEAD across a 3xx, and re-run admission on the target.
 
         `HTTPRedirectHandler.redirect_request` rebuilds the request WITHOUT
         passing `method=`, so a redirected HEAD silently becomes a GET and the
         body transfers — defeating the entire reason this resolver uses HEAD.
         Redirects are the norm for the document stores this points at, so it was
-        the common path rather than an edge case.
+        the common path rather than an edge case. CPython fixed this in 3.13; it
+        is pinned here so the resolver does not depend on the interpreter.
 
-        CPython fixed this in 3.13, which is how it was found: the failing test
-        XPASSed on one row of the version matrix and not the others. A defect
-        that exists on two of three supported interpreters is still a defect, and
-        pinning the behaviour here means the resolver does not depend on which
-        interpreter it happens to run under.
+        Admission used to run once, on the URL the participant supplied, so a
+        public URL could 302 to a refused address and get the request made
+        (known-issues Finding 5). Every hop is now admitted before it is
+        followed; a refusal is a `ResolverError`, which `resolve` records as the
+        pointer's unresolved reason.
         """
 
         def redirect_request(self, req, fp, code, msg, headers, newurl):
+            refused = admission_reason(newurl)
+            if refused is not None:
+                raise ResolverError(f"redirected to {newurl}: {refused}")
             new = super().redirect_request(req, fp, code, msg, headers, newurl)
             if new is not None and req.get_method() == "HEAD":
                 new.get_method = lambda: "HEAD"  # noqa: E731
             return new
 
-    opener = urllib.request.build_opener(_KeepMethodOnRedirect)
+    # ProxyHandler({}) because an environment proxy would make the connection
+    # go to the proxy, and the check would vet the proxy rather than the
+    # destination — an SSRF guard that checks the wrong host is worse than none.
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _KeepMethodOnRedirect,
+        _PinnedHTTPHandler,
+        _PinnedHTTPSHandler,
+    )
     request = urllib.request.Request(uri, method="HEAD")
     with opener.open(request, timeout=15) as response:
         etag = response.headers.get("ETag")
@@ -256,16 +353,20 @@ def _host_is_internal(host: str) -> bool:
         infos = socket.getaddrinfo(host, None)
     except OSError:
         return True
-    for info in infos:
-        addr = str(info[4][0]).split("%")[0]
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            return True
-        if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved:
-            return True
-        if ip.version == 4 and any(ip in net for net in _PRIVATE_V4):
-            return True
+    return any(_address_is_internal(str(info[4][0])) for info in infos)
+
+
+def _address_is_internal(addr: str) -> bool:
+    """True if one resolved address is somewhere a participant should not reach."""
+    addr = addr.split("%")[0]
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return True
+    if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved:
+        return True
+    if ip.version == 4 and any(ip in net for net in _PRIVATE_V4):
+        return True
     return False
 
 

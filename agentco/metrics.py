@@ -65,6 +65,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Iterable, Mapping, Optional
 
 from agentco import auth
+from agentco.timeutil import iso_utc
 
 # The verbs that count as publishing. Closed, and deliberately excluding the
 # read verb — see definition (1) above.
@@ -340,7 +341,7 @@ def verb_latency(
     args: list = []
     if since is not None:
         sql += " WHERE at >= ?"
-        args.append(since.astimezone(timezone.utc).isoformat())
+        args.append(iso_utc(since))
     rows = conn.execute(sql, args).fetchall()
 
     grouped: dict[str, list[float]] = {}
@@ -380,7 +381,7 @@ def conflict_precision(
     args: list = []
     if since is not None:
         sql += " WHERE fired_at >= ?"
-        args.append(since.astimezone(timezone.utc).isoformat())
+        args.append(iso_utc(since))
     rows = conn.execute(sql, args).fetchall()
 
     fired = len(rows)
@@ -620,7 +621,7 @@ def roll_up_and_prune_calls(
     half-way and re-run does not double-count.
     """
     at = now or datetime.now(timezone.utc)
-    cutoff = before.astimezone(timezone.utc).isoformat()
+    cutoff = iso_utc(before)
     retained = ",".join("?" for _ in RETAINED_VERBS)
 
     with conn:
@@ -671,7 +672,7 @@ def roll_up_and_prune_calls(
         "summarisedRows": len(rows),
         "deleted": max(0, deleted),
         "retainedVerbs": list(RETAINED_VERBS),
-        "at": at.astimezone(timezone.utc).isoformat(),
+        "at": iso_utc(at),
     }
 
 
@@ -694,7 +695,7 @@ def record_call(
     metric row is a gap in a report; a failed publish is a lost colleague.
     """
     try:
-        stamp = (at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        stamp = iso_utc(at or datetime.now(timezone.utc))
         with conn:
             conn.execute(
                 "INSERT INTO calls(verb, actor, status, code, latency_ms, at, "

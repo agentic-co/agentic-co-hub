@@ -454,13 +454,13 @@ belonging to the one that did.
 
 ## Known issues
 
-Open defects live in [`docs/known-issues.md`](known-issues.md): ten strict-xfail
-tests still stand (the claim-3 scope-evasion routes among them), and three findings
-are recorded without a test yet (A13, A16, Finding 5). The 21 findings of the
-2026-11-07 review are fixed, with two residues recorded beside them. The six
-decisions of [ADR 0011](decisions/0011-v1-definition.md) closed 6a, the 6b default,
-Finding 4, the MCP refusal code and the MCP idempotency residue on 2026-11-09.
-None of them lose work or report a wrong result as a right one — those were fixed.
+[`docs/known-issues.md`](known-issues.md) holds no open defect as of 2026-11-09: no
+strict-xfail test stands and no finding is recorded without a test. The 21 findings of
+the 2026-11-07 review, the six decisions of [ADR 0011](decisions/0011-v1-definition.md),
+Finding 5 and the claim-3 scope-evasion routes are all fixed. One residue is accepted
+and recorded there: on the JSONL SOP store, `sop_revise`/`sop_activate` record their
+idempotency key just after the write. One question is open and is not a defect: whether
+a declared human who is not in `ASOP_VERIFIERS` may answer a judged gate.
 
 ## The adoption gate
 
