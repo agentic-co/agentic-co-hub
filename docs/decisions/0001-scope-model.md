@@ -1,6 +1,6 @@
 # 0001 — Scope is a prefix set at declared minimum depth
 
-**Status:** accepted · **Date:** 2026-08-28
+**Status:** ACCEPTED, BUILT (`agentco/scope.py`, `MIN_SEGMENTS = 2`) · **Date:** 2026-08-28
 
 > A decision with no revisit condition is doctrine. Every record here carries one.
 

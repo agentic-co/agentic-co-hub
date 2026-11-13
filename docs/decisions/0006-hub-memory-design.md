@@ -1,11 +1,16 @@
 # 0006 — Shared memory in the hub: owner-labeled layers, judged by use
 
-**Date:** 2026-10-16 · **Status:** accepted (owner, 2026-10-16); implementation
-planned · **Supersedes:** nothing; extends [`docs/decisions/asop.md`](asop.md)
+**Date:** 2026-10-16 · **Status:** ACCEPTED (owner, 2026-10-16); PARTLY BUILT, experimental in
+version 1 ([`0011`](0011-v1-definition.md)) · **Supersedes:** nothing; extends [`docs/decisions/asop.md`](asop.md)
 (proven lessons end up inside ASOPs) and relies on 0007 (the hub network
 record, proposed alongside this one) for the memory channel between hubs
 
 > A decision with no revisit condition is doctrine. Every record here carries one.
+
+> **Status note (2026-11-13):** built behind `AGENTCO_MEMORY=on`, off by default: the item store (M1), the wall
+> on every read path (M2), usefulness and decay (M3) and team spaces ([`0009`](0009-ontological-memory.md) §3).
+> Not built: the residuals pipeline (M4); MCP tools, CLI, capture and the lesson-to-ASOP hand-off (M5); the
+> memory channel between hubs. What is built is in [`../memory.md`](../memory.md).
 
 It fixes the shape the implementation has to take, and it says which parts of that
 shape are still guesses.

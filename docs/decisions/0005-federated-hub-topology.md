@@ -1,6 +1,6 @@
 # 0005 — Hubs can federate, and federation is optional
 
-**Status:** accepted · **Date:** 2026-09-19 (updated 2026-09-20 after independent
+**Status:** ACCEPTED, BUILT (push-only digest, one upstream; `tests/network/test_rig_federation.py`) · **Date:** 2026-09-19 (updated 2026-09-20 after independent
 cross-vendor review — GPT-5.4 via codex and Gemini 3.1 Pro via agy — found real
 defects in the first pass; see Consequences)
 

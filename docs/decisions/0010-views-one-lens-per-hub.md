@@ -1,6 +1,6 @@
 # 0010 — Views: one lens per hub, set by clearance, not by topology
 
-**Date:** 2026-10-29 · **Status:** proposed · **Supersedes:** nothing; builds on
+**Date:** 2026-10-29 · **Status:** PARTLY BUILT (step 1, `GET /views/me`); the rest PROPOSED · **Supersedes:** nothing; builds on
 [`0007-hub-network-graph-and-channels.md`](0007-hub-network-graph-and-channels.md) (channels,
 per-owner clearance) and
 [`0008-control-loop-personal-and-company-hubs.md`](0008-control-loop-personal-and-company-hubs.md)
