@@ -97,7 +97,7 @@ revision policy, unless the operator declared that machine human — and nothing
 activates unless a separate `sop_activate` line says so and the policy agrees.
 ### `memory_create`
 
-> Arrives in 1.1; it is not part of 1.0.
+> Arrives in 1.1, with the optional `idempotencyKey` on `POST /memory` it relies on; neither is part of 1.0.
 
 Writes one shared-memory item. It is the `memory_create` operation of `POST /memory`, verbatim:
 the payload **is** that route's body, camelCase and snake_case exactly as the wire has them, and
