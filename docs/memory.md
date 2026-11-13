@@ -11,8 +11,8 @@ The design is [ADR 0006](decisions/0006-hub-memory-design.md). This page states 
 
 Shared memory is **off** unless an operator sets `AGENTCO_MEMORY=on` (owner decision 2026-10-18):
 its slices land on main before the whole of ADR 0006 does, and a hub must not start holding and
-serving owner-labeled items because it was upgraded. Any value other than `on`/`off` (also `true`,
-`1`, `yes` / `false`, `0`, `no`, unset) refuses to start.
+serving owner-labeled items because it was upgraded. `on`, `true`, `1` and `yes` enable it; `off`, `false`, `0`, `no`, empty and unset leave it off. Any
+other value refuses to start.
 
 While **off**:
 

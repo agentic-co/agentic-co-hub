@@ -1,6 +1,6 @@
 # 0003 — The plane adopts ASOP v3
 
-**Date:** 2026-09-04 · **Status:** adopted · **Supersedes:** nothing; extends
+**Date:** 2026-09-04 · **Status:** ACCEPTED, BUILT (`asop-spec>=0.4.0,<1`, CI-tested at 0.4.0 to 0.6.1) · **Supersedes:** nothing; extends
 [`docs/decisions/asop.md`](asop.md) (the term definition)
 
 ## Context

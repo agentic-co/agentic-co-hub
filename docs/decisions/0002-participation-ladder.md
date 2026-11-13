@@ -1,6 +1,9 @@
 # 0002 — Participation is a ladder, and the filesystem is its floor
 
-**Status:** accepted · **Date:** 2026-08-31
+**Status:** ACCEPTED, BUILT (L0 splice, L1 outbox, L2 MCP/HTTP, L3 verifier routing) · **Date:** 2026-08-31
+
+> **Status note:** the tool ceiling of twelve in the last paragraph of the decision is superseded by
+> [`0004`](0004-mcp-surface-under-asop-v3.md) and [`0011`](0011-v1-definition.md): the ceiling is now fourteen.
 
 > A decision with no revisit condition is doctrine. Every record here carries one.
 

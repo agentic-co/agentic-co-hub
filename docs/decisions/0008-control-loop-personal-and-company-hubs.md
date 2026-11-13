@@ -1,6 +1,6 @@
 # 0008 — The owner's control loop: pull first, one partition per company, answers as signed envelopes
 
-**Date:** 2026-10-18 · **Status:** accepted 2026-10-19 (every open point decided by the owner) · **Supersedes:** nothing; narrows
+**Date:** 2026-10-18 · **Status:** ACCEPTED 2026-10-19 (every open point decided by the owner); PARTLY BUILT · **Supersedes:** nothing; narrows
 [`0007-hub-network-graph-and-channels.md`](0007-hub-network-graph-and-channels.md)
 for one topology and amends its direction table for the case where the hub that
 owns the work also executes it (§2)
@@ -9,6 +9,14 @@ owns the work also executes it (§2)
 
 Nothing in this record is built. 0005's push-only digest is still the only
 hub-to-hub path that exists.
+
+> **Status note (2026-11-13):** the hub side of §7's order is built and tested: the generated hub id and attempt
+> fence, the partition credential's route set, `verify_attempt` and epoch 0, the key directory
+> (`agentco human-key`), the signed answer (`POST /answers`, [`../envelope.md`](../envelope.md)) with its nonce
+> table, `envelope_required`, the grace state and its confirmation (`GET /answers/held`), and gate reassignment
+> (`POST /gates/reassign`). Not built: the first end-to-end loop with a real partition signer (version 1 gate 2,
+> [`0011`](0011-v1-definition.md)), signed instructions (§4), the title switch, the presence check and push (§5).
+> The sentence above predates that work.
 
 **Decided:** the topology and pull first (owner decision 2026-10-18, option C),
 and every point this record left open (owner, 2026-10-19; Decisions 1 to 7 at the

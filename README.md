@@ -140,7 +140,11 @@ how your harness works changes.
 
 ## Status
 
-**Early, and usable.** The coordination primitives are implemented and tested: scope
+**Early, and usable. Pre-release:** the package version is `0.1.0` (`pyproject.toml`, classifier
+`Development Status :: 3 - Alpha`) and no release has been tagged. What counts as version 1 is
+written down in [`docs/decisions/0011-v1-definition.md`](docs/decisions/0011-v1-definition.md): five
+gates, of which "correct" and "contract settled" have passed, and "the loop closes", "docs match
+code" and "released" have not. The coordination primitives are implemented and tested: scope
 claims with conflict detection, snapshot pointers with divergence delivered at a cadence
 boundary, a resumable change feed, a work queue with a fenced lease protocol proven across
 twelve real processes, versioned ASOPs, an MCP surface, and both injection tiers. On top
@@ -156,6 +160,20 @@ The L1 outbox reaches a harness that configured nothing, and a conformance suite
 (`agentco conform --level`) holds HTTP, MCP and the outbox to one semantic core. See
 [`docs/`](docs/) for the design, [`docs/roadmap.md`](docs/roadmap.md) for what is built
 versus planned, and [`docs/known-issues.md`](docs/known-issues.md) for what is broken.
+
+**What is tested, and on what.**
+
+- **Python** 3.11, 3.12 and 3.13 (CI matrix).
+- **`asop-spec`**, the contract package: the pin is `>=0.4.0,<1`, the lock is 0.6.1, and CI runs the
+  suite against 0.4.0, 0.5.0, 0.6.0 and 0.6.1 (`.github/workflows/ci.yml`, job `contract`).
+- **Storage**: JSONL under an advisory lock (the default), SQLite (`AGENTCO_DB=<path>`) and Postgres
+  (`AGENTCO_DB=postgresql://...`, the optional `postgres` extra). One conformance suite runs on all
+  three; the Postgres run needs a database and is its own CI job.
+- **Experimental, outside the 1.0 promise:** shared memory (off unless `AGENTCO_MEMORY=on`) and
+  everything under `/memory`.
+- **Built at the hub, not yet proven end to end:** people's signed answers to human gates
+  ([`docs/envelope.md`](docs/envelope.md)). No real signer has driven them yet.
+- **Not built:** federation beyond one upstream digest, OIDC, a UI for views. See the roadmap.
 
 The project's own adoption gate is written down and deliberately hard to game: **two
 people other than the author publishing weekly for four consecutive weeks.** A person's
@@ -175,7 +193,7 @@ These are load-bearing, and each was derived from a failure mode rather than fro
 | **Advisory, never blocking.** | Making concurrency visible is most of the value and none of the political cost — but only if it never stops anyone working. |
 | **Pointers, never copies.** | Snapshots record a URI plus a cheap version token. No document body is ever stored. A second document store is how a coordination layer becomes a system of record by accident. |
 | **Fail static.** | If the plane is down, nothing is blocked; it reconciles when it returns. |
-| **Every refusal carries a remediation.** | A tool that refuses without saying what to do instead teaches people it is broken. *(Four error paths still return a bare 500 instead of a refusal — known, with failing tests against them.)* |
+| **Every refusal carries a remediation.** | A tool that refuses without saying what to do instead teaches people it is broken. |
 | **Anything naming a company is configuration, not code.** | Which is what makes this repo publishable at all — see [CONTRIBUTING](CONTRIBUTING.md). |
 
 ## Getting started
@@ -187,9 +205,18 @@ git clone https://github.com/agentic-co/agentic-co-hub && cd agentic-co-hub
 uv run --extra dev --extra server --extra mcp pytest -q
 ```
 
-That pulls in `asop-spec` (the ASOP contract package, `asop-spec`)
-as a `uv` workspace member automatically — nothing extra to install. Its own
-contract's own suite runs in its own repository (https://github.com/mabidoli/asop).
+That installs `asop-spec` (the ASOP contract package) from PyPI into the project's virtual
+environment. The contract's own suite runs in its own repository (https://github.com/mabidoli/asop).
+
+A plain `python3 -m agentco` does not work in a fresh clone: `asop-spec` is not installed in the
+system interpreter, which also may be older than 3.11. Run the commands below through `uv`. A shell
+function keeps them short (set the path to your clone):
+
+```bash
+agentco() { uv run --project /path/to/agentic-co-hub --extra server --extra mcp python -m agentco "$@"; }
+```
+
+Every `agentco ...` line below assumes it.
 
 ### Run it
 
@@ -197,27 +224,29 @@ Point it at a directory for its state, mint a secret for yourself, and start the
 service:
 
 ```bash
+mkdir -p ~/.agentco && chmod 700 ~/.agentco
 export AGENTCO_REGISTRY_DB=~/.agentco/registry.sqlite3
 export AGENTCO_WORK_STORE=~/.agentco/work.jsonl
 export AGENTCO_REGISTRY_KEYS=~/.agentco/keys.json
-export AGENTCO_HUMANS=you            # the actors the revision policy exempts; everyone else is an agent
-export ASOP_VERIFIERS=you            # routes that may answer judged/human gates; unset, NO route may (declared humans still can)
+export ASOP_HUMANS=you               # the actors the revision policy exempts; everyone else is an agent
+export ASOP_VERIFIERS=you            # routes that may answer judged/human gates; unset, NO route may and an attestation is 403 unauthenticated (declared humans still can)
 
-python3 -m agentco keygen you > ~/.agentco/keys.json   # then chmod 600
-python3 -m agentco serve --port 8787                   # loopback by default
-python3 -m agentco conform --level L2                  # the transports you rely on are the core, or it says what differs
+agentco keygen you > ~/.agentco/keys.json && chmod 600 ~/.agentco/keys.json
+agentco serve --port 8787                              # loopback by default; leave it running
+agentco conform --level L2                             # in another shell: the transports you rely on are the core, or it says what differs
 ```
 
 Or in Docker — one container, state on a named volume, port published to
 loopback only:
 
 ```bash
-python3 -m agentco keygen you > keys.json && chmod 600 keys.json
+agentco keygen you > keys.json && chmod 600 keys.json
 docker compose up -d --build registry
 ```
 
-See [`docs/docker.md`](docs/docker.md) for what the image mounts and why, the
-cadence job, and why the MCP surface is deliberately not containerised.
+See [`docs/docker.md`](docs/docker.md) for what the image mounts and why, how to declare
+`ASOP_HUMANS` and `ASOP_VERIFIERS` for the container, the cadence job, and why the MCP surface is
+deliberately not containerised.
 
 ### Publish something
 
@@ -227,7 +256,7 @@ whatever you already run. No install required on the calling side.
 ```python
 from agentco.publish import Registry
 
-reg = Registry("you", SECRET, "http://127.0.0.1:8787")
+reg = Registry("you", SECRET, "http://127.0.0.1:8787")   # SECRET is your entry in keys.json
 
 # "I am about to work in these directories." Advisory — it blocks nobody.
 lease = reg.claim_scope("acme/web-platform", ["src/billing/invoices"], "implement")
@@ -235,6 +264,8 @@ for c in lease["conflicts"]:
     print(f"{c['withHolder']} is already in there, intent={c['theirIntent']}")
 
 # "I am working from this version of that." The document is never fetched or stored.
+# A `git:` pointer is recorded but not followed until the operator adds `git` to
+# ASOP_SNAPSHOT_SCHEMES (the default is http and https); the receipt says so.
 reg.snapshot("git:/path/to/repo#main", "baseline for the redesign")
 
 # Catch up on everything since your last cursor.
@@ -249,8 +280,9 @@ One entry in your `.mcp.json`, and nothing about how your harness works changes:
 {
   "mcpServers": {
     "agentco": {
-      "command": "python3",
-      "args": ["-m", "agentco", "serve-mcp"],
+      "command": "uv",
+      "args": ["run", "--project", "/path/to/agentic-co-hub", "--extra", "mcp",
+               "python", "-m", "agentco", "serve-mcp"],
       "env": {
         "AGENTCO_ACTOR": "you",
         "AGENTCO_REGISTRY_DB": "/path/to/registry.sqlite3",
@@ -328,11 +360,11 @@ owner has done nothing at all, write into a file it already reads.
 
 ```bash
 # Splice live scope claims into the repo's agent-context file. Dry run first.
-python3 -m agentco inject CLAUDE.md AGENTS.md --repo acme/web-platform
-python3 -m agentco inject CLAUDE.md AGENTS.md --repo acme/web-platform --write
+agentco inject CLAUDE.md AGENTS.md --repo acme/web-platform
+agentco inject CLAUDE.md AGENTS.md --repo acme/web-platform --write
 
 # Or, per person rather than per repo: a session-start hook.
-python3 -m agentco hook install ~/.claude/settings.json --write
+agentco hook install ~/.claude/settings.json --write
 ```
 
 `inject` writes a marker-delimited block and touches nothing outside it,
@@ -342,10 +374,10 @@ preserving the file's own line endings. `hook` takes a verbatim backup so
 ### Read the honest numbers
 
 ```bash
-python3 -m agentco metrics        # weekly publishers, latency, conflict precision
-python3 -m agentco gate1          # exit 0 iff the adoption gate is met
-python3 -m agentco pulse          # the plane checks itself and every actor wired to it; dry run
-python3 -m agentco pulse --apply --every 15m   # the scheduled form: sweeps, records, exit = worst class
+agentco metrics        # weekly publishers, latency, conflict precision
+agentco gate1          # exit 0 iff the adoption gate is met (1 until two people have published for four weeks)
+agentco pulse          # the plane checks itself and every actor wired to it; dry run
+agentco pulse --apply --every 15m   # the scheduled form: sweeps, records, exit = worst class
 ```
 
 `pulse` is the heartbeat, inverted: the plane runs no cycles, so instead of proving
@@ -355,12 +387,9 @@ own silence is a finding too. See [`docs/pulse.md`](docs/pulse.md).
 
 ### Before you rely on it
 
-Read [`docs/known-issues.md`](docs/known-issues.md). Eleven defects are open and
-documented — eight of them with a failing test naming the property that should
-hold (twenty tests, because one defect has seven routes), three recorded without
-one yet. None of them lose work or report a wrong result as a right one — those
-were found and fixed. Being told what is broken is the point; a project this
-young that claims none would be lying.
+Read [`docs/known-issues.md`](docs/known-issues.md). It lists every finding of the adversarial
+reviews with its status, and what is accepted rather than fixed, with the test that pins it. Being
+told what is broken is the point; a project this young that claims none would be lying.
 
 ## Licence
 

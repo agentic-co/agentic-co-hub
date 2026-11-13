@@ -1,7 +1,6 @@
 # 0007 — The hub network is a graph, and every connection declares its channels
 
-**Date:** 2026-10-16 · **Status:** accepted (owner, 2026-10-16); implementation
-planned · **Supersedes:** nothing; extends
+**Date:** 2026-10-16 · **Status:** ACCEPTED (owner, 2026-10-16); NOT BUILT as a graph · **Supersedes:** nothing; extends
 [`0005-federated-hub-topology.md`](0005-federated-hub-topology.md) and replaces
 two of its limits (push-only, one upstream) — see "What 0005 already says, and
 what this adds"
@@ -10,6 +9,10 @@ what this adds"
 
 Nothing in this record is built. 0005's push-only digest remains the only
 hub-to-hub path that exists.
+
+> **Status note (2026-11-13):** no multi-connection graph, declared channels or per-hop clearance exists. Two
+> things this record relies on do exist for other reasons: per-owner clearance on the `/memory` routes
+> (`agentco/clearance.py`) and the generated hub id (`agentco/hubid.py`, from [`0008`](0008-control-loop-personal-and-company-hubs.md)).
 
 > **Proposed amendment** ([`0008`](0008-control-loop-personal-and-company-hubs.md),
 > proposed 2026-10-18): where the hub that owns work also executes it, "parent"

@@ -2,6 +2,14 @@
 
 > Honest about what exists. Nothing below is marked done because it was designed.
 
+**Version 1.** The package is still pre-release (`0.1.0`, no tag). [ADR 0011](decisions/0011-v1-definition.md)
+defines version 1 as five gates. As of 2026-11-13: **gate 1 (correct) has passed; gate 3 (contract settled)
+has passed; gate 2 (the loop closes) and gate 5 (released) have not; gate 4 (docs match code) is this
+page, the ADR banners and the README being checked against the code and its tests.**
+
+Status words in the table below: **built** (code and a test that exercises it), **built, experimental**
+(built, and outside the 1.0 promise), **partly built** (the note says which part), **not built**.
+
 ## Now — extraction
 
 AgentCo grew up as a private implementation inside one organisation's context. The
@@ -16,13 +24,13 @@ in exactly the place it should have, the connectors.
 | Component | Built | Extracted | Notes |
 |---|:--:|:--:|---|
 | `leakguard` — the guard that keeps this repo publishable | ✅ | ✅ | Runs in CI and pre-commit |
-| Scope claims + conflict detection | ✅ | ✅ | Prefix model, precision self-audit |
-| Snapshots + divergence digest | ✅ | ✅ | No body ever stored; cadence-boundary delivery; pluggable resolvers |
+| Scope claims + conflict detection | ✅ | ✅ | Prefix model, precision self-audit. Repository names compare case-insensitively and across Unicode normalisation forms; invisible characters are refused `control_character` and a prefix segment of only dots or spaces `bad_path_segment`, never silently stripped (`tests/test_v1_scope_normalisation.py`). The conflict record carries `holderAttested`, so a conflict raised by a claim whose `holder` was not the authenticated actor is distinguishable from a verified one (`agentco/leases.py`, [`docs/wire.md`](wire.md)) |
+| Snapshots + divergence digest | ✅ | ✅ | No body ever stored; cadence-boundary delivery; pluggable resolvers. Admission (`tests/test_snapshot_admission.py`, `tests/test_v1_snapshot_admission.py`): schemes the operator declared (`ASOP_SNAPSHOT_SCHEMES`), internal addresses refused unless the host is named in `ASOP_SNAPSHOT_HTTP_HOSTS`, every redirect hop re-checked before it is followed, the connection pinned to the address that passed the check, environment proxies ignored for the HEAD request, and a path that is not a regular file (a FIFO, a directory) recorded as unresolved |
 | Change feed (opaque resumable cursor) | ✅ | ✅ | |
-| HMAC authentication | ✅ | ✅ | Actor from token, never payload |
+| HMAC authentication | ✅ | ✅ | Actor from token, never payload. An unknown actor and a bad signature are the same `401 unauthenticated` (`tests/test_adversarial_findings.py`). A signed query string is **required by default** on a GET that has a query; `ASOP_REQUIRE_SIGNED_QUERY=0` is the one-release opt-out and then goes (ADR 0011, decision 4; `tests/test_v1_wire_defaults.py`) |
 | Adoption metrics | ✅ | ✅ | Weekly publishers, time-to-first-event, per-verb latency, L1→L2 conversion (null until there is an L1 publisher, never 0) |
 | Work queue + fenced leases | ✅ | ✅ | CAS + fencing token, **proven across 12 real processes** |
-| Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression |
+| Idempotency (one uniqueness rule on ingest) | ✅ | ✅ | Loud duplicate suppression. Client idempotency keys on `claim_scope`, `snapshot`, `sop_revise`, `sop_activate`, `attest` and `work_report` (migration 0018, `agentco/idempotency.py`); one accepted residue on the JSONL SOP store, recorded in [`known-issues.md`](known-issues.md) |
 | ASOPs as versioned sequences of gated steps (v3) | 🆕 | ✅ | The ASOP is the sequence, a `Step` is what v2 called the procedure, and the gate is on the step — authored with the version, refused if a filer supplies one. `run()` files a TREE (parent pinned `(asop_id, version)`, one bead per step pinned `(asop_id, version, step)`, `after` carried as `blocked_by`); outcomes are grouped per version AND per step. See [`docs/decisions/0003-asop-v3-adoption.md`](decisions/0003-asop-v3-adoption.md) |
 | Run refusals, all before anything is filed | 🆕 | ✅ | `sop_refused` (draft or retired), `inputs_missing`, `role_unbound`, `constraint_unsatisfiable` — the last also covering a judged step bound to the actor it judges. `role_unbound` also covers a binding the registry has no key for: an actor that cannot authenticate can never pull, so filing it is filing into a void. Bindings come from the CALLER; the plane never invents one |
 | Stranded steps surfaced by the pulse | 🆕 | ✅ | A step ready past its actor's cadence (a day, undeclared) that nobody has pulled is an `attention` finding naming the actor and the wait. The key file cannot catch this one — an actor can authenticate and still never run — and a run nobody pulls otherwise looks exactly like an empty queue |
@@ -30,31 +38,37 @@ in exactly the place it should have, the connectors.
 | Nested procedures (`uses`) | 🆕 | ✅ | A step may be another ASOP, filed as that step's children pinned to the inner version. Depth checked while the run is PLANNED, so a run that would break the bound files nothing. `next_sop` and the chain walk are gone with v3 §11.4 — sequencing between procedures is the harness's |
 | A run closes when its steps do (§5.5) | 🆕 | ✅ | The write that lands a step's last `done` closes its container in the SAME transaction and writes the run-level plan-vs-actual from the per-step reviews; only `done` counts, so a parked or failed gate holds the run open. Nested containers close bottom-up. Without it `outcomes_by_version` counted every finished run as in-flight. `pulse --apply` repairs stranded containers by calling the same function |
 | `promote(run_id)` | 🆕 | ✅ | A completed run tree becomes a draft ASOP: beads to steps, executors to roles, `blocked_by` to `after`. Human-only in v3; refused when an active ASOP already covers the run's `task_type` |
-| Declared adjudicators (`AGENTCO_ADJUDICATORS`) | 🆕 | ✅ | A route may judge a divergence only if the operator declared it. Undeclared fails CLOSED (humans only) — the opposite default from verifiers, because what degrades when it fails open is the evidence base rather than throughput |
+| Declared adjudicators (`ASOP_ADJUDICATORS`, legacy `AGENTCO_ADJUDICATORS`) | 🆕 | ✅ | A route may judge a divergence only if the operator declared it. Undeclared fails CLOSED (declared humans only), as the verifier registry now does, because what degrades when it fails open is the evidence base rather than throughput |
 | Legacy v2 records upgraded, never dropped | 🆕 | ✅ | Migration 0009 adds `asops` and copies every `sops` row forward as a one-step ASOP, leaving `sops` byte-identical; the JSONL store applies the same upgrade on read. A v2 record had no gate, so the upgrade fails CLOSED to a `human` gate |
-| ASOP contract package (`asop-spec`, `asop-spec`) | 🆕 | ✅ | The gate schema, `Refusal`, and the SOP record shape split out of `agentco/gates.py` \| `errors.py` \| `sop.py` into a standalone package a harness can depend on without depending on this plane; `agentco/{gates,errors,sop}.py` are now thin shims over it. Merges this plane's park-clock gate fields with the AgentCo Harness's staged-check/runtime-hint fields into one normalised schema. Floor is `asop-spec>=0.4.0`: from 0.4 a judged or human attestation must carry `verdict: {passed, reason}` and a negative verdict fails the gate even at exit 0 |
-| `asop-spec` 0.4 → 0.6 compatibility (spec v3.5, v3.6) | 🆕 | ✅ | The pin is `>=0.4.0,<1` and the lock is 0.5.0. Migration 0011 adds the seven chaining columns; the store reads only what the installed contract models and quarantines what it cannot. Before this the plane did not import on 0.5.0 (the column guard fired), and `revise` on the JSONL store silently dropped every chaining field. Matrix: [`docs/asop.md`](asop.md#contract-compatibility). |
+| ASOP contract package (`asop-spec`) | 🆕 | ✅ | The gate schema, `Refusal`, and the SOP record shape split out of `agentco/gates.py` \| `errors.py` \| `sop.py` into a standalone package a harness can depend on without depending on this plane; `agentco/{gates,errors,sop}.py` are now thin shims over it. Merges this plane's park-clock gate fields with the AgentCo Harness's staged-check/runtime-hint fields into one normalised schema. Floor is `asop-spec>=0.4.0`: from 0.4 a judged or human attestation must carry `verdict: {passed, reason}` and a negative verdict fails the gate even at exit 0 |
+| `asop-spec` 0.4 → 0.6.1 compatibility (spec v3.5, v3.6) | 🆕 | ✅ | The pin is `>=0.4.0,<1`, the lock is 0.6.1, and CI installs 0.4.0, 0.5.0, 0.6.0 and 0.6.1 in turn (`.github/workflows/ci.yml`, job `contract`). Migration 0011 adds the seven chaining columns; the store reads only what the installed contract models and quarantines what it cannot. Before this the plane did not import on 0.5.0 (the column guard fired), and `revise` on the JSONL store silently dropped every chaining field. Matrix: [`docs/asop.md`](asop.md#contract-compatibility). |
 | Request bodies: strict and lenient routes, field provenance, weekly asop-spec watch | 🆕 | ✅ | Unknown keys refused `422 unknown_field` where a dropped key can remove a safety property, reported as `ignored` (and counted in `/metrics`) everywhere else; every route declared, pinned by a test. Messages name the closest key and whether a newer released asop-spec has the field, from a bundled generated table (`tools/asop_fields.py`). A weekly job opens one issue when PyPI has a release adding fields the hub does not forward: [`docs/wire.md`](wire.md) |
 | Run ownership (ASOP §7.2) and the administrative transfer | 🆕 | ✅ | One owner store per run recorded at filing (`AGENTCO_HUB_ID`, `AGENTCO_STORES`), `not_the_owner` for anyone else, a pack reference (uri + sha256, never content), and `POST /runs/{id}/transfer` for a declared human admin (`AGENTCO_ADMINS`, new): epoch bump, history, voided leases, `RunTransferred`; the pulse names orphaned runs: [`docs/asop.md`](asop.md#run-ownership-and-the-administrative-transfer-asop-72-owner-decision-2026-10-18) |
 | Change-feed retention floor (R6) | 🆕 | ✅ | `agentco prune-events` / `AGENTCO_EVENT_RETENTION` delete a contiguous prefix and record the floor; `GET /events` carries `retainedFrom`; a cursor older than the floor is `410 cursor_expired` with the resync remedy, never a silent gap; the pulse reports the floor: [`docs/architecture.md`](architecture.md#the-change-feed) |
-| Lease renew (R1) | 🆕 | ✅ | `POST /work/{id}/renew {attempt, ttlSeconds}` for the current fence holder only; extends the expiry without moving the fence or touching the repair budget; capped at `AGENTCO_LEASE_MAX_AGE` (default 24h, unmeasured); the pulse shows lease ages. No MCP tool until ADR 0004 decides a thirteenth: [`docs/architecture.md`](architecture.md#work-coordination-partially-extracted) |
+| Lease renew (R1) | 🆕 | ✅ | `POST /work/{id}/renew {attempt, ttlSeconds}` for the current fence holder only; extends the expiry without moving the fence or touching the repair budget; capped at `AGENTCO_LEASE_MAX_AGE` (default 24h, unmeasured); the pulse shows lease ages. HTTP and the `Registry` client only: the fourteen MCP tools do not include a renew ([ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md)): [`docs/architecture.md`](architecture.md#work-coordination-partially-extracted) |
 | Chain manifests, adoptions, approvals (spec v3.6 §3.7, §3.10) | 🆕 | ✅ | `agentco/chains.py`, migration 0012. A manifest's members are checked against this store's versions and digests (`GET /sops/{id}` serves `digest`); adoptions and approvals are declared-human only, signed, and the adoption impact is computed. A chain run files at its pinned version or is refused `adoption_required`. Needs asop-spec 0.6.0. Not built: the chain outcome record and step journal, which need journal ingest — see [`docs/asop.md`](asop.md#chain-manifests-adoptions-and-approvals-v36-agentcochainspy) |
-| Shared memory: item store (ADR 0006 §1, slice M1) | 🆕 | ✅ | **Off by default** (`AGENTCO_MEMORY=on` to enable; off = every `/memory` route `404 memory_disabled`, no store opened). `agentco/memory.py`, `agentco/clearance.py`, migration 0013. Owner-labeled items in held layers, one authoritative hub each, read-only replicas, required provenance, pinned class, audit, nothing deleted; JSONL/SQLite/Postgres. Clearance per data owner (hub ∧ actor) on the memory routes. The wall on every other read path, decay and residuals are later slices: [`docs/memory.md`](memory.md) |
-| Shared memory: the wall (ADR 0006 §2, slice M2) | 🆕 | ✅ | Clearance applied before every read path: list, search, item routes (walled answers like missing), the change feed (`MemoryChanged` carries the label, never content, filtered per reader), the MCP `events` tool, internal feed readers (none), the pulse count. Known metadata/timing/existence limits listed and pinned by tests: [`docs/memory.md`](memory.md#known-limits--open-documented-not-claimed-closed) |
-| Shared memory: usefulness and decay (ADR 0006 §4-§5, slice M3) | 🆕 | ✅ | Pure engine `agentco/memory_engine.py` on an exposure clock; credit only for items invoked in a trace, against an outcome the plane derives from the work item's gate; power-law decay with a floor; pinned exemption with calendar review; cold storage, demand pull, replay, probation, reconsolidation; nothing deleted. Every parameter is configuration labelled NOT VALIDATED: [`docs/memory.md`](memory.md#built-usefulness-and-decay-m3) |
+| Shared memory: item store (ADR 0006 §1, slice M1) | 🆕 | ✅ | **Built, experimental in version 1; the 1.0 wire promise does not cover `/memory`.** **Off by default** (`AGENTCO_MEMORY=on` to enable; off = every `/memory` route `404 memory_disabled`, no store opened). `agentco/memory.py`, `agentco/clearance.py`, migration 0013. Owner-labeled items in held layers, one authoritative hub each, read-only replicas, required provenance, pinned class, audit, nothing deleted; JSONL/SQLite/Postgres. Clearance per data owner (hub ∧ actor) on the memory routes. The wall on every other read path, decay and residuals are later slices: [`docs/memory.md`](memory.md) |
+| Shared memory: the wall (ADR 0006 §2, slice M2) | 🆕 | ✅ | **Built, experimental.** Clearance applied before every read path: list, search, item routes (walled answers like missing), the change feed (`MemoryChanged` carries the label, never content, filtered per reader), the MCP `events` tool, internal feed readers (none), the pulse count. Known metadata/timing/existence limits listed and pinned by tests: [`docs/memory.md`](memory.md#known-limits--open-documented-not-claimed-closed) |
+| Shared memory: usefulness and decay (ADR 0006 §4-§5, slice M3) | 🆕 | ✅ | **Built, experimental.** Pure engine `agentco/memory_engine.py` on an exposure clock; credit only for items invoked in a trace, against an outcome the plane derives from the work item's gate; power-law decay with a floor; pinned exemption with calendar review; cold storage, demand pull, replay, probation, reconsolidation; nothing deleted. Every parameter is configuration labelled NOT VALIDATED: [`docs/memory.md`](memory.md#built-usefulness-and-decay-m3) |
+| Team spaces inside one hub (ADR 0009 §3) | 🆕 | ✅ | **Built, experimental** (part of shared memory, off unless `AGENTCO_MEMORY=on`; `tests/test_memory_spaces.py`, migration 0017). A reader sees its own space and its ancestors; writes land in the writer's space; a declared human moves an item up or down its own line (`POST /memory/{id}/space`). Not built: promotion candidates, entity facts, the memory steward (the rest of ADR 0009) and spaces across hubs: [`docs/memory.md`](memory.md#built-spaces-inside-one-hub-adr-0009-3) |
+| Key directory for people (ADR 0008 §3.2) | 🆕 | ✅ | **Built** (`agentco human-key enrol\|revoke\|list`, `agentco/humankeys.py`, migration 0015, `tests/test_humankeys.py`; needs the `envelope` extra). Public keys only, held in this hub's own records, Ed25519 or ECDSA P-256, declared humans only. Hub-local: it is not the owner-controlled directory ADR 0008 expects after asop-spec 0.7.0 |
+| Signed answers (`asop.answer/1`, ADR 0008 §3) | 🆕 | ✅ | **Built at the hub, and not yet proven end to end** (`POST /answers`, `GET /answers/{key_id}/{nonce}`, `agentco/envelope.py`, migration 0016, [`docs/envelope.md`](envelope.md), `tests/test_envelope.py`): published vectors, nonce table with two-store crash recovery, `envelope_required` closing the unsigned path once a person has a key, receipts readable only by the carrier. HTTP only, no MCP tool. The envelope is hub-local; it has not been proposed to asop-spec 0.7.0. No real partition signer has driven it (version 1 gate 2) |
+| Grace confirmation of a late answer (ADR 0008 Decision 3, §8 S4) | 🆕 | ✅ | **Built** (`GET /answers/held` lists held answers by slot and digest, never the verdict; a fresh signed answer for the slot applies and expires the held one; `tests/test_envelope.py`, `tests/test_gate_confirm_and_reassign.py`). Windows are 24 h fresh plus half as grace by default, configurable |
+| Gate reassignment for a removed person (ADR 0008 Decision 4) | 🆕 | ✅ | **Built** (`POST /gates/reassign`, declared human and declared administrator only, moves every open human gate naming the person, or the listed items, with its vehicle; `tests/test_gate_confirm_and_reassign.py`). Reassignment is explicit and manual; automatic reassignment waits for asop-spec 0.7.0 |
+| Views (ADR 0010) | 🆕 | ◐ | **Partly built:** step 1 only, `GET /views/me` (the signer's open gates and open work, oldest first, no parameters; `tests/test_views.py`). Not built: the notices and memory panels, the harness switchboard, the UI component |
 | Durable storage backend (SQLite) | 🆕 | ✅ | Opt-in via `AGENTCO_DB`; same interfaces, conformance-tested against the JSONL default |
 | Durable storage backend (Postgres) | 🆕 | ✅ | Opt-in via `AGENTCO_DB=postgresql://…`; thin `sqlite3.Connection`-shaped adapter (`agentco/pgadapter.py`) over `psycopg`, no second copy of the SQL; same conformance suite, `psycopg[binary]` is an optional `postgres` extra |
 | `tools/migrate_sqlite_to_pg.py` | 🆕 | ✅ | Idempotent cutover from a stopped SQLite file to Postgres; preserves `events.seq`/`calls.id`/`conflict_actions.id` and advances the identity sequence so a subscriber's cursor keeps resuming |
 | Numbered schema migrations | 🆕 | ✅ | Applied once, one transaction each, recorded in the file |
 | Silent-schedule audit | ✅ | ✅ | `agentco pulse`: an actor silent past its declared cadence (`AGENTCO_CADENCE`) is a finding; undeclared is `null`, never a guess — and the pulse judges its own gap first. Reservations-style scheduling of work itself is still ⏳ |
-| Usage metering across harnesses | ✅ | ⏳ | Unreported is `null`, never `0` |
+| Usage metering across harnesses | ✅ | ⏳ | **Not built in this repository** (built in the implementation this was extracted from). Unreported is `null`, never `0` |
 | Health checks with consequence classes | ✅ | ✅ | `agentco pulse` — exit code is the worst class (ok / attention / fatal), never a count; dry-run by default, `--apply` runs the sweeps nobody was running (expired leases, park clocks, quarantine) and records a `PulseObserved` heartbeat — see [`docs/pulse.md`](pulse.md) |
-| MCP surface | ✅ | ✅ | 14 tools of a stated 14, inside a published 14,000-byte schema budget (13,497 measured). [ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md) option C, accepted 2026-11-09: `sop_run` and `adjudicate` joined the twelve; the five operator verbs stay on HTTP. Every mutating tool takes an idempotency key, and a refusal carries its code as structured content |
+| MCP surface | ✅ | ✅ | 14 tools of a stated 14, inside a published 14,000-byte schema budget (13,497 measured; `tests/test_mcp_server.py`, and `agentco conform` prints it). [ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md) option C, accepted 2026-11-09: `sop_run` and `adjudicate` joined the twelve; the five operator verbs stay on HTTP. Every mutating tool takes an idempotency key, and a refusal carries its code as structured content |
 | Tier-1 context injection (shared repo file) | ✅ | ✅ | Byte-level splice, CRLF-safe, idempotent |
 | Session-hook injection (tier 3) | ✅ | ✅ | Fail-open per dependency; byte-identical uninstall |
 | Outbox + drainer + receipts (L1) | 🆕 | ✅ | `.agentco/outbox.jsonl` plus `agentco drain`; appending a line needs no package on the writer's side. The tier-1 splice carries the instructions, the tier-3 session block carries the receipts — see [`docs/outbox.md`](outbox.md) |
 | Gates + attestation (`verify` payload, `awaiting_verify` / `verify_failed`) | 🆕 | ✅ | Validated at the write boundary; neither status releases `blocked_by` — proven across processes by a real poller; the plane stores the claim and never runs the check |
-| Judged/human verifiers (L3) — routing, park clocks, quarantine digest | 🆕 | ✅ | `verify` counts only for `AGENTCO_VERIFIERS` once declared; a human gate names who answers it; a default is never a verdict |
+| Judged/human verifiers (L3) — routing, park clocks, quarantine digest | 🆕 | ✅ | **The registry fails closed** (ADR 0011, decision 2): a `verify` counts only from a route in `ASOP_VERIFIERS` (legacy `AGENTCO_VERIFIERS`) or a declared human (`ASOP_HUMANS`); with neither declared, an attestation is `403 unauthenticated` and the gate waits for its park clock. A clock-only gate with no registry is still supported. A human gate names who answers it; a default is never a verdict (`tests/test_v1_verifier_fail_closed.py`) |
 | Revision policy | 🆕 | ✅ | Per STEP since v3. A protected-tagged step must be gated `human` at authoring — refused by the record for the default tags, and plane-side for any a registry adds, since the contract cannot enforce a set it was never told. Protected tags freeze a step against agents ABSOLUTELY — an agent may not revise or activate a procedure containing one, deletion included, because changing what runs around a `money` step changes what that step does; class ratchets toward human only (role kind or gate kind), and removing a human step is the same demotion by deletion; on a FIRST activation the ratchet is absolute too, since baseline and target are the same version and every differential check would be vacuous; no undoing a human. A fourth rule, `human_only`, covers `retire` and `promote`. HTTP 403 `revision_policy:<rule>`, proven by mutation |
 | Adjudication + plan-vs-actual + revision proposals | 🆕 | ✅ | Per STEP since v3: a `good` adjudication feeds that step's `proposals`, a `bad` one that step's `common_mistakes` (capped at three per step), and a step that diverged twice in one pass earns a structural proposal on the sequence. Adjudicator ≠ executor enforced on every transport, and who may adjudicate at all is declared; `metadata.plan_vs_actual` written per step at completion; `agentco lessons --propose` drafts, never activates |
 | Decomposition bounds enforced at create | 🆕 | ✅ | Seven children, three deep, repair beside; HTTP 422 `decomposition_bound` |
@@ -206,6 +220,7 @@ Two registries, both following the same shape:
 - ~~HTTP surface over one semantic core, with a conformance suite.~~ Built — `agentco/conformance.py`, `agentco conform --level`.
 - Identity beyond HMAC (OIDC), for organisations that want it.
 - Change-feed subscriptions with webhook auth.
+- Journal ingest (asop-spec §7.2), which the chain outcome record and step journal need. Not built.
 - The lease proof catching up with the protocol: attempt-advance on report and reap,
   the reaper's in-lock liveness re-check and `assigned_agent` enforcement are
   single-process tested only (see below).
@@ -227,9 +242,10 @@ extending the built push-only digest of [0005](decisions/0005-federated-hub-topo
   review of delegated-authentication patterns (this is the "identity beyond
   HMAC" item above, given a shape).
 
-Proposed for one topology in [`decisions/0008-control-loop-personal-and-company-hubs.md`](decisions/0008-control-loop-personal-and-company-hubs.md):
+Accepted for one topology in [`decisions/0008-control-loop-personal-and-company-hubs.md`](decisions/0008-control-loop-personal-and-company-hubs.md):
 one person working for several companies, pull first, one partition per company, answers as
-signed envelopes (the person's per-company key, verified by its public half). Not built. The
+signed envelopes (the person's per-company key, verified by its public half). Partly built: the hub
+side is below; the partition and the end-to-end loop are not. The
 envelope is defined in this hub as the v1 contract, to be proposed to asop-spec 0.7.0 as an
 additive change with no change to 0.6.x semantics (Decision 1 = A, 2026-10-19).
 Every open point of 0008 is decided (owner, 2026-10-19): keys held per company hub, a 24 h
@@ -249,14 +265,15 @@ nonce table with two-store recovery, held answers in the grace window, and `enve
 closing the unsigned path on every transport once a person has a key; the grace confirmation
 (S4: `GET /answers/held` by slot and digest, never verdict; a fresh answer expires the held one);
 and gate reassignment for a removed person (Decision 4, `POST /gates/reassign`, admin only).
-**Next:** the first end-to-end loop with the partition's signer.
+**Not built:** the first end-to-end loop with the partition's signer (version 1 gate 2), signed instructions (§4),
+the per-company title switch, the presence check, and push.
 
 Still open (owner decision 8, 2026-10-18): the **identity mechanism** — direction accepted, mechanism
 not chosen, confidence 0.55; revisit when a second organisation needs to connect a hub — and **credit
 across hubs** — not decided, no internal market; revisit when two hubs exchange work with different
 owners.
 
-Proposed in [`decisions/0010-views-one-lens-per-hub.md`](decisions/0010-views-one-lens-per-hub.md):
+Accepted as a design in [`decisions/0010-views-one-lens-per-hub.md`](decisions/0010-views-one-lens-per-hub.md):
 one view shape for every level, set by the viewer's clearance rather than by where the hub
 sits. Each hub shows its own items in full and the level above as labelled replicas or live
 reads, and nothing from below except what that level sent up. The personal hub's view of a
@@ -321,7 +338,7 @@ defer reasons, escalation, and a terminal `Undeliverable` state. Capacity modell
 as **measurement** — observed and published — and throttles nothing until there is real
 data to throttle on.
 
-### Shared memory — planned, not built
+### Shared memory — partly built, experimental
 
 Accepted as a design in [`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md).
 The item store, the wall and the usefulness engine are built **behind `AGENTCO_MEMORY`, off by
@@ -330,7 +347,8 @@ default** (the rows above; [`docs/memory.md`](memory.md)). Team **spaces** (ADR 
 writer's space, and a declared human widens or narrows an item along its own line
 ([`docs/memory.md`](memory.md#built-spaces-inside-one-hub-adr-0009-3)). Owner decision 8 (2026-10-18):
 the three-valued verified outcome and holding shared-layer records in full are **confirmed**; every
-parameter value is **open** until real traces measure it. The original list, in dependency order:
+parameter value is **open** until real traces measure it. The original list, in dependency order (the first three and part of the fourth and fifth are the
+built slices; the residuals path, the hand-off and the spot-check are not built):
 
 - An owner-labeled memory item, stored beside the ASOP store, with one
   authoritative hub per item.
@@ -347,10 +365,11 @@ parameter value is **open** until real traces measure it. The original list, in 
 - A primary-source spot-check of the research behind the design, before any
   parameter is claimed.
 
-**Ontological memory — proposed, not built.** [`decisions/0009-ontological-memory.md`](decisions/0009-ontological-memory.md):
+**Ontological memory — spaces built, the rest proposed.** [`decisions/0009-ontological-memory.md`](decisions/0009-ontological-memory.md):
 entity facts as a slice of 0006 memory, resolved when a run is filed; spaces (teams) inside one hub,
 with promotion to the parent space; model-driven memory work run by a memory steward the hub files
-work for. Its first step is a census of `common_mistakes`, which can stop it before any code.
+work for. Spaces are built (see the table); the rest is not, and its first step is a census of
+`common_mistakes`, which can stop it before any code.
 
 ### Borrowed candidates (from the 2026-08-31 OpenViking review)
 
@@ -405,8 +424,7 @@ A distinction worth keeping, because they are not the same evidence.
 **Reviewed adversarially.** That review has happened. A second party, instructed
 to refute rather than confirm and to read the code without reading the tests,
 produced twenty-four findings across six load-bearing claims — five of the six
-did not survive. Seventeen are fixed; the rest carry failing tests naming the
-property that should hold. `tests/test_adversarial_findings.py` is written by
+did not survive. All are fixed, or accepted with a test, since (see [`known-issues.md`](known-issues.md)). `tests/test_adversarial_findings.py` is written by
 that reviewer, structured as counterexamples rather than confirmations, and each
 regression test in it was verified to FAIL against the pre-fix code before its
 marker came off.
