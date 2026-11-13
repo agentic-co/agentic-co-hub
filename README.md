@@ -165,7 +165,9 @@ versus planned, and [`docs/known-issues.md`](docs/known-issues.md) for what is b
 
 - **Python** 3.11, 3.12 and 3.13 (CI matrix).
 - **`asop-spec`**, the contract package: the pin is `>=0.4.0,<1`, the lock is 0.6.1, and CI runs the
-  suite against 0.4.0, 0.5.0, 0.6.0 and 0.6.1 (`.github/workflows/ci.yml`, job `contract`).
+  suite against 0.4.0, 0.4.1, 0.5.0, 0.6.0 and 0.6.1 (`.github/workflows/ci.yml`, job `contract`).
+  The supported range is stated once, in
+  [`docs/upgrading.md`](docs/upgrading.md#supported-asop-spec-range).
 - **Storage**: JSONL under an advisory lock (the default), SQLite (`AGENTCO_DB=<path>`) and Postgres
   (`AGENTCO_DB=postgresql://...`, the optional `postgres` extra). One conformance suite runs on all
   three; the Postgres run needs a database and is its own CI job.
