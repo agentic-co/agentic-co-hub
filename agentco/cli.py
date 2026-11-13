@@ -770,6 +770,60 @@ def cmd_human_key(args) -> int:
     return 0
 
 
+def cmd_partition(args) -> int:
+    """The person's side of the control loop (ADR 0008): keygen, pin, pending, answer.
+
+    Configured from the environment, so a secret never sits in argv:
+    AGENTCO_PARTITION_{LABEL,URL,ACTOR,SECRET,SIGNER,KEY,STATE}. Only ever calls
+    out to the company hub. Refusals print their code and exit 1.
+    """
+    from agentco import partition as part
+    from agentco.errors import Refusal
+    from agentco.publish import RegistryError
+
+    def out(value) -> None:
+        print(json.dumps(value, indent=2))
+
+    try:
+        if args.action == "keygen":
+            out(part.generate_key(Path(args.dir), args.alg))
+            return 0
+        env = os.environ
+        need = ["URL", "ACTOR", "SECRET", "SIGNER", "KEY", "STATE"]
+        missing = [f"AGENTCO_PARTITION_{n}" for n in need if not env.get(f"AGENTCO_PARTITION_{n}")]
+        if missing:
+            print(f"set {', '.join(missing)}", file=sys.stderr)
+            return 2
+        p = part.Partition(label=env.get("AGENTCO_PARTITION_LABEL", "company"), url=env["AGENTCO_PARTITION_URL"],
+                           actor=env["AGENTCO_PARTITION_ACTOR"], secret=env["AGENTCO_PARTITION_SECRET"],
+                           signer=env["AGENTCO_PARTITION_SIGNER"], key_path=Path(env["AGENTCO_PARTITION_KEY"]),
+                           state_dir=Path(env["AGENTCO_PARTITION_STATE"]),
+                           show_titles=env.get("AGENTCO_PARTITION_TITLES", "1") != "0")
+        if args.action == "hub-id":
+            out({"hubId": p.hub_id(), "pinned": p.pinned_hub_id()})
+        elif args.action == "pin":
+            out({"hubId": p.pin(args.hub_id, replace=args.replace)})
+        elif args.action == "pending":
+            out(p.pending())
+        elif args.action == "sent":
+            out(p.sent())
+        elif args.action == "receipt":
+            out(p.receipt(args.key_id, args.nonce))
+        else:
+            result = p.answer(args.ref, passed=args.verdict == "pass", reason=args.reason,
+                              choice=args.choice, stage=args.stage, epoch=args.epoch)
+            out({"status": result["status"], "keyId": result["payload"]["key_id"],
+                 "nonce": result["payload"]["nonce"], "body": result["body"]})
+            return 0 if result["status"] in (200, 202) else 1
+    except Refusal as refusal:
+        print(f"refused: {refusal.code}: {refusal.message}\n  {refusal.remediation}", file=sys.stderr)
+        return 1
+    except RegistryError as exc:
+        print(f"hub: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_verifiers(args) -> int:
     """The L3 operator surface: who is answering gates, and what is overdue.
 
@@ -1381,6 +1435,34 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--by", default=None,
                        help="the operator acting (default: $AGENTCO_REGISTRY_OPERATOR)")
     p_hk.set_defaults(func=cmd_human_key)
+
+    p_part = sub.add_parser(
+        "partition",
+        help="a person's side of the control loop: keygen, pin the hub id, pull pending gates, answer signed",
+    )
+    pt = p_part.add_subparsers(dest="action", required=True)
+    pk = pt.add_parser("keygen", help="create this person's signing key for ONE company hub")
+    pk.add_argument("dir", help="directory for signing-key.pem (mode 600) and signing-key.pub.pem")
+    pk.add_argument("--alg", choices=["ed25519", "p256"], default="ed25519")
+    pt.add_parser("hub-id", help="the hub's generated id, and the one pinned")
+    pp = pt.add_parser("pin", help="pin the hub id to sign for (compare it on a second channel first)")
+    pp.add_argument("hub_id", nargs="?", default=None, help="the id to pin (default: what the hub reports)")
+    pp.add_argument("--replace", action="store_true",
+                    help="replace an existing, different pin: only after the operator confirmed on a second channel")
+    pt.add_parser("pending", help="pull the gates assigned to this person")
+    pt.add_parser("sent", help="every envelope this partition signed")
+    pr = pt.add_parser("receipt", help="the hub's receipt for one envelope this partition carried")
+    pr.add_argument("key_id")
+    pr.add_argument("nonce")
+    pa = pt.add_parser("answer", help="sign and send a verdict for a pending gate")
+    pa.add_argument("ref", help="the pending row's ref (verify:<item>:<attempt>), or the item id")
+    pa.add_argument("verdict", choices=["pass", "fail"])
+    pa.add_argument("--reason", required=True)
+    pa.add_argument("--choice", default=None)
+    pa.add_argument("--stage", type=int, default=None)
+    pa.add_argument("--epoch", type=int, default=0,
+                    help="the run's ownership epoch; 0 outside a run or never transferred")
+    p_part.set_defaults(func=cmd_partition)
 
     p_ver = sub.add_parser(
         "verifiers",

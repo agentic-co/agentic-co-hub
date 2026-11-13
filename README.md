@@ -171,8 +171,9 @@ versus planned, and [`docs/known-issues.md`](docs/known-issues.md) for what is b
   three; the Postgres run needs a database and is its own CI job.
 - **Experimental, outside the 1.0 promise:** shared memory (off unless `AGENTCO_MEMORY=on`) and
   everything under `/memory`.
-- **Built at the hub, not yet proven end to end:** people's signed answers to human gates
-  ([`docs/envelope.md`](docs/envelope.md)). No real signer has driven them yet.
+- **Built, proven automatically, not yet run across two machines:** people's signed answers to human
+  gates ([`docs/envelope.md`](docs/envelope.md)), with the person's side as `agentco partition`. Version 1
+  gate 2 stays open until [the runbook](docs/runbooks/first-signed-answer-loop.md) has been run on two hosts.
 - **Not built:** federation beyond one upstream digest, OIDC, a UI for views. See the roadmap.
 
 The project's own adoption gate is written down and deliberately hard to game: **two
@@ -378,6 +379,7 @@ agentco metrics        # weekly publishers, latency, conflict precision
 agentco gate1          # exit 0 iff the adoption gate is met (1 until two people have published for four weeks)
 agentco pulse          # the plane checks itself and every actor wired to it; dry run
 agentco pulse --apply --every 15m   # the scheduled form: sweeps, records, exit = worst class
+agentco partition pending          # a person's side: pull the gates assigned to you (also keygen, pin, answer, receipt)
 ```
 
 `pulse` is the heartbeat, inverted: the plane runs no cycles, so instead of proving
