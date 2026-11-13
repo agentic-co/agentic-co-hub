@@ -1,6 +1,6 @@
 # ASOP — Agentic Standard Operating Procedure (term definition)
 
-**Date:** 2026-08-31 · **Status:** adopted
+**Date:** 2026-08-31 · **Status:** ACCEPTED (a term definition); all three properties are built, see the roadmap
 
 ## The term
 

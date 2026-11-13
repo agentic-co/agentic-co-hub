@@ -64,10 +64,12 @@ floor, the granularity rule is wrong and the fix is `k`, not more claims.
 token — a git SHA, a content hash, a document eTag. **The body is never stored**, which is
 asserted against the database file's raw bytes rather than through the API.
 
-*Never fetched* is the intent and is not currently true in one case: `resolve_https` sends
-a HEAD request, but urllib re-issues a redirect as GET, so a redirected pointer transfers
-the body it then discards. Open defect, failing test against it. Nothing is written either
-way — the storage claim holds unconditionally.
+*Never fetched* holds for the HTTP resolver too: `resolve_https` sends a HEAD request and keeps
+it a HEAD across redirects (urllib would otherwise re-issue a redirect as GET and transfer the
+body). Every redirect hop is checked for admission before it is followed, the connection goes to
+the address that passed the check, and environment proxies are ignored for that request
+(`agentco/snapshots.py`, `tests/test_v1_snapshot_admission.py`). A pointer whose URL gives no
+`ETag` or `Last-Modified` is recorded as unresolved rather than fetched.
 
 This is the invariant most worth defending, because violating it is how a coordination
 layer quietly becomes the document store it promised not to be.
@@ -139,10 +141,12 @@ There is no MCP `work_renew` tool: the MCP surface is at its fourteen-tool ceili
 ([ADR 0004](decisions/0004-mcp-surface-under-asop-v3.md), option C) and a fifteenth tool is a new
 decision. The remote MCP backend already carries the call for when it is.
 
-### Hub network *(planned)*
+### Hub network *(planned; one slice of it built)*
 
 Today a hub has at most one upstream and sends it a digest, nothing more
-([0005](decisions/0005-federated-hub-topology.md)). The accepted design is a graph:
+([0005](decisions/0005-federated-hub-topology.md)). The hub side of one topology, a person
+answering a gate with a signed envelope ([0008](decisions/0008-control-loop-personal-and-company-hubs.md),
+[`envelope.md`](envelope.md)), is built; the graph below is not. The accepted design is a graph:
 any number of connections per hub, each opening a declared subset of four
 channels — work, answers, memory, notices — under a signed per-owner clearance
 that only narrows per hop and gates before routing. Work is pulled, not
@@ -394,7 +398,7 @@ offer expires and returns.
 
 A cross-boundary handoff into the void is the failure this exists to close.
 
-### Shared memory *(planned)*
+### Shared memory *(partly built, experimental, off unless `AGENTCO_MEMORY=on`)*
 
 Lessons and ASOPs are one memory system. Every item carries an owner label
 `(owner, level)`, has exactly one authoritative hub (others hold versioned
@@ -403,21 +407,25 @@ label enforcement — a gate before ranking, never a weight. Usefulness is judge
 by use against an externally verified outcome; decay is power-law on an exposure
 clock with a pinned exempt class, and never deletes. Proven lessons graduate into
 ASOP revisions. Session and episodic memory stay in the harness. Full record:
-[`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md).
+[`decisions/0006-hub-memory-design.md`](decisions/0006-hub-memory-design.md); what is built, and
+what is not (the residuals path, the lesson hand-off, the memory channel between hubs), is in
+[`memory.md`](memory.md).
 
 ## Integration surface
 
 Two encodings over **one semantic core**: plain HTTP, and MCP for harnesses that speak it.
 A third encoding is added when it ships, not before.
 
-A conformance suite testing both encodings against the core is *planned and does not exist*
-— see the roadmap. Until it does, the two surfaces are kept honest by construction rather
-than by test: every MCP tool is a thin wrapper calling the same function the HTTP handler
-calls.
+A conformance suite holds the transports to the core: `agentco conform --level` runs the same
+scenarios over the MCP roster, the remote MCP relay and HTTP, and the L1 outbox, and reports where
+they differ (`agentco/conformance.py`, `tests/test_conformance.py`). Every MCP tool is also a thin
+wrapper calling the same function the HTTP handler calls.
 
 Authentication is per-actor HMAC to start — one line of config, no identity-provider
-consent required — with OIDC as the path for organisations that want it. **The actor is
-always taken from the token, never from the payload.**
+consent required — with OIDC as the path for organisations that want it (not built). **The
+actor is always taken from the token, never from the payload.** An unknown actor and a bad
+signature get the same `401 unauthenticated`, and a GET's query string must be covered by the
+signature unless the operator opted out with `ASOP_REQUIRE_SIGNED_QUERY=0`.
 
 That is narrower than it sounds and the difference matters. The *actor* — who made the
 call — cannot be forged. The `holder` field of a scope claim is a separate, payload-supplied
@@ -443,8 +451,8 @@ organisation's instance is configuration and does not belong in this repository.
 The gate schema (`deterministic` / `judged` / `human`, with attestation) and
 the record shape (`SopStatus`, the `ASOP` and `Step` dataclasses,
 `validate_asop`, `validate_step`, and the legacy `SOP`/`validate_fields` kept
-readable for the upgrade) live in `asop-spec` — a separate distribution, `asop-spec` (import
-name `asop`), inside this repo but published independently of it. `Refusal`,
+readable for the upgrade) live in `asop-spec` — a separate distribution (import
+name `asop`), in its own repository and published independently of this one. `Refusal`,
 the one exception type the contract speaks in, moved with them.
 
 The reason is the AgentCo Harness: a standalone execution runtime in a
@@ -460,9 +468,9 @@ shape, with the one thing that actually differs between callers — whether
 the park-clock group is mandatory — exposed as an argument (`require`)
 rather than hidden as an assumption.
 
-This plane imports `asop` as an ordinary dependency (`[tool.uv.sources]` in
-the root `pyproject.toml` resolves it from `asop-spec`, editable, via a
-`uv` workspace). `agentco/gates.py`, `agentco/errors.py` and `agentco/sop.py`
+This plane imports `asop` as an ordinary dependency (`asop-spec>=0.4.0,<1` in
+`pyproject.toml`, resolved from PyPI; the lock is at 0.6.1 and CI also installs
+0.4.0, 0.5.0 and 0.6.0). `agentco/gates.py`, `agentco/errors.py` and `agentco/sop.py`
 are now thin shims: they call into `asop.gates` / `asop.errors` / `asop.sop`
 with this plane's own calling convention (`require=("clock",)`, its own
 `MAX_PARK_SECONDS` ceiling) and re-export what callers in this repo already

@@ -1,6 +1,6 @@
 # 0009 — Ontological memory: entity facts, spaces, promotion, and the memory steward
 
-**Date:** 2026-10-29 · **Status:** proposed · **Supersedes:** nothing; extends
+**Date:** 2026-10-29 · **Status:** PARTLY BUILT (§3 spaces built, experimental in version 1); the rest PROPOSED · **Supersedes:** nothing; extends
 [`0006-hub-memory-design.md`](0006-hub-memory-design.md) (memory items, the wall, credit by use) and
 narrows how [`0007-hub-network-graph-and-channels.md`](0007-hub-network-graph-and-channels.md)'s
 memory channel is first used

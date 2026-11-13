@@ -1,6 +1,6 @@
 # 0011 — What version 1 is: five gates, and the six decisions taken with them
 
-**Date:** 2026-11-09 · **Status:** ACCEPTED (mabidoli, 2026-11-09) · **Relates to:**
+**Date:** 2026-11-09 · **Status:** ACCEPTED (mabidoli, 2026-11-09); gates 1 and 3 passed, 2, 4 and 5 open · **Relates to:**
 [`0004-mcp-surface-under-asop-v3.md`](0004-mcp-surface-under-asop-v3.md),
 [`0006-hub-memory-design.md`](0006-hub-memory-design.md),
 [`0008-control-loop-personal-and-company-hubs.md`](0008-control-loop-personal-and-company-hubs.md),
