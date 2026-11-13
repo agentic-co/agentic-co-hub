@@ -249,6 +249,8 @@ See [`docs/docker.md`](docs/docker.md) for what the image mounts and why, how to
 `ASOP_HUMANS` and `ASOP_VERIFIERS` for the container, the cadence job, and why the MCP surface is
 deliberately not containerised.
 
+Running several separate hubs (one per client, plus a personal one), walled from each other: [`docs/runbooks/run-several-hubs.md`](docs/runbooks/run-several-hubs.md).
+
 ### Publish something
 
 `agentco/publish.py` is standard-library only and meant to be copied next to
