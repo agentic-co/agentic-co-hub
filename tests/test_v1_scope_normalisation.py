@@ -154,15 +154,22 @@ def test_a_stored_prefix_that_would_now_be_refused_does_not_break_reads(conn):
 def test_concurrent_claims_in_two_spellings_cannot_both_miss_each_other(tmp_path):
     path = tmp_path / "race.sqlite3"
     results: dict[str, dict] = {}
+    errors: list[BaseException] = []
     barrier = threading.Barrier(2)
 
     def go(name, repo):
-        c = db.connect(path)
-        barrier.wait()
-        results[name] = leases.claim(c, actor=name, repo=repo, prefixes=["src/api/one"], intent="implement")
+        try:
+            c = db.connect(path)
+            barrier.wait(timeout=30)
+            results[name] = leases.claim(c, actor=name, repo=repo, prefixes=["src/api/one"], intent="implement")
+        except BaseException as exc:  # noqa: BLE001 - asserted on below
+            errors.append(exc)
+            barrier.abort()
 
-    ts = [threading.Thread(target=go, args=("dana", "Acme/App")),
-          threading.Thread(target=go, args=("kofi", "acme/app"))]
+    ts = [threading.Thread(target=go, args=("dana", "Acme/App"), daemon=True),
+          threading.Thread(target=go, args=("kofi", "acme/app"), daemon=True)]
     [t.start() for t in ts]
     [t.join(30) for t in ts]
+    assert not any(t.is_alive() for t in ts), "a claimant hung"
+    assert not errors, errors
     assert results["dana"]["conflicts"] or results["kofi"]["conflicts"]

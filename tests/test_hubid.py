@@ -57,16 +57,24 @@ def test_a_concurrent_first_start_yields_one_id(target):
     db.connect(target)  # the schema exists; the race is for the id
     seen, barrier = [], threading.Barrier(6)
 
-    def start():
-        conn = db.connect(target)
-        barrier.wait()
-        seen.append(hubid.ensure(conn))
+    errors = []
 
-    threads = [threading.Thread(target=start) for _ in range(6)]
+    def start():
+        try:
+            conn = db.connect(target)
+            barrier.wait(timeout=30)
+            seen.append(hubid.ensure(conn))
+        except BaseException as exc:  # noqa: BLE001 - asserted on below
+            errors.append(exc)
+            barrier.abort()
+
+    threads = [threading.Thread(target=start, daemon=True) for _ in range(6)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join()
+        t.join(60)
+    assert not any(t.is_alive() for t in threads), "a starter hung"
+    assert not errors, errors
     assert len(seen) == 6 and len(set(seen)) == 1 and HEX32.match(seen[0])
     assert hubid.read(db.connect(target)) == seen[0]
 

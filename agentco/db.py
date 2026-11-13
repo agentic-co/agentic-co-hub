@@ -29,6 +29,7 @@ blocking a publisher would show up as latency on the one SLO stage 1 has.
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
@@ -175,10 +176,32 @@ def connect(path: str | Path) -> AnyConnection:
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(sqlite_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    # The timeout goes first so everything below, including the migrations'
+    # write lock, waits instead of raising at whoever is second.
     conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    _enable_wal(conn)
+    conn.execute("PRAGMA foreign_keys=ON")
     migrations.apply(conn)
     return conn
+
+
+def _enable_wal(conn: sqlite3.Connection) -> None:
+    """`PRAGMA journal_mode=WAL`, tolerating a concurrent first open.
+
+    Converting a rollback-journal file to WAL takes an exclusive lock that
+    SQLite does not route through the busy handler, so two connectors opening
+    the same brand-new file can make the second raise `database is locked` at
+    once, whatever `busy_timeout` says. The winner finishes the conversion in
+    milliseconds, so a short bounded retry is enough.
+    """
+    deadline = time.monotonic() + 10.0
+    while True:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 

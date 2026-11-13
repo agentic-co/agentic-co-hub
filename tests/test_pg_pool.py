@@ -48,7 +48,7 @@ def _run(target, n=THREADS):
         except Exception as exc:  # noqa: BLE001 - surfaced by the assertion below
             errors.append(exc)
 
-    threads = [threading.Thread(target=body, args=(i,)) for i in range(n)]
+    threads = [threading.Thread(target=body, args=(i,), daemon=True) for i in range(n)]
     t0 = time.monotonic()
     for t in threads:
         t.start()
