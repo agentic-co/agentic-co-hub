@@ -51,7 +51,7 @@ services:
       ASOP_REQUIRE_SIGNED_QUERY: "1"
       AGENTCO_REGISTRY_OPERATOR: operator
       AGENTCO_HUB_ID: hub-a
-      AGENTCO_HUMANS: dana
+      AGENTCO_HUMANS: dana,fran
       AGENTCO_ADMINS: dana
       ASOP_ADMINISTRATORS: dana
       AGENTCO_STORES: runtime-a=rt-agent
