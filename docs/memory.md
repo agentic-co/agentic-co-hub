@@ -193,5 +193,6 @@ its clearance (`{"kofi": {"secret": "...", "clearance": {"acme": "internal"}, "s
 ## Not built yet
 
 Admission by surprise (a capture-time novelty check);
-the residuals pipeline (M4); MCP tools, CLI, capture and the lesson → ASOP hand-off (M5); the
+the residuals pipeline (M4), planned for 1.1 as one intake that covers both the HTTP route and the
+outbox verb (see the roadmap's "Version 1.1" section); MCP tools, CLI, capture and the lesson → ASOP hand-off (M5); the
 memory channel between hubs (ADR 0007).
