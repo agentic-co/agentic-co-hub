@@ -11,6 +11,20 @@ Upgrading, migration by migration, with the operator checklist and the rollback:
 [`docs/upgrading.md`](docs/upgrading.md). The `asop-spec` versions this release supports are stated
 once, in [`docs/upgrading.md`](docs/upgrading.md#supported-asop-spec-range).
 
+## [1.1] — planned, unreleased
+
+Nothing here is in 1.0.0, which is frozen. This section holds what is planned for the release after it.
+
+### Added
+
+- **`memory_create` joins the outbox push set (arrives in 1.1).** A harness with no configuration can append a line
+  whose payload is the `POST /memory` body and have the drainer write the item under its own
+  credential. `provenance` is required on the line; an identity or an unknown key in the payload is
+  refused before anything is sent; the hub still decides labels, clearance and `memory_disabled`
+  (a settled refusal, not a retry). `POST /memory` now takes an optional `idempotencyKey`, which the
+  outbox sets to the line id, so a replayed line writes one item. The item is written directly: the
+  ADR 0006 section 3 review pipeline is not built. The verb is outside the conformance scenarios.
+
 ## [Unreleased] — to be 1.0.0
 
 ### Breaking changes for existing clients and operators
@@ -83,14 +97,6 @@ about each one; the short form is here.
 - **A wrong-typed payload field is a `400` naming the field**, not a `500`.
 
 ### Added
-
-- **`memory_create` joins the outbox push set.** A harness with no configuration can append a line
-  whose payload is the `POST /memory` body and have the drainer write the item under its own
-  credential. `provenance` is required on the line; an identity or an unknown key in the payload is
-  refused before anything is sent; the hub still decides labels, clearance and `memory_disabled`
-  (a settled refusal, not a retry). `POST /memory` now takes an optional `idempotencyKey`, which the
-  outbox sets to the line id, so a replayed line writes one item. The item is written directly: the
-  ADR 0006 section 3 review pipeline is not built. The verb is outside the conformance scenarios.
 
 - **ASOP v3 records and `asop-spec` 0.4 to 0.6.1.** A procedure is a versioned sequence of steps with
   a gate on each step; chaining fields (`outcomes`, `outputs`, `handoffs`, `on_escalate`, `requires`,

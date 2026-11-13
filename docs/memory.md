@@ -190,7 +190,9 @@ its clearance (`{"kofi": {"secret": "...", "clearance": {"acme": "internal"}, "s
   turning spaces on changes no reader's view until an actor is given a space.
 - **Replicas** from another hub land at the root, because another hub's paths mean nothing here.
 
-## Built: the outbox verb `memory_create`
+## Built: the outbox verb `memory_create` (arrives in 1.1)
+
+This verb is planned for hub 1.1 and is not part of 1.0.
 
 A harness with no AgentCo configuration can push a memory item by appending a `memory_create`
 line to its outbox ([`outbox.md`](outbox.md#memory_create)). The payload is the `POST /memory`
@@ -202,6 +204,12 @@ This writes an item **directly, at a label the signing credential is cleared for
 pipeline of ADR 0006 section 3 (blind validator, aggregate check, batch approval) is still not
 built, so nothing holds an item for review: whoever holds a credential cleared for a label can
 put an item at it, through the outbox exactly as through HTTP.
+
+**One intake.** The drainer publishes through the same signed `POST /memory` route, and the hub
+has no separate code path for the outbox verb: it writes memory only through what `POST /memory`
+goes through. The planned review step for memory intake (ADR 0006 section 3) therefore has two
+entry paths to cover, the HTTP route and the outbox verb, and covers both by sitting on that one
+intake. Nothing on the hub side may write memory for the outbox verb around it.
 
 ## Not built yet
 
