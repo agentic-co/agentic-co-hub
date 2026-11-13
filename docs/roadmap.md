@@ -4,7 +4,7 @@
 
 **Version 1.** The package is still pre-release (`0.1.0`, no tag). [ADR 0011](decisions/0011-v1-definition.md)
 defines version 1 as five gates. As of 2026-11-13: **gate 1 (correct) has passed; gate 3 (contract settled)
-has passed; gate 2 (the loop closes) and gate 5 (released) have not; gate 4 (docs match code) is this
+has passed; gate 2 (the loop closes) is open (proven automatically; the two-machine runbook has not been run) and gate 5 (released) has not; gate 4 (docs match code) is this
 page, the ADR banners and the README being checked against the code and its tests.**
 
 Status words in the table below: **built** (code and a test that exercises it), **built, experimental**
@@ -52,7 +52,7 @@ in exactly the place it should have, the connectors.
 | Shared memory: usefulness and decay (ADR 0006 §4-§5, slice M3) | 🆕 | ✅ | **Built, experimental.** Pure engine `agentco/memory_engine.py` on an exposure clock; credit only for items invoked in a trace, against an outcome the plane derives from the work item's gate; power-law decay with a floor; pinned exemption with calendar review; cold storage, demand pull, replay, probation, reconsolidation; nothing deleted. Every parameter is configuration labelled NOT VALIDATED: [`docs/memory.md`](memory.md#built-usefulness-and-decay-m3) |
 | Team spaces inside one hub (ADR 0009 §3) | 🆕 | ✅ | **Built, experimental** (part of shared memory, off unless `AGENTCO_MEMORY=on`; `tests/test_memory_spaces.py`, migration 0017). A reader sees its own space and its ancestors; writes land in the writer's space; a declared human moves an item up or down its own line (`POST /memory/{id}/space`). Not built: promotion candidates, entity facts, the memory steward (the rest of ADR 0009) and spaces across hubs: [`docs/memory.md`](memory.md#built-spaces-inside-one-hub-adr-0009-3) |
 | Key directory for people (ADR 0008 §3.2) | 🆕 | ✅ | **Built** (`agentco human-key enrol\|revoke\|list`, `agentco/humankeys.py`, migration 0015, `tests/test_humankeys.py`; needs the `envelope` extra). Public keys only, held in this hub's own records, Ed25519 or ECDSA P-256, declared humans only. Hub-local: it is not the owner-controlled directory ADR 0008 expects after asop-spec 0.7.0 |
-| Signed answers (`asop.answer/1`, ADR 0008 §3) | 🆕 | ✅ | **Built at the hub, and not yet proven end to end** (`POST /answers`, `GET /answers/{key_id}/{nonce}`, `agentco/envelope.py`, migration 0016, [`docs/envelope.md`](envelope.md), `tests/test_envelope.py`): published vectors, nonce table with two-store crash recovery, `envelope_required` closing the unsigned path once a person has a key, receipts readable only by the carrier. HTTP only, no MCP tool. The envelope is hub-local; it has not been proposed to asop-spec 0.7.0. No real partition signer has driven it (version 1 gate 2) |
+| Signed answers (`asop.answer/1`, ADR 0008 §3) | 🆕 | ✅ | **Built, and proven between separate processes and from outside the rig's network** (`POST /answers`, `GET /answers/{key_id}/{nonce}`, `agentco/envelope.py`, migration 0016, [`docs/envelope.md`](envelope.md), `tests/test_envelope.py`): published vectors, nonce table with two-store crash recovery, `envelope_required` closing the unsigned path once a person has a key, receipts readable only by the carrier. HTTP only, no MCP tool. The envelope is hub-local; it has not been proposed to asop-spec 0.7.0. The person's side is `agentco partition` (`agentco/partition.py`; keygen, pin, pending, answer, receipt); proof in `tests/test_gate2_loop.py` and `tests/network/test_rig_signed_answer.py`. Not yet run across two machines: version 1 gate 2 stays open until [the runbook](runbooks/first-signed-answer-loop.md) has been run |
 | Grace confirmation of a late answer (ADR 0008 Decision 3, §8 S4) | 🆕 | ✅ | **Built** (`GET /answers/held` lists held answers by slot and digest, never the verdict; a fresh signed answer for the slot applies and expires the held one; `tests/test_envelope.py`, `tests/test_gate_confirm_and_reassign.py`). Windows are 24 h fresh plus half as grace by default, configurable |
 | Gate reassignment for a removed person (ADR 0008 Decision 4) | 🆕 | ✅ | **Built** (`POST /gates/reassign`, declared human and declared administrator only, moves every open human gate naming the person, or the listed items, with its vehicle; `tests/test_gate_confirm_and_reassign.py`). Reassignment is explicit and manual; automatic reassignment waits for asop-spec 0.7.0 |
 | Views (ADR 0010) | 🆕 | ◐ | **Partly built:** step 1 only, `GET /views/me` (the signer's open gates and open work, oldest first, no parameters; `tests/test_views.py`). Not built: the notices and memory panels, the harness switchboard, the UI component |
@@ -245,7 +245,7 @@ extending the built push-only digest of [0005](decisions/0005-federated-hub-topo
 Accepted for one topology in [`decisions/0008-control-loop-personal-and-company-hubs.md`](decisions/0008-control-loop-personal-and-company-hubs.md):
 one person working for several companies, pull first, one partition per company, answers as
 signed envelopes (the person's per-company key, verified by its public half). Partly built: the hub
-side is below; the partition and the end-to-end loop are not. The
+side is below, and the person's side is `agentco partition` (`agentco/partition.py`). The
 envelope is defined in this hub as the v1 contract, to be proposed to asop-spec 0.7.0 as an
 additive change with no change to 0.6.x semantics (Decision 1 = A, 2026-10-19).
 Every open point of 0008 is decided (owner, 2026-10-19): keys held per company hub, a 24 h
@@ -265,8 +265,12 @@ nonce table with two-store recovery, held answers in the grace window, and `enve
 closing the unsigned path on every transport once a person has a key; the grace confirmation
 (S4: `GET /answers/held` by slot and digest, never verdict; a fresh answer expires the held one);
 and gate reassignment for a removed person (Decision 4, `POST /gates/reassign`, admin only).
-**Not built:** the first end-to-end loop with the partition's signer (version 1 gate 2), signed instructions (§4),
-the per-company title switch, the presence check, and push.
+**The person's side, built:** `agentco partition keygen|pin|pending|answer|receipt|sent` pulls the gates
+assigned to the person, signs with the person's own key and carries the envelope, keeps every envelope it
+signed, pins the hub's generated id, and has the per-company title switch (`AGENTCO_PARTITION_TITLES=0`).
+The loop is proven between separate processes and from outside the rig's network; **version 1 gate 2 stays
+open until [the runbook](runbooks/first-signed-answer-loop.md) has been run across two machines.**
+**Not built:** signed instructions (§4), the presence check, and push.
 
 Still open (owner decision 8, 2026-10-18): the **identity mechanism** — direction accepted, mechanism
 not chosen, confidence 0.55; revisit when a second organisation needs to connect a hub — and **credit

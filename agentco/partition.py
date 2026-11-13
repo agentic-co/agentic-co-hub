@@ -126,13 +126,42 @@ class Partition:
         except (OSError, ValueError, KeyError):
             return None
 
-    def pin(self, hub_id: Optional[str] = None) -> str:
-        """Pin the hub id this partition signs for, once, against the id the
-        operator reads out on a second channel when the key is enrolled."""
+    def pin(self, hub_id: Optional[str] = None, *, replace: bool = False) -> str:
+        """Pin the hub id this partition signs for, against the id the operator
+        reads out on a second channel. Pinning the same id again changes nothing;
+        a different id replaces the pin only when `replace` is said on purpose,
+        because the pin exists to notice that the id changed."""
         hub_id = hub_id or self.hub_id()
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        (self.state_dir / PIN_FILE).write_text(json.dumps({"hubId": hub_id, "label": self.label}))
+        existing = self.pinned_hub_id()
+        if existing is not None and existing != hub_id and not replace:
+            raise _refuse("hub_already_pinned", f"{self.label!r} is pinned to hub id {existing}; refusing to pin {hub_id}",
+                          "If the operator confirms on a second channel that the hub's id really changed, "
+                          "pin again with `agentco partition pin --replace`. Otherwise do not sign.")
+        if existing == hub_id:
+            self._tighten(self.state_dir / PIN_FILE)
+            return hub_id
+        self._write_private(PIN_FILE, json.dumps({"hubId": hub_id, "label": self.label}), append=False)
         return hub_id
+
+    def _private_dir(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.state_dir, 0o700)
+
+    def _tighten(self, path: Path) -> None:
+        if path.exists():
+            os.chmod(path, 0o600)
+        if self.state_dir.exists():
+            os.chmod(self.state_dir, 0o700)
+
+    def _write_private(self, name: str, text: str, *, append: bool) -> None:
+        """State holds signed envelopes and verdict reasons: directory 0700, files 0600,
+        tightened even when they already exist with wider modes."""
+        self._private_dir()
+        path = self.state_dir / name
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC), 0o600)
+        with os.fdopen(fd, "a" if append else "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(path, 0o600)
 
     def _checked_hub_id(self) -> str:
         pinned, current = self.pinned_hub_id(), self.hub_id()
@@ -142,7 +171,8 @@ class Partition:
         if pinned != current:
             raise _refuse("hub_id_changed", f"{self.label!r} now reports hub id {current}, not the pinned {pinned}",
                           "Do not sign. Ask the operator why the id changed (a backup restored as a second "
-                          "hub regenerates it), then pin again on purpose.")
+                          "hub regenerates it); if they confirm it on a second channel, pin again on "
+                          "purpose with `agentco partition pin --replace <new id>`.")
         return pinned
 
     # -- pull ---------------------------------------------------------------
@@ -200,10 +230,8 @@ class Partition:
         return self.hub._call("GET", f"/answers/{key_id}/{nonce}")
 
     def _remember(self, payload: dict, body: dict) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps({"label": self.label, "payload": payload, "signature": body["signature"]}, sort_keys=True)
-        with open(self.state_dir / SENT_FILE, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        self._write_private(SENT_FILE, line + "\n", append=True)
 
     def sent(self) -> list[dict]:
         try:

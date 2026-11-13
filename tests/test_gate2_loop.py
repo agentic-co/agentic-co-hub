@@ -519,3 +519,61 @@ def test_every_refusal_above_is_on_the_company_hubs_own_record(world):
                      ("relay-dana", "replayed"), ("relay-dana", "not_terminal"), ("relay-dana", "key_revoked")):
         assert expected in answers, f"no recorded refusal {expected}: {sorted(answers)}"
     assert any(verb == "attest" and code == "envelope_required" for verb, _, _, code in rows)
+
+
+# --------------------------------------------------------------------------- #
+# the partition's own state: the pin is deliberate to change, the files are private
+# --------------------------------------------------------------------------- #
+
+
+def offline_partition(tmp_path) -> "partition.Partition":
+    return partition.Partition(label="x", url="http://127.0.0.1:9", actor="relay", secret="s", signer=PERSON,
+                               key_path=tmp_path / "k.pem", state_dir=tmp_path / "state")
+
+
+def test_a_pin_is_a_noop_when_repeated_refused_when_different_and_replaced_only_on_purpose(tmp_path):
+    from agentco.errors import Refusal
+
+    p = offline_partition(tmp_path)
+    first, second = "a" * 32, "b" * 32
+    assert p.pin(first) == first
+    before = (p.state_dir / partition.PIN_FILE).read_text()
+    assert p.pin(first) == first and (p.state_dir / partition.PIN_FILE).read_text() == before
+    with pytest.raises(Refusal) as refused:
+        p.pin(second)
+    assert refused.value.code == "hub_already_pinned" and "--replace" in refused.value.remediation
+    assert p.pinned_hub_id() == first, "a refused pin changes nothing"
+    assert p.pin(second, replace=True) == second and p.pinned_hub_id() == second
+
+
+def test_the_cli_pin_refuses_a_different_id_until_told_to_replace(tmp_path):
+    env = {**clean_env(), "AGENTCO_PARTITION_URL": "http://127.0.0.1:9", "AGENTCO_PARTITION_ACTOR": "relay",
+           "AGENTCO_PARTITION_SECRET": "s", "AGENTCO_PARTITION_SIGNER": PERSON,
+           "AGENTCO_PARTITION_KEY": str(tmp_path / "k.pem"), "AGENTCO_PARTITION_STATE": str(tmp_path / "state")}
+    assert cli(env, "partition", "pin", "a" * 32).returncode == 0
+    refused = cli(env, "partition", "pin", "b" * 32)
+    assert refused.returncode == 1 and "hub_already_pinned" in refused.stderr and "--replace" in refused.stderr
+    assert cli(env, "partition", "pin", "--replace", "b" * 32).returncode == 0
+    assert json.loads((tmp_path / "state" / partition.PIN_FILE).read_text())["hubId"] == "b" * 32
+
+
+def test_partition_state_is_private_and_widened_files_are_tightened(tmp_path):
+    p = offline_partition(tmp_path)
+    p.pin("a" * 32)
+    p._remember({"nonce": "n"}, {"signature": "sig"})
+
+    def mode(path):
+        return path.stat().st_mode & 0o777
+
+    assert mode(p.state_dir) == 0o700
+    assert mode(p.state_dir / partition.PIN_FILE) == 0o600 and mode(p.state_dir / partition.SENT_FILE) == 0o600
+    # widened by something else: the next write (or a same-id re-pin) narrows them again
+    for path, wide in ((p.state_dir, 0o755), (p.state_dir / partition.PIN_FILE, 0o644),
+                       (p.state_dir / partition.SENT_FILE, 0o666)):
+        os.chmod(path, wide)
+    p._remember({"nonce": "m"}, {"signature": "sig"})
+    assert mode(p.state_dir) == 0o700 and mode(p.state_dir / partition.SENT_FILE) == 0o600
+    os.chmod(p.state_dir / partition.PIN_FILE, 0o644)
+    p.pin("a" * 32)
+    assert mode(p.state_dir / partition.PIN_FILE) == 0o600
+    assert len(p.sent()) == 2

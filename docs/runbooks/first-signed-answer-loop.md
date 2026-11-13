@@ -118,7 +118,10 @@ agentco partition pin <hub id read on channel 2>
 
 Pin the id the operator read out, not whatever the hub reports: a mismatch here is the point of the
 second channel. From now on `partition answer` refuses with `hub_id_changed` if the hub's id ever
-differs, and with `hub_not_pinned` before a pin.
+differs, and with `hub_not_pinned` before a pin. Pinning a different id over an existing pin is refused
+`hub_already_pinned`; only after the operator confirms on a second channel that the hub's id really
+changed, use `agentco partition pin --replace <new id>`. The state directory is created mode 0700 and
+its files 0600: they hold the envelopes you signed and your verdict reasons.
 
 ## 5. Machine A: file a run that reaches a human gate
 
@@ -218,22 +221,23 @@ automated tests and need no second machine.
 ## 9. Record the result
 
 Gate 2 passes when a person other than the code's author has done steps 1 to 7 across two hosts and
-written down the following. Keep it in the project's tracker with the gate; do not paste secrets.
+filled in the record below. Open a pull request that adds the filled-in record as
+`docs/runbooks/records/<date>-first-signed-answer-loop.md` and link it from the gate 2 row of
+`docs/roadmap.md`; that merge, not the automated tests, is what marks gate 2 passed. Placeholders only in
+the committed file: no real hostnames, home paths or personal names, and no secrets.
 
 ```
 Gate 2 loop record
 date (UTC):
-machine A (company hub): OS / host class, agentco version (git commit)
-machine B (partition):   OS / host class, agentco version (git commit)
-network between them:    e.g. "different sites, A behind TLS proxy, B outbound-only"
+run by (role, not a name):        operator / person / same human wearing both hats
+machine A (company hub) role:     host class, OS, agentco commit hash
+machine B (partition) role:       host class, OS, agentco commit hash
+network between them:             e.g. "different sites, A behind a TLS proxy, B outbound-only"
 hub id (first 8 hex):
-key id:                  fingerprint compared on a second channel: yes / no
-run id / item id:
-envelope nonce / receipt status:
-steps 1-7: pass / fail (with the first failing step and its output)
-step 8 refusals tried:   (list, with codes seen)
-anything surprising:
+key id:                           fingerprint compared on a second channel: yes / no
+envelope nonce (first 8 hex):
+receipt (status from `partition receipt`):
+steps 1-7:                        pass / fail (the first failing step and its output)
+step 8 refusals tried:            (codes seen)
+changes the run needed to code or this runbook, if any:
 ```
-
-If any of steps 1 to 7 needed a change to the code or to this runbook to work, say what: that is the
-finding gate 2 exists to produce, and the gate stays open until the fix is merged and the loop is run again.

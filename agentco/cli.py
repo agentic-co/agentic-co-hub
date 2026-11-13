@@ -802,7 +802,7 @@ def cmd_partition(args) -> int:
         if args.action == "hub-id":
             out({"hubId": p.hub_id(), "pinned": p.pinned_hub_id()})
         elif args.action == "pin":
-            out({"hubId": p.pin(args.hub_id)})
+            out({"hubId": p.pin(args.hub_id, replace=args.replace)})
         elif args.action == "pending":
             out(p.pending())
         elif args.action == "sent":
@@ -1447,6 +1447,8 @@ def build_parser() -> argparse.ArgumentParser:
     pt.add_parser("hub-id", help="the hub's generated id, and the one pinned")
     pp = pt.add_parser("pin", help="pin the hub id to sign for (compare it on a second channel first)")
     pp.add_argument("hub_id", nargs="?", default=None, help="the id to pin (default: what the hub reports)")
+    pp.add_argument("--replace", action="store_true",
+                    help="replace an existing, different pin: only after the operator confirmed on a second channel")
     pt.add_parser("pending", help="pull the gates assigned to this person")
     pt.add_parser("sent", help="every envelope this partition signed")
     pr = pt.add_parser("receipt", help="the hub's receipt for one envelope this partition carried")

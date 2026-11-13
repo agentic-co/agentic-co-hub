@@ -14,8 +14,12 @@ hub-to-hub path that exists.
 > fence, the partition credential's route set, `verify_attempt` and epoch 0, the key directory
 > (`agentco human-key`), the signed answer (`POST /answers`, [`../envelope.md`](../envelope.md)) with its nonce
 > table, `envelope_required`, the grace state and its confirmation (`GET /answers/held`), and gate reassignment
-> (`POST /gates/reassign`). Not built: the first end-to-end loop with a real partition signer (version 1 gate 2,
-> [`0011`](0011-v1-definition.md)), signed instructions (§4), the title switch, the presence check and push (§5).
+> (`POST /gates/reassign`). The person's side is built too (`agentco partition`, `agentco/partition.py`), and the
+> loop is proven automatically between separate processes and from outside the rig's Docker network
+> (`tests/test_gate2_loop.py`, `tests/network/test_rig_signed_answer.py`). Version 1 gate 2
+> ([`0011`](0011-v1-definition.md)) stays OPEN until the
+> [runbook](../runbooks/first-signed-answer-loop.md) has been run across two machines. Not built: signed
+> instructions (§4), the presence check and push (§5).
 > The sentence above predates that work.
 
 **Decided:** the topology and pull first (owner decision 2026-10-18, option C),
