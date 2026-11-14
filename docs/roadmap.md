@@ -229,6 +229,8 @@ Two registries, both following the same shape:
 
 Owner decision (2026-11-13): version 1.0 is scoped and frozen, and nothing is added to it. These
 items are planned for 1.1, after the v1.0.0 tag, in dependency order. None changes a version 1 gate.
+Items 5-7 were added on 2026-11-14 from the boundary sync with the runtime, whose own 1.0 requires
+hub 1.1.
 
 1. **A memory write verb in the push outbox.** *Today:* `PUSH_VERBS` in `agentco/outbox.py` has no
    memory verb, so memory is written over HTTP only (`POST /memory`, off unless `AGENTCO_MEMORY=on`,
@@ -253,6 +255,43 @@ items are planned for 1.1, after the v1.0.0 tag, in dependency order. None chang
    §3). *Today:* `Outbox.push` accepts a caller-supplied `line_id` and otherwise generates a random
    one. It keeps accepting one; the helper gives writers a single derivation from content plus
    attempt. *Waits on:* nothing.
+5. **A light, installable base package that carries the outbox drainer.** The runtime will depend
+   on this package's base install and run its drainer once per cycle, so that signing and
+   publishing exist in one place. *Today:* the base dependency list in `pyproject.toml` is
+   `asop-spec>=0.4.0,<1` only; `server` (FastAPI, uvicorn), `mcp`, `postgres` and `envelope` are
+   extras. `agentco/outbox.py` imports the standard library plus `agentco.errors`
+   (which re-exports `asop.errors.Refusal`, so `asop-spec`), `agentco.appendlog` and
+   `agentco.filelock`, and those two import only the standard library. `agentco/publish.py`
+   imports the standard library alone (`hashlib`, `hmac`, `urllib`), and `registry_publisher` takes
+   any object with the `Registry` shape. By reading, no extra is needed; no test proves it. The
+   package is not published to an index: `docs/releasing.md` and
+   `.github/workflows/release-image.yml` publish a container image to `ghcr.io` and nothing else.
+   *The 1.1 work:* a test that imports and runs the drainer on a base install with no extras; a
+   stated promise in the docs that the base stays this light; and a supported way to depend on the
+   package, either a published distribution or a pinned git reference (both are open).
+   *Waits on:* the packaging decision.
+6. **The held-answer ledger in the person's signing client.** *Today:* `agentco partition`
+   (`agentco/partition.py`) keeps every envelope it signed in `sent.jsonl` (`_remember`, `sent()`),
+   and `receipt()` reads one receipt by key id and nonce. It records nothing about the hub's answer:
+   `send()` returns the status and body to the caller and does not store them, and the client
+   neither calls `GET /answers/held` nor offers a confirmation. The hub side exists: an envelope
+   older than the fresh window is settled `held` (`agentco/envelope.py`), and
+   [ADR 0008](decisions/0008-control-loop-personal-and-company-hubs.md) §8 **S4** specifies the
+   confirmation as a new `asop.answer/1` whose verdict comes from the partition's own stored
+   envelope for that item and attempt, with no confirm offered when none is stored. The runbook
+   (`docs/runbooks/first-signed-answer-loop.md`) tells the person to fix the clock and answer
+   again. The runtime's own signer keeps a ledger that confirms a held answer by digest; the agreed
+   plan is to port that to the hub client, after which the runtime's copy is retired.
+   *Waits on:* nothing on the hub.
+7. **Scope on a work item: a decision, then maybe a field.** The runtime plans to claim a scope
+   before it works on a pulled item. *Today:* a hub work item carries no scope field. `POST /work`
+   accepts `title`, `requires`, `blockedBy`, `assignedAgent`, `naturalKey`, `source`, `sourceId`,
+   `kind`, `subject`, `period`, `metadata` and `verify` (`agentco/app.py`, the wire table), and
+   `agentco/work.py` has no scope or repository field. A scope claim is keyed by
+   `(repo, directory path-prefix set)` (`agentco/scope.py`, `POST /scope-claims`), separate from any
+   work item. Two options, not chosen: the hub adds an optional scope to a work item, or the
+   runtime derives the scope from the item's repository and working directory. *Waits on:* the
+   owner's decision.
 
 **Considered for 1.1, not committed:** a stale-version refusal on `sop_revise`. Today it always
 writes latest + 1 and takes no `expected_version`, so two revisers produce two drafts, not a
