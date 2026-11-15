@@ -1,8 +1,9 @@
 # Known issues
 
-As of 2026-11-09 nothing here is an open defect: every finding below is fixed,
-and what remains is one accepted residue (the JSONL SOP store, under R4) and one
-open question (under Finding 4). The record is kept because the fixes are only
+As of 2026-11-09 nothing here was an open defect: every finding below was fixed,
+and what remained was one accepted residue (the JSONL SOP store, under R4) and one
+open question (under Finding 4). One known gap has been recorded since, **H1**, with a fix
+planned for 1.1. The record is kept because the fixes are only
 as good as the tests that pin them, and the next defect belongs here first.
 
 **Most of these have a failing test already.** `tests/test_adversarial_findings.py`
@@ -118,6 +119,14 @@ reaches for to decide whether a defect is already understood, and one stale row
 teaches them not to trust the other rows. The same staleness hit this project's
 conformance README in the same week.
 
+
+## Open: planned for 1.1
+
+Version 1.0 is frozen, so this is recorded with a failing test and not fixed.
+
+| # | Finding | Workaround |
+|---|---|---|
+| **H1** | `tools/deploy/hubctl add-actor <hub> <actor> --human/--verifier` refuses an actor that already has a credential (`cmd_add_actor`: "already has a credential ... refusing to replace it silently"), and no other subcommand changes an existing actor's declaration. An operator who created an actor with `--human` only and later needs it to be a verifier too has no command for it. | Edit `ASOP_VERIFIERS` (or `ASOP_HUMANS`) in that hub's `hub.env` by hand, after keeping a copy of the file outside the instance; restart the hub; run `hubctl check-isolation`. **Fix planned for 1.1:** re-declaring an existing actor with a role flag adds it to the variable without minting a credential or changing `keys.json`. The pinned test is `test_redeclaring_an_existing_actor_adds_the_role_without_a_new_credential` in `tests/test_deploy_hubctl.py` (`xfail(strict=True)`; delete the marker in the commit that fixes it). |
 
 ## Open, no test yet
 
