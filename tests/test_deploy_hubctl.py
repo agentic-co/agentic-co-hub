@@ -235,6 +235,21 @@ def test_add_actor_prints_the_credential_once_to_stdout_and_declares_roles(prist
     assert ok(ctl("check-isolation", root=root)).returncode == 0
 
 
+@pytest.mark.xfail(strict=True, reason="docs/known-issues.md H1: add-actor refuses an existing actor and no other "
+                   "subcommand changes its declarations; fix planned for 1.1")
+def test_redeclaring_an_existing_actor_adds_the_role_without_a_new_credential(pristine, tmp_path):
+    root = clone_root(pristine, tmp_path / "hubs")
+    done = ok(ctl("add-actor", "client-a", "dana", "--human", root=root))
+    secret = json.loads(done.stdout)["secret"]
+    keys_path = root / "client-a" / "keys.json"
+    keys_before = keys_path.read_bytes()
+    again = ok(ctl("add-actor", "client-a", "dana", "--verifier", root=root))
+    assert secret not in again.stdout and "secret" not in again.stdout
+    assert keys_path.read_bytes() == keys_before
+    env = env_of(root, "client-a")
+    assert env["ASOP_VERIFIERS"] == "dana" and env["ASOP_HUMANS"] == "dana"
+
+
 # ----------------------------------------------------------------------------- service
 
 @pytest.mark.parametrize("platform,marker", [("launchd", "com.agentco.hub.client-a"),
