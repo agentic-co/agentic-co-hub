@@ -194,8 +194,12 @@ def test_live_wire_resume_across_a_prune(tmp_path):
 def test_the_cli_is_dry_by_default(tmp_path):
     path = tmp_path / "cli.sqlite3"
     conn = db.connect(path)
+    # The CLI prunes against the real clock (--days 30), so the "recent" event must be recent
+    # relative to NOW. A fixed date here stopped being inside 30 days on 2026-11-17 (a time bomb).
+    from datetime import datetime, timedelta, timezone
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     append(conn, 3, OLD)
-    append(conn, 1, NEW)
+    append(conn, 1, recent)
     env = {**os.environ, "AGENTCO_REGISTRY_DB": str(path)}
     dry = subprocess.run([sys.executable, "-m", "agentco", "prune-events", "--days", "30"], capture_output=True,
                          text=True, env=env)
