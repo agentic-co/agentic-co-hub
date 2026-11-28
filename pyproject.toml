@@ -55,6 +55,11 @@ dev = ["pytest>=8.0", "cryptography>=42", "hypothesis>=6.100"]
 # running. See evals/README.md.
 eval = ["litellm>=1.70"]
 
+# `agentco` on the PATH once installed (`uv tool install`, `pip install`, or inside
+# the project's virtualenv). Same entry point as `python -m agentco`.
+[project.scripts]
+agentco = "agentco.cli:main"
+
 [tool.hatch.build.targets.wheel]
 # `evals` is deliberately absent: it lives in the repo, not in the package.
 packages = ["agentco"]

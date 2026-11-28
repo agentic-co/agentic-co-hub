@@ -211,12 +211,15 @@ uv run --extra dev --extra server --extra mcp pytest -q
 That installs `asop-spec` (the ASOP contract package) from PyPI into the project's virtual
 environment. The contract's own suite runs in its own repository (https://github.com/mabidoli/asop).
 
-A plain `python3 -m agentco` does not work in a fresh clone: `asop-spec` is not installed in the
-system interpreter, which also may be older than 3.11. Run the commands below through `uv`. A shell
-function keeps them short (set the path to your clone):
+The package installs an `agentco` console script (`agentco = "agentco.cli:main"`, the same entry
+point as `python -m agentco`). Installed into an environment (`uv tool install /path/to/agentic-co-hub`,
+or `pip install` of the clone in a venv), plain `agentco ...` works. In a fresh clone nothing is
+installed, and a plain `python3 -m agentco` does not work: `asop-spec` is not in the system
+interpreter, which also may be older than 3.11. Either run through `uv` or install the script. A
+shell function keeps the `uv` form short (set the path to your clone):
 
 ```bash
-agentco() { uv run --project /path/to/agentic-co-hub --extra server --extra mcp python -m agentco "$@"; }
+agentco() { uv run --project /path/to/agentic-co-hub --extra server --extra mcp agentco "$@"; }
 ```
 
 Every `agentco ...` line below assumes it.
