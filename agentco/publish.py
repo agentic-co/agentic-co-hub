@@ -437,6 +437,40 @@ class Registry:
             body["agentLabel"] = agent_label
         return self._call("POST", f"/work/{item_id}/adjudicate", body)
 
+    def memory_create(
+        self,
+        label: dict,
+        layer: str,
+        title: str,
+        body: str,
+        provenance: dict,
+        space: Optional[str] = None,
+        kind: Optional[str] = None,
+        tags: Optional[list] = None,
+        applies_to: Optional[str] = None,
+        agent_label: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> dict:
+        """Write a shared-memory item at `label`, authored by the signature.
+
+        The body is `POST /memory`'s, unchanged: the hub applies the label, the
+        clearance wall and the `AGENTCO_MEMORY` switch, and answers
+        `memory_disabled` (404) while memory is off. The item is written
+        directly; no review pipeline holds it. `idempotency_key` makes a retry
+        return the recorded item instead of writing a second.
+        """
+        out: dict[str, Any] = {
+            "label": label, "layer": layer, "title": title, "body": body, "provenance": provenance,
+        }
+        for key, value in (("space", space), ("kind", kind), ("tags", tags), ("applies_to", applies_to)):
+            if value is not None:
+                out[key] = value
+        if agent_label:
+            out["agentLabel"] = agent_label
+        if idempotency_key:
+            out["idempotencyKey"] = idempotency_key
+        return self._call("POST", "/memory", out)
+
     def sop_get(self, sop_id: str, version: Optional[int] = None) -> dict:
         """One version, or the active one. A miss is `sop: null`, not an error."""
         return self._call("GET", f"/sops/{sop_id}", None, f"?version={version}" if version else "")

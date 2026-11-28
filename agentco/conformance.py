@@ -89,6 +89,11 @@ VERBS = (
     "sop_propose", "sop_outcomes", "run_get", "promote",
 )
 
+#: Push verbs the scenarios do not exercise, by decision (see `CARRIES`). Reason:
+#: shared memory is outside the 1.0 wire promise (ADR 0011) and is a store the
+#: conformance core does not have.
+OUTSIDE_CONFORMANCE: frozenset[str] = frozenset({"memory_create"})
+
 #: What each transport carries, as the ladder documents it. HTTP carries every
 #: verb; MCP the fourteen-tool roster (ADR 0004 option C: `sop_run` and
 #: `adjudicate` are the two v3 verbs a harness performs in its own loop;
@@ -111,7 +116,13 @@ CARRIES: dict[str, frozenset[str]] = {
         "work_create", "work_pull", "work_report", "attest", "adjudicate",
         "sop_revise", "sop_activate", "sop_run",
     }),
-    "outbox": frozenset(PUSH_VERBS),
+    # `memory_create` is the one push verb outside the suite. The scenarios'
+    # core is the work queue plus the SOP library; shared memory is a third
+    # store, off by default and outside the 1.0 wire promise (ADR 0011), and
+    # conforming it would mean growing the core and `photograph()` first. It is
+    # covered end to end in `tests/test_outbox_memory.py`, and
+    # `OUTSIDE_CONFORMANCE` is pinned there so the carve-out cannot grow quietly.
+    "outbox": frozenset(PUSH_VERBS) - OUTSIDE_CONFORMANCE,
 }
 
 #: Arguments a transport's schema cannot express at all, per verb. A step that
