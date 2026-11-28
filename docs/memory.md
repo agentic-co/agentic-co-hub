@@ -204,17 +204,19 @@ pipeline of ADR 0006 section 3 (blind validator, aggregate check, batch approval
 built, so nothing holds an item for review: whoever holds a credential cleared for a label can
 put an item at it, through the outbox exactly as through HTTP.
 
-**One intake.** The planned review step for memory intake (ADR 0006 section 3, roadmap "Version 1.1") is one intake on the hub that covers both entry paths, the HTTP route and this verb, because the drainer publishes through the same signed route. The drainer publishes through the same signed `POST /memory` route, and the hub
+**One intake.** The drainer publishes through the same signed `POST /memory` route, and the hub
 has no separate code path for the outbox verb: it writes memory only through what `POST /memory`
-goes through. The planned review step for memory intake (ADR 0006 section 3) therefore has two
-entry paths to cover, the HTTP route and the outbox verb, and covers both by sitting on that one
-intake. Nothing on the hub side may write memory for the outbox verb around it.
+goes through. The planned review step for memory intake (ADR 0006 section 3, roadmap "Version 1.1")
+therefore has two entry paths to cover, the HTTP route and the outbox verb, and covers both by
+sitting on that one intake. Nothing on the hub side may write memory for the outbox verb around it.
+
+`/memory` stays experimental and off by default (`AGENTCO_MEMORY=on`), and it remains outside the
+1.0 wire promise; the verb inherits all three.
 
 ## Not built yet
 
 The review pipeline of ADR 0006 section 3 (blind validator, aggregate check, batch approval);
-
-Admission by surprise (a capture-time novelty check);
+admission by surprise (a capture-time novelty check);
 the residuals pipeline (M4), planned for 1.1 as one intake that covers both the HTTP route and the
 outbox verb (see the roadmap's "Version 1.1" section); MCP tools, CLI, capture and the lesson → ASOP hand-off (M5); the
 memory channel between hubs (ADR 0007).
