@@ -195,7 +195,8 @@ ROUTE_BODIES: dict[tuple[str, str], "wire.Body"] = {
     # Shared memory (ADR 0006): writes are strict — a dropped `provenance`,
     # `label` or `expected_version` would weaken what the item record promises.
     ("POST", "/memory"): wire.strict(
-        ("label", "layer", "space", "title", "body", "kind", "tags", "applies_to", "provenance"),
+        ("label", "layer", "space", "title", "body", "kind", "tags", "applies_to", "provenance",
+         "idempotencyKey"),
         "an item's owner label, space and provenance"),
     ("POST", "/memory/{item_id}/space"): wire.strict(
         ("to", "expected_version"), "the space an item moves to and the version it was read at"),
@@ -1577,13 +1578,22 @@ def create_app(
             label = payload.get("label") or {}
             if not isinstance(label, dict):
                 label = {}
-            fields = {k: v for k, v in payload.items() if k not in ("label", "layer", "space", "agentLabel")}
-            item = _mem().create(
-                actor=actor, clearance=_walls().effective(actor),
-                owner=label.get("owner"), level=label.get("level"), layer=payload.get("layer"),
-                space=payload.get("space"), **fields,
-            )
-            return {"state": "accepted", "item": _memory_view(item)}
+            fields = {k: v for k, v in payload.items()
+                      if k not in ("label", "layer", "space", "agentLabel", "idempotencyKey")}
+
+            def create() -> dict:
+                item = _mem().create(
+                    actor=actor, clearance=_walls().effective(actor),
+                    owner=label.get("owner"), level=label.get("level"), layer=payload.get("layer"),
+                    space=payload.get("space"), **fields,
+                )
+                return {"state": "accepted", "item": _memory_view(item)}
+
+            # The outbox sends its line id here, so a replayed line returns the
+            # recorded item. Scoped (actor, verb, key); a refusal records nothing,
+            # so a retry after one is refused again rather than replayed.
+            return idempotency.once(conn, actor, "memory_create",
+                                    idempotency.clean(pl.opt_str(payload, "idempotencyKey")), create)
 
         return await _handle(request, "memory_create", work)
 

@@ -234,8 +234,9 @@ hub 1.1.
 
 1. **A memory write verb in the push outbox.** *Today:* `PUSH_VERBS` in `agentco/outbox.py` has no
    memory verb, so memory is written over HTTP only (`POST /memory`, off unless `AGENTCO_MEMORY=on`,
-   with a hard `provenance`). The verb is in progress on a branch and held until after the tag.
-   *Waits on:* the tag. Until item 2 exists it writes an item directly, at a label the signing
+   with a hard `provenance`). The verb is built and in review on a branch (`memory_create`, with an optional `idempotencyKey` on
+   `POST /memory`); it is held until after the tag and is not in 1.0. `/memory` stays experimental, off
+   by default, and outside the 1.0 wire promise. *Waits on:* the tag. Until item 2 exists it writes an item directly, at a label the signing
    credential is cleared for.
 2. **The memory review step** (ADR 0006 §3 residuals path, slice M4: owner categories, never-leave
    list, mechanical checker, blind validator, per-owner aggregate check, batch approval), built as

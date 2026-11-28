@@ -57,7 +57,7 @@ would only reject later, at a point where the caller has no chance to react.
 ## The push set — and what is deliberately not in it
 
 ```python
-PUSH_VERBS = ("claim_scope", "release_scope", "snapshot", "work_report", "attest", "adjudicate", "sop_revise", "sop_activate")
+PUSH_VERBS = ("claim_scope", "release_scope", "snapshot", "work_report", "attest", "adjudicate", "sop_revise", "sop_activate", "memory_create")
 ```
 
 **Any tool may push. No tool may file.** `work_create` is not in the push
@@ -95,6 +95,45 @@ lesson pushed from an unconfigured harness reaches the shared procedure as a
 DRAFT, authored by the drainer's machine credential — an agent, under the
 revision policy, unless the operator declared that machine human — and nothing
 activates unless a separate `sop_activate` line says so and the policy agrees.
+### `memory_create`
+
+> Arrives in 1.1, with the optional `idempotencyKey` on `POST /memory` it relies on; neither is part of 1.0.
+
+Writes one shared-memory item. It is the `memory_create` operation of `POST /memory`, verbatim:
+the payload **is** that route's body, camelCase and snake_case exactly as the wire has them, and
+there is no second shape.
+
+| Payload key | Required | Meaning |
+|---|---|---|
+| `label` | yes | `{owner, level}`, the item's owner label |
+| `layer` | yes | the layer, as `POST /memory` takes it |
+| `title`, `body` | yes | the content |
+| `provenance` | **yes** | `{kind, ref}`: where the item came from |
+| `kind`, `tags`, `space`, `applies_to` | no | as `POST /memory` |
+
+```json
+{"line_id":"ob_5d21a0c4e8b97f13","at":"2026-11-13T09:12:40+00:00","verb":"memory_create","payload":{"label":{"owner":"acme","level":"internal"},"layer":"shared","title":"Retry the export once","body":"A stalled export resumes after one retry.","kind":"lesson","tags":["export"],"provenance":{"kind":"run","ref":"run:w-0001"}},"agent_label":"cursor"}
+```
+
+What the outbox refuses, before anything is sent (a quarantine receipt for a hand-written line, a
+refusal from `push`): a payload with no `provenance` object, a payload naming who wrote it
+(`actor`, `author`, `author_kind`, `created_by`, `updated_by`), and any key outside the table
+(the drainer forwards named fields only, so an unread key would be one the sender believes it
+sent). Everything else is the hub's decision, made as it makes it over HTTP: the label against
+the signing credential's clearance and the hub's, the layer, the space, the shape of
+`provenance`. The outbox adds no bypass. The drainer's signature is the author.
+
+The line id is the idempotency key, so a replayed line returns the first item instead of writing
+a second. With `AGENTCO_MEMORY` not `on` the hub answers `memory_disabled` (404); the receipt is
+`refused` with that code, the line is settled, and it is not retried. The receipt of a delivered
+line carries `item_id` and `version`, not the body.
+
+This writes the item directly, at a label the signing credential is cleared for. It is not a
+proposal: the review pipeline of ADR 0006 section 3 (blind validator, aggregate check, batch
+approval) is not built, so nothing holds an item for review. The verb is outside the conformance
+scenarios (`OUTSIDE_CONFORMANCE` in `agentco/conformance.py`), as shared memory is outside the 1.0
+wire promise; `tests/test_outbox_memory.py` covers it end to end.
+
 The reserved list is empty today and stays as the mechanism: a line using a
 still-reserved verb gets a refusal that says "not yet", distinct from the
 refusal an unrecognised verb gets, which says "never through this path".
@@ -225,11 +264,11 @@ Every verb the hub could otherwise act on twice passes its own `line_id` as the
 idempotency key (`idempotencyKey` on the wire) so that a repeat costs nothing: the
 registry recognizes it and returns the recorded outcome instead of acting again.
 That is `claim_scope`, `snapshot`, `work_report`, `attest`, `adjudicate`,
-`sop_revise` and `sop_activate`; `release_scope` is idempotent by state (a second
+`sop_revise`, `sop_activate` and `memory_create`; `release_scope` is idempotent by state (a second
 release answers `duplicate`). A key is scoped to the actor that sent it. For
 `claim_scope` and `snapshot` the key commits in the same transaction as the write;
-for the SOP verbs it is recorded right after, which narrows the window without
-closing it across a file-backed SOP store.
+for the SOP verbs and `memory_create` it is recorded right after, which narrows the window without
+closing it across a file-backed SOP or memory store.
 
 The alternative — truncate first, publish second — was rejected because it
 loses the write outright on the same crash: the line is gone from the outbox
